@@ -127,6 +127,69 @@ def test_retention_second_run_reports_growth(session, tmp_path) -> None:
     assert runs[1].growth_pct == second["growth_pct"]
 
 
+def test_two_real_retention_passes_page_once_at_capacity(session, tmp_path, monkeypatch) -> None:
+    """The end-to-end retention path pages once when a growing lake reaches a
+    tiny configured cap, and records a red lake_budget health row."""
+    settings = _settings(
+        tmp_path,
+        archive_lake_max_bytes=1,
+        retention_budget_alert_days=14.0,
+        retention_budget_alert_cooldown_hours=24.0,
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "ops.retention.notify_lake_budget",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    _seed_evidence(session, count=2, days_ago=11.0, batch="first")
+    first = run_retention(session, decision_ts=DECISION_TS, settings=settings)
+    session.flush()
+    assert first["status"] == "ok"
+
+    _seed_evidence(session, count=2, days_ago=10.0, batch="second")
+    second = run_retention(
+        session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings
+    )
+    session.flush()
+
+    assert second["status"] == "ok"
+    assert second["lake_budget"]["state"] == "red"
+    assert second["lake_budget"]["days_to_full"] == 0.0
+    assert second["lake_budget"]["pushed"] is True
+    assert len(calls) == 1
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "lake_budget")
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    assert health is not None
+    assert health.state == "red"
+
+
+def test_retention_spreads_due_partitions_across_passes(session, tmp_path) -> None:
+    settings = _settings(tmp_path, retention_max_partitions_per_pass=1)
+    _seed_evidence(session, count=1, days_ago=11.0, batch="recent")
+    _seed_evidence(session, count=1, days_ago=77.0, batch="old")
+
+    first = run_retention(session, decision_ts=DECISION_TS, settings=settings)
+    session.flush()
+    assert first["status"] == "ok"
+    assert first["due_partitions"] == 1
+    assert first["due_partitions_remaining"] == 1
+    assert first["compacted"] == 1
+
+    second = run_retention(
+        session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings
+    )
+    session.flush()
+    assert second["status"] == "ok"
+    assert second["due_partitions"] == 1
+    assert second["due_partitions_remaining"] == 0
+    assert second["compacted"] == 1
+
+
 def test_retention_disabled_skips(session, tmp_path) -> None:
     settings = _settings(tmp_path, retention_autopilot_enabled=False)
     result = run_retention(session, decision_ts=DECISION_TS, settings=settings)
@@ -164,6 +227,41 @@ def test_retention_failure_records_red_health(session, tmp_path, monkeypatch) ->
     assert health is not None
     assert health.state == "red"
     assert health.error_count == 1
+
+
+def test_retention_compaction_invalidates_lake_cache(
+    session, tmp_path, monkeypatch
+) -> None:
+    """A retention pass that compacts new evidence clears the
+    LakeFeatureFactory (asset, hour) cache so long-lived processes don't serve
+    stale reconstructions; a pass with nothing due keeps the cache warm."""
+    from ops import retention
+
+    _seed_evidence(session, count=3, days_ago=11.0)
+    settings = _settings(tmp_path)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        retention.LakeFeatureFactory,
+        "clear_cache",
+        classmethod(lambda cls: calls.__setitem__("n", calls["n"] + 1)),
+    )
+
+    # First pass: the aged evidence is due, so run_archive compacts it into the
+    # lake -> the cached reconstructions are stale and must be invalidated.
+    first = run_retention(session, decision_ts=DECISION_TS, settings=settings)
+    session.flush()
+    assert first["status"] == "ok"
+    assert first["compacted"] > 0
+    assert calls["n"] == 1
+
+    # Second pass immediately after: nothing new is due, zero compaction -> the
+    # cache stays warm (no invalidation).
+    second = run_retention(
+        session, decision_ts=DECISION_TS + timedelta(hours=1), settings=settings
+    )
+    session.flush()
+    assert second["compacted"] == 0
+    assert calls["n"] == 1
 
 
 def test_check_lake_budget_fires_when_horizon_within_alert_days(
@@ -325,6 +423,41 @@ def test_check_lake_freshness_records_yellow_when_stale(session, tmp_path) -> No
     assert health is not None
     assert health.state == "yellow"
     assert "lake stale" in (health.message or "")
+
+
+def test_check_lake_freshness_escalates_after_stale_cycles(
+    session, tmp_path, monkeypatch
+) -> None:
+    settings = _settings(
+        tmp_path,
+        retention_stale_warning_after_cycles=3,
+        retention_stale_warning_cooldown_hours=24.0,
+    )
+    session.add(_run(DECISION_TS, 1024))
+    session.flush()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "ops.retention.notify_lake_stale",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+    out = check_lake_freshness(
+        session,
+        now=DECISION_TS + timedelta(hours=73),
+        settings=settings,
+    )
+    session.flush()
+    assert out["warning_pushed"] is True
+    assert out["stale_hours"] == 73.0
+    assert len(calls) == 1
+    assert calls[0]["stale_cycles"] == 3
+    warning = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "lake_stale_warning")
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    assert warning is not None
+    assert warning.state == "yellow"
 
 
 def test_check_lake_freshness_fresh_records_nothing(session, tmp_path) -> None:

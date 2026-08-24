@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
+
 from common.config import get_settings
 from common.enums import RiskBand
+from common.time import utc_now
+from storage import models
+from storage.repository import record_health
 
 
 @dataclass(frozen=True)
@@ -20,6 +25,33 @@ def _feature(features: dict[str, float], name: str, default: float = 0.0) -> flo
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def mask_unreliable_forecast(
+    session, features: dict[str, float]
+) -> tuple[dict[str, float], bool]:
+    """Remove the collapse forecast while calibration bias is red."""
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(
+            models.SystemHealth.component == "forecast_calibration",
+        )
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    red = health is not None and health.state == "red"
+    if not red:
+        return features, False
+    masked = dict(features)
+    masked.pop("collapse_probability_24h", None)
+    record_health(
+        session,
+        component="risk_forecast_fallback",
+        state="yellow",
+        message="collapse_probability_24h masked while forecast_calibration is red",
+        ts=utc_now(),
+    )
+    return masked, True
 
 
 def assess_risk(features: dict[str, float]) -> RiskAssessment:

@@ -232,13 +232,23 @@ same first-wins dedup as ingestion) and feeds the *shared*
 identical, enforced by the parity test in `tests/test_lake_features.py`. The lake
 path also reconstructs the on-chain features from the archived RPC evidence:
 `holder_count` / `holder_growth` / `top_holder_concentration` from the
-`solana_rpc` holder-snapshot payloads (`largest_accounts` + `supply`, deduped per
-hour/wallet like `insert_holder_once`) and `suspicious_contract_flags` as the
-count of evidence-backed `low_liquidity` scans (`reserve_in_usd` below
-`min_discovery_liquidity_usd`). Reconstructions are cached per `(asset, hour)`
+`chain_rpc` holder-snapshot payloads — `solana_rpc` for Solana and the
+`evm_holders` source for Base/Ethereum (free public Blockscout v2 instances,
+no key), both shaped `largest_accounts` + `supply` and deduped per
+hour/wallet like `insert_holder_once`, so the reconstruction is
+chain-agnostic — and `suspicious_contract_flags` as the
+FULL count of evidence-backed contract flags: `low_liquidity` scans
+(`reserve_in_usd` below `min_discovery_liquidity_usd`) plus the contract
+analyzer's findings (honeypot patterns, mint authority, ownership not
+renounced, rug deployer) persisted as `contract_analysis` evidence — the
+same `ContractFlag` rows the SQL path counts. Reconstructions are cached per `(asset, hour)`
 at the class level (bounded LRU, shared across factory instances), so repeated
 backtest steps over the same window never re-query DuckDB; sub-hour decision
-times bypass the cache and `LakeFeatureFactory.clear_cache()` drops it. A
+times bypass the cache and `LakeFeatureFactory.clear_cache()` drops it. All
+assets are reconstructed **in one pass** (`build_for_assets` / `persist_for_assets`
+list and download the lake once and query every asset in a single DuckDB
+session via a `LIST_CONTAINS` asset filter), so a full-lake job is O(1)
+downloads rather than O(assets). A
 **daily parity CI job** (`ops/parity.py`, `PARITY_FREQUENCY_HOURS`) runs the
 same comparison against the full production lake at a decision time provably
 inside the archived window and pages any divergence via ntfy

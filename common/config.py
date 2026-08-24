@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     black_min_liquidity_usd: float = 15_000
     solana_holder_scan_limit: int = 1
     solana_holder_rpc_pause_seconds: float = 0.75
+    # EVM holder snapshots via free public Blockscout v2 instances (~3 req/min
+    # unauthenticated), so the per-chain scan limit stays small and the pause
+    # keeps the worker under the rate limit.
+    evm_holder_scan_limit: int = 2
+    evm_holder_rpc_pause_seconds: float = 20.0
 
     # radar: t0 ignition detection
     radar_ignition_pool_age_hours: int = 24
@@ -170,11 +175,17 @@ class Settings(BaseSettings):
     # retention autopilot: scheduled compaction + pruning + lake-growth report
     retention_autopilot_enabled: bool = True
     retention_cadence_hours: float = 24.0
+    # Bound partition fan-out per pass to smooth compaction I/O.
+    retention_max_partitions_per_pass: int = 1
     # retention budget alert: warn via ntfy when the projected lake growth
     # would fill ARCHIVE_LAKE_MAX_BYTES within this many days, then re-warn
     # at most once per cooldown window.
     retention_budget_alert_days: float = 14.0
     retention_budget_alert_cooldown_hours: float = 24.0
+    retention_stale_warning_after_cycles: int = 3
+    retention_stale_warning_cooldown_hours: float = 24.0
+    retention_backlog_warning_threshold: int = 2
+    retention_backlog_warning_cooldown_hours: float = 24.0
 
     # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
     # against the live SQL path over the archived evidence, paging a mismatch
@@ -190,6 +201,9 @@ class Settings(BaseSettings):
     parity_max_assets: int = 0  # 0 = compare every asset
     parity_alert_threshold: int = 1  # page when mismatches >= this
     parity_alert_cooldown_hours: float = 24.0
+    # How long per-mismatch divergence history is kept for review before each
+    # parity run prunes it (bounded history, not just the latest ntfy page).
+    parity_history_retention_days: float = 90.0
 
     # catalyst timetable
     catalyst_alert_hours: float = 72.0
@@ -228,6 +242,28 @@ class Settings(BaseSettings):
     forecast_drift_max_cal_error: float = 0.25
     forecast_drift_precision_fraction: float = 0.6
     forecast_drift_severe_precision: float = 0.2
+    # Calibration-bias guard: when the real-only test calibration error
+    # exceeds the blended (dense-label-inclusive) one by this much, emit a
+    # notifier warning — dense-label interpolation may be masking true model
+    # performance on observed outcomes.
+    forecast_cal_gap_threshold: float = 0.10
+    forecast_cal_gap_min_samples: float = 5
+    forecast_cal_gap_cooldown_hours: float = 24
+    # Gate forecast *usage* on the real-only test readout (not the blended one,
+    # which dense-label interpolation can inflate): when the trained model is
+    # untrustworthy on real observed samples — too few real test samples, or
+    # real-only calibration error above a ceiling — don't emit production
+    # forecasts and degrade to yellow health until the real-only numbers
+    # recover. Off by default: enabling it can stop forecast production, so
+    # turn it on deliberately.
+    forecast_gate_on_real_metrics: bool = False
+    forecast_gate_min_real_samples: float = 5
+    forecast_gate_max_real_cal_error: float = 0.25
+
+    # Alert quality guard: quiet a family after enough operator ratings show it
+    # is mostly noise. An explicit re-enable control overrides the quieting.
+    alert_quality_noise_floor: float = 0.25
+    alert_quality_min_ratings: int = 5
 
     model_version: str = "mvp-rules-v1"
     fingerprint_model_version: str = "cooccurrence-v1"

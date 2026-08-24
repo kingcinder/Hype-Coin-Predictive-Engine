@@ -10,8 +10,23 @@ from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.time import ensure_utc, hours_between, utc_now
+from features.lake import LakeFeatureFactory
 from scoring.engine import ScoringEngine
 from storage import models
+
+# Blended + real-only forecast metrics surfaced from the most recent forecast
+# training run onto each scoring backtest run, so walk-forward output reports
+# both readings. The real-only names are what dense-label interpolation could
+# otherwise mask, so exposing them alongside the scoring metrics keeps the
+# operator honest about whether the forecast layer works on observed outcomes.
+_FORECAST_METRIC_NAMES = (
+    "forecast.precision_at_10",
+    "forecast.calibration_error",
+    "forecast.precision_at_10_real",
+    "forecast.calibration_error_real",
+    "forecast.real_test_samples",
+    "forecast.test_samples",
+)
 
 
 @dataclass(frozen=True)
@@ -114,6 +129,29 @@ def _git_sha() -> str | None:
         return None
 
 
+def _latest_forecast_metrics(session: Session) -> dict[str, float]:
+    """The most recent forecast training run's blended + real-only metrics."""
+    run = session.scalar(
+        select(models.BacktestRun)
+        .where(
+            models.BacktestRun.model_version == get_settings().forecast_model_version,
+            models.BacktestRun.status == "completed",
+        )
+        .order_by(models.BacktestRun.started_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return {}
+    rows = session.execute(
+        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value)
+        .where(
+            models.BacktestResult.run_id == run.id,
+            models.BacktestResult.metric_name.in_(_FORECAST_METRIC_NAMES),
+        )
+    ).all()
+    return {str(name): float(value) for name, value in rows}
+
+
 class BacktestRunner:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -149,6 +187,12 @@ class BacktestRunner:
         useful = 0
         scam_avoided = 0
         total_decisions = 0
+        # Snapshot the lake reconstruction cache before the walk-forward so the
+        # run can report how many DuckDB queries the (asset, hour) cache saved
+        # (replay runs over a warm cache hit instead of re-querying DuckDB).
+        lake_cache_before = (
+            LakeFeatureFactory.cache_stats() if config.feature_source == "lake" else None
+        )
 
         for decision_ts in hours_between(start, end):
             asset_ids = [
@@ -237,7 +281,27 @@ class BacktestRunner:
             "alerts_evaluated": float(selected),
             "decision_hours": float(total_decisions),
         }
+        if lake_cache_before is not None:
+            after = LakeFeatureFactory.cache_stats()
+            lake_cache = {key: after[key] - lake_cache_before[key] for key in after}
+            metrics["lake_cache.hits"] = float(lake_cache.get("hits", 0))
+            metrics["lake_cache.misses"] = float(lake_cache.get("misses", 0))
+            metrics["lake_cache.saved_queries"] = float(lake_cache.get("saved_queries", 0))
         for name, value in metrics.items():
+            session.add(
+                models.BacktestResult(
+                    run_id=run.id,
+                    metric_name=name,
+                    metric_value=float(value),
+                    chain_slug=None,
+                    details_json={},
+                )
+            )
+        # Surface the latest forecast training's blended + real-only metrics on
+        # this run too, so walk-forward output reports both readings (and the
+        # real-only ones that dense-label interpolation could mask) next to the
+        # scoring metrics.
+        for name, value in _latest_forecast_metrics(session).items():
             session.add(
                 models.BacktestResult(
                     run_id=run.id,

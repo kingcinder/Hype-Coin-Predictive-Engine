@@ -10,6 +10,7 @@ from common.enums import AlertState, AlertType, RiskBand
 from common.time import utc_now
 from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
+from risk_engine.rules import mask_unreliable_forecast
 from scoring.formulas import compute_scores
 from storage import models
 
@@ -60,6 +61,7 @@ class ScoringEngine:
         for asset_id, features in feature_map.items():
             raw = {name: feature.value for name, feature in features.items()}
             missing = [name for name, feature in features.items() if feature.missing]
+            raw, masked_forecast = mask_unreliable_forecast(session, raw)
             result = compute_scores(
                 raw,
                 missing,
@@ -215,6 +217,9 @@ class ScoringEngine:
             )
         )
         if existing:
+            return
+        from ops.alert_quality import alert_generation_allowed
+        if not alert_generation_allowed(session, alert_type.value, self.settings):
             return
         session.add(
             models.Alert(

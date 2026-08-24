@@ -43,8 +43,9 @@ from sqlalchemy.orm import Session
 from common.config import Settings, get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from features.lake import LakeFeatureFactory
 from ops.archive import due_partitions, run_archive
-from ops.notifier import notify_lake_budget
+from ops.notifier import notify_lake_backlog, notify_lake_budget, notify_lake_stale
 from storage import models
 from storage.repository import record_health
 
@@ -95,7 +96,16 @@ def run_retention(
         # has aged past ARCHIVE_COMPACT_AFTER_HOURS. A pass with nothing due
         # does zero compaction work (only pruning runs). The ingestion scan no
         # longer touches the archive — this cadence fully owns compaction.
-        due = due_partitions(session, decision_ts, settings)
+        all_due = due_partitions(session, decision_ts, settings)
+        max_partitions = max(1, settings.retention_max_partitions_per_pass)
+        completed_passes = int(
+            session.scalar(select(func.count()).select_from(models.RetentionRun)) or 0
+        )
+        offset = completed_passes % len(all_due) if all_due else 0
+        due = [
+            all_due[(offset + index) % len(all_due)]
+            for index in range(min(max_partitions, len(all_due)))
+        ] if all_due else []
         archive_result = run_archive(
             session,
             decision_ts=decision_ts,
@@ -104,6 +114,8 @@ def run_retention(
         )
         if "error" in archive_result:
             raise RuntimeError(str(archive_result["error"]))
+        if int(archive_result.get("compacted", 0)) > 0:
+            LakeFeatureFactory.clear_cache()
         report = lake_report(session)
         previous = _latest_run(session)
         growth_bytes = report["byte_size"] - (previous.byte_size if previous else 0)
@@ -134,7 +146,7 @@ def run_retention(
                 f"bytes={run.byte_size} growth_bytes={run.growth_bytes} "
                 f"growth_pct={run.growth_pct if run.growth_pct is not None else 0.0}% "
                 f"compacted={run.compacted} pruned={run.pruned} "
-                f"due_partitions={len(due)}"
+                f"due_partitions={len(due)} due_remaining={max(0, len(all_due) - len(due))}"
             ),
         )
         # Retention budget alert: warn via ntfy when the projected lake growth
@@ -147,6 +159,46 @@ def run_retention(
         budget = check_lake_budget(
             session, history=history, now=decision_ts, settings=settings
         )
+        backlog_cutoff = decision_ts - timedelta(hours=settings.archive_compact_after_hours)
+        backlog_rows = session.scalar(
+            select(func.count()).select_from(models.RawEvidenceItem).where(
+                models.RawEvidenceItem.observed_at < backlog_cutoff,
+                models.RawEvidenceItem.archived_at.is_(None),
+            )
+        ) or 0
+        backlog_pushed = False
+        if backlog_rows >= settings.retention_backlog_warning_threshold:
+            previous_backlog = session.scalar(
+                select(models.SystemHealth)
+                .where(models.SystemHealth.component == "lake_backlog")
+                .order_by(models.SystemHealth.ts.desc())
+                .limit(1)
+            )
+            previous_count = 0
+            previous_message = (
+                previous_backlog.message if previous_backlog and previous_backlog.message else ""
+            )
+            if "backlog=" in previous_message:
+                previous_count = int(previous_message.split("backlog=")[1].split()[0])
+            warning_due = (
+                previous_backlog is None
+                or decision_ts - ensure_utc(previous_backlog.ts)
+                >= timedelta(hours=settings.retention_backlog_warning_cooldown_hours)
+            )
+            if backlog_rows > previous_count and warning_due:
+                backlog_pushed = notify_lake_backlog(
+                    backlog_rows, settings.archive_batch_size, settings=settings
+                )
+            record_health(
+                session,
+                component="lake_backlog",
+                state="yellow",
+                message=(
+                    f"backlog={backlog_rows} batch_size={settings.archive_batch_size} "
+                    f"pushed={backlog_pushed}"
+                ),
+                ts=decision_ts,
+            )
         return {
             "status": "ok",
             "partitions": run.partitions,
@@ -158,7 +210,10 @@ def run_retention(
             "pruned": run.pruned,
             "duration_sec": run.duration_sec,
             "due_partitions": len(due),
+            "due_partitions_remaining": max(0, len(all_due) - len(due)),
             "lake_budget": budget,
+            "archive_backlog": backlog_rows,
+            "backlog_pushed": backlog_pushed,
         }
     except Exception as exc:  # noqa: BLE001 - retention failure must never kill the caller.
         record_health(
@@ -345,6 +400,25 @@ def check_lake_budget(
     }
 
 
+def retention_backlog_depth(
+    session: Session,
+    *,
+    now: datetime,
+    settings: Settings,
+) -> int:
+    """Count aged raw rows still waiting for archive compaction."""
+    cutoff = ensure_utc(now) - timedelta(hours=settings.archive_compact_after_hours)
+    return int(
+        session.scalar(
+            select(func.count()).select_from(models.RawEvidenceItem).where(
+                models.RawEvidenceItem.observed_at < cutoff,
+                models.RawEvidenceItem.archived_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
 def check_lake_freshness(
     session: Session,
     *,
@@ -366,22 +440,66 @@ def check_lake_freshness(
     if not settings.retention_autopilot_enabled or not settings.archive_enabled:
         return {"fresh": True, "recorded": False}
     now = ensure_utc(now or utc_now())
+    backlog_rows = retention_backlog_depth(session, now=now, settings=settings)
+    record_health(
+        session,
+        component="lake_backlog",
+        state="yellow" if backlog_rows else "ok",
+        message=(
+            f"backlog={backlog_rows} batch_size={settings.archive_batch_size} "
+            f"cutoff_hours={settings.archive_compact_after_hours}"
+        ),
+        ts=now,
+    )
     latest = _latest_run(session)
     if latest is None:
         return {"fresh": True, "recorded": False}
     if not retention_due(session, now=now, settings=settings):
         return {"fresh": True, "recorded": False}
     stale_hours = (now - ensure_utc(latest.ts)).total_seconds() / 3600.0
-    record_health(
-        session,
-        component="lake",
-        state="yellow",
-        message=(
-            f"lake stale: last retention pass {stale_hours:.1f}h ago "
-            f"(cadence {settings.retention_cadence_hours}h)"
-        ),
+    message = (
+        f"lake stale: last retention pass {stale_hours:.1f}h ago "
+        f"(cadence {settings.retention_cadence_hours}h)"
     )
-    return {"fresh": False, "recorded": True, "stale_hours": round(stale_hours, 2)}
+    record_health(session, component="lake", state="yellow", message=message)
+    stale_cycles = int(stale_hours // settings.retention_cadence_hours)
+    warning_pushed = False
+    if stale_cycles >= settings.retention_stale_warning_after_cycles:
+        last_warning = session.scalar(
+            select(models.SystemHealth)
+            .where(models.SystemHealth.component == "lake_stale_warning")
+            .order_by(models.SystemHealth.ts.desc())
+            .limit(1)
+        )
+        warning_due = (
+            last_warning is None
+            or now - ensure_utc(last_warning.ts)
+            >= timedelta(hours=settings.retention_stale_warning_cooldown_hours)
+        )
+        if warning_due:
+            warning_pushed = notify_lake_stale(
+                stale_hours=stale_hours,
+                cadence_hours=settings.retention_cadence_hours,
+                stale_cycles=stale_cycles,
+                settings=settings,
+            )
+            record_health(
+                session,
+                component="lake_stale_warning",
+                state="yellow",
+                message=(
+                    f"stale lake warning: {stale_cycles} cycles; "
+                    f"pushed={warning_pushed}"
+                ),
+            )
+    result: dict[str, object] = {
+        "fresh": False,
+        "recorded": True,
+        "stale_hours": round(stale_hours, 2),
+    }
+    if stale_cycles >= settings.retention_stale_warning_after_cycles:
+        result["warning_pushed"] = warning_pushed
+    return result
 
 
 def maybe_run_retention() -> dict[str, object]:

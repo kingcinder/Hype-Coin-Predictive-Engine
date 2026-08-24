@@ -1,12 +1,13 @@
 # Serpent Circle — retention autopilot service unit.
 #
-# Runs one retention pass (Parquet compaction + pruning + lake-growth report
-# into Feed Health). The timer (serpent-retention.timer) fires it on the
-# configured cadence; this unit never runs on its own.
+# Checks whether a retention pass is due, then runs one pass (Parquet
+# compaction + pruning + lake-growth report into Feed Health). The timer
+# (serpent-retention.timer) may fire more often than the configured cadence;
+# --check-due exits cleanly and logs when there is nothing to do.
 #
 # Adjust the paths to your checkout and venv:
 #   WorkingDirectory=/opt/serpent
-#   ExecStart=/opt/serpent/.venv/bin/python -m ops.retention --once
+#   ExecStart=/bin/sh -c '/opt/serpent/.venv/bin/python -m ops.retention --check-due && exec /opt/serpent/.venv/bin/python -m ops.retention --once || rc=$$?; if [ "$${rc:-0}" -eq 1 ]; then echo "retention pass not due; exiting cleanly"; exit 0; fi; exit "$${rc:-0}"'
 #
 # Install:
 #   sudo cp deploy/systemd/serpent-retention.{service,timer} /etc/systemd/system/
@@ -21,7 +22,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/serpent
-ExecStart=/opt/serpent/.venv/bin/python -m ops.retention --once
+ExecStart=/bin/sh -c '/opt/serpent/.venv/bin/python -m ops.retention --check-due && exec /opt/serpent/.venv/bin/python -m ops.retention --once || rc=$$?; if [ "$${rc:-0}" -eq 1 ]; then echo "retention pass not due; exiting cleanly"; exit 0; fi; exit "$${rc:-0}"'
 # Read the project .env the same way the worker does.
 EnvironmentFile=-/opt/serpent/.env
 User=serpent

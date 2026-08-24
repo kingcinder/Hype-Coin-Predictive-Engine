@@ -399,8 +399,14 @@ def query_archive(
     with tempfile.TemporaryDirectory(prefix="serpent_archive_") as tmp:
         for index, key in enumerate(sorted(keys)):
             dest = Path(tmp) / f"{index:04d}.parquet"
-            store.download_to(key, dest)
+            try:
+                store.download_to(key, dest)
+            except Exception as exc:  # noqa: BLE001 - one unreadable object must not hide the lake.
+                log.warning("archive_object_unreadable", object_key=key, error=str(exc))
+                continue
             files.append(str(dest))
+        if not files:
+            return []
         con = duckdb.connect()
         try:
             con.execute(

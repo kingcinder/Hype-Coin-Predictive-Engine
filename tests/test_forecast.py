@@ -3,14 +3,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
+import pytest
 from sqlalchemy import func, select
 
 from common.config import Settings
 from forecast.engine import (
+    CALIBRATION_GAP_HEALTH_COMPONENT,
     FORECAST_FEATURE_NAMES,
     ForecastEngine,
     Sample,
     _widen_probability,
+    check_calibration_gap,
     forecast_due,
 )
 from forecast.hazard import DiscreteHazardModel
@@ -18,6 +21,7 @@ from storage import models
 from storage.repository import (
     insert_liquidity_snapshot_once,
     insert_market_snapshot_once,
+    record_health,
     upsert_asset,
     upsert_feature,
     upsert_pool_and_pair,
@@ -594,3 +598,196 @@ def test_forecast_engine_degrades_with_insufficient_data(session) -> None:
     session.commit()
     assert result["status"] == "insufficient_data"
     assert session.scalar(select(func.count()).select_from(models.Forecast)) == 0
+
+
+# ── calibration-gap guard ─────────────────────────────────────────────────
+
+
+def _gap_settings(**overrides: object) -> Settings:
+    return Settings(
+        forecast_cal_gap_min_samples=1,
+        forecast_cal_gap_threshold=0.10,
+        forecast_cal_gap_cooldown_hours=24,
+        **overrides,
+    )
+
+
+def _latest_gap_row(session) -> models.SystemHealth | None:
+    return session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == CALIBRATION_GAP_HEALTH_COMPONENT)
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+
+
+def test_calibration_gap_warns_when_over_threshold(session, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_notify(gap, blended, real, samples, *, threshold, settings=None):
+        calls.append(
+            {"gap": gap, "blended": blended, "real": real, "threshold": threshold}
+        )
+        return True
+
+    monkeypatch.setattr("ops.notifier.notify_calibration_bias", fake_notify)
+    result = check_calibration_gap(
+        session,
+        blended_cal=0.2,
+        real_cal=0.4,
+        real_test_samples=20,
+        settings=_gap_settings(),
+    )
+    session.commit()
+    assert result["status"] == "red"
+    assert result["pushed"] is True
+    assert result["gap"] == pytest.approx(0.2)
+    assert len(calls) == 1
+    assert calls[0]["threshold"] == 0.10
+    row = _latest_gap_row(session)
+    assert row is not None and row.state == "red"
+
+
+def test_calibration_gap_quiet_within_threshold(session, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "ops.notifier.notify_calibration_bias",
+        lambda *a, **k: calls.append(1) or True,
+    )
+    result = check_calibration_gap(
+        session,
+        blended_cal=0.2,
+        real_cal=0.25,
+        real_test_samples=20,
+        settings=_gap_settings(),
+    )
+    session.commit()
+    assert result["status"] == "ok"
+    assert result["gap"] == pytest.approx(0.05)
+    assert calls == []
+    row = _latest_gap_row(session)
+    assert row is not None and row.state == "ok"
+
+
+def test_calibration_gap_skips_on_few_real_samples(session, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "ops.notifier.notify_calibration_bias",
+        lambda *a, **k: calls.append(1) or True,
+    )
+    result = check_calibration_gap(
+        session,
+        blended_cal=0.2,
+        real_cal=0.9,
+        real_test_samples=0,
+        settings=Settings(forecast_cal_gap_min_samples=5),
+    )
+    session.commit()
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_real_samples"
+    assert calls == []
+    row = _latest_gap_row(session)
+    assert row is not None and row.state == "ok"
+
+
+def test_calibration_gap_cooldown_suppresses_repeat(session, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "ops.notifier.notify_calibration_bias",
+        lambda *a, **k: calls.append(1) or True,
+    )
+    settings = _gap_settings()
+    # An old red row (older than the cooldown) so the first check is due.
+    record_health(
+        session,
+        component=CALIBRATION_GAP_HEALTH_COMPONENT,
+        state="red",
+        message="old",
+        ts=datetime.now(UTC) - timedelta(hours=48),
+    )
+    session.commit()
+    first = check_calibration_gap(
+        session,
+        blended_cal=0.2,
+        real_cal=0.4,
+        real_test_samples=20,
+        settings=settings,
+    )
+    assert first["status"] == "red"
+    assert first["pushed"] is True
+    assert first["cooldown"] is False
+    # The fresh red row just written suppresses the repeat within the window.
+    second = check_calibration_gap(
+        session,
+        blended_cal=0.2,
+        real_cal=0.4,
+        real_test_samples=20,
+        settings=settings,
+    )
+    session.commit()
+    assert second["status"] == "red"
+    assert second["pushed"] is False
+    assert second["cooldown"] is True
+    assert len(calls) == 1
+
+
+# ── real-only usage gate ──────────────────────────────────────────────────
+
+
+def test_real_metrics_gate_disabled_by_default() -> None:
+    engine = ForecastEngine()
+    engine._last_metrics = {"real_test_samples": 0.0, "calibration_error_real": 0.0}
+    assert engine._real_metrics_untrustworthy() is False
+
+
+def test_real_metrics_gate_detects_untrustworthy_readout() -> None:
+    engine = ForecastEngine()
+    engine.settings.forecast_gate_on_real_metrics = True
+    # Too few real observed test samples trips the gate.
+    engine._last_metrics = {"real_test_samples": 0.0, "calibration_error_real": 0.0}
+    assert engine._real_metrics_untrustworthy() is True
+    # Real-only calibration error above the cap trips the gate even with
+    # enough samples.
+    engine._last_metrics = {
+        "real_test_samples": 20.0,
+        "calibration_error_real": 0.6,
+    }
+    assert engine._real_metrics_untrustworthy() is True
+    # Plenty of samples and a healthy real-only calibration -> trusted.
+    engine._last_metrics = {
+        "real_test_samples": 20.0,
+        "calibration_error_real": 0.1,
+    }
+    assert engine._real_metrics_untrustworthy() is False
+
+
+def test_forecast_run_gates_when_real_metrics_untrustworthy(session, monkeypatch) -> None:
+    """When the gate is enabled and the real-only readout is untrustworthy, the
+    engine emits no forecasts and degrades to yellow health instead."""
+    for symbol, prices in {
+        "FLAT": [1.0] * 49,
+        "DROP": [1.0] * 30 + [0.2] * 19,
+        "DROP2": [1.0] * 30 + [0.2] * 19,
+        "LATE": [1.0] * 30 + [2.0] * 19,
+    }.items():
+        asset = _seed_arc(session, symbol=symbol, prices=prices)
+        for hour in range(0, 25):
+            _seed_features(session, asset, hour, crash=symbol in ("DROP", "DROP2"))
+    session.commit()
+
+    engine = ForecastEngine()
+    engine.settings.forecast_min_samples = 5
+    engine.settings.forecast_gate_on_real_metrics = True
+    monkeypatch.setattr(engine, "_real_metrics_untrustworthy", lambda: True)
+    result = engine.run(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    assert result["status"] == "gated"
+    assert {"real_test_samples", "calibration_error", "calibration_error_real",
+            "precision_at_10_real"} <= set(result["gate"])
+    assert session.scalar(select(func.count()).select_from(models.Forecast)) == 0
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "forecast")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert health is not None and health.state == "yellow"

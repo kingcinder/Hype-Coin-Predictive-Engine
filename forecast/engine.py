@@ -172,6 +172,99 @@ def maybe_run_forecast() -> dict[str, Any]:
             return {"status": "error", "error": str(exc)}
 
 
+# Health component used both as the run marker for the calibration-gap check
+# and as the alert-cooldown marker (the last red row).
+CALIBRATION_GAP_HEALTH_COMPONENT = "forecast_calibration"
+
+
+def _cal_gap_push_due(
+    session: Session, now: datetime, cooldown_hours: float
+) -> bool:
+    """True when the last red calibration-gap row is older than the cooldown
+    (or there is none), so a persistently biased model cannot spam the same
+    warning every training pass."""
+    last_red = session.scalar(
+        select(models.SystemHealth)
+        .where(
+            models.SystemHealth.component == CALIBRATION_GAP_HEALTH_COMPONENT,
+            models.SystemHealth.state == "red",
+        )
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    if last_red is None or last_red.ts is None:
+        return True
+    return now - ensure_utc(last_red.ts) >= timedelta(hours=cooldown_hours)
+
+
+def check_calibration_gap(
+    session: Session,
+    *,
+    blended_cal: float,
+    real_cal: float,
+    real_test_samples: float,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Compare real-only vs blended test calibration error and warn on bias.
+
+    The gap is ``real_cal - blended_cal``: a positive value past the threshold
+    means interpolated (dense) labels in the test set look better calibrated
+    than the model actually is on observed outcomes — the sign of growing
+    label-interpolation bias. Records a ``component:forecast_calibration``
+    health row every pass (``ok`` green or ``red`` when over the threshold) so
+    Feed Health surfaces the state, and pushes a ntfy warning at most once per
+    cooldown window (deduped against the last red row, evaluated *before* this
+    pass writes its own row). Called from the training path after metrics are
+    computed, so every driving loop (scheduler, worker, ``python -m engine``)
+    gets the check for free.
+    """
+    settings = settings or get_settings()
+    gap = real_cal - blended_cal
+    if real_test_samples < settings.forecast_cal_gap_min_samples:
+        record_health(
+            session,
+            component=CALIBRATION_GAP_HEALTH_COMPONENT,
+            state="ok",
+            message=(
+                f"calibration gap n/a: {real_test_samples:.0f} real test samples "
+                f"< min {settings.forecast_cal_gap_min_samples:.0f}"
+            ),
+        )
+        return {"status": "skipped", "reason": "insufficient_real_samples", "gap": gap}
+    over = gap >= settings.forecast_cal_gap_threshold
+    state = "red" if over else "ok"
+    # Evaluate the cooldown gate BEFORE writing this pass's health row, or the
+    # just-written red row would suppress its own push (the parity bug).
+    push_due = over and _cal_gap_push_due(
+        session, utc_now(), settings.forecast_cal_gap_cooldown_hours
+    )
+    record_health(
+        session,
+        component=CALIBRATION_GAP_HEALTH_COMPONENT,
+        state=state,
+        message=(
+            f"gap={gap:.3f} (real-only cal {real_cal:.3f} vs blended "
+            f"{blended_cal:.3f}, threshold {settings.forecast_cal_gap_threshold:.3f})"
+        ),
+        error_count=1 if over else 0,
+    )
+    if not over:
+        return {"status": "ok", "gap": gap}
+    pushed = False
+    if push_due:
+        from ops.notifier import notify_calibration_bias
+
+        pushed = notify_calibration_bias(
+            gap,
+            blended_cal,
+            real_cal,
+            real_test_samples,
+            threshold=settings.forecast_cal_gap_threshold,
+            settings=settings,
+        )
+    return {"status": "red", "gap": gap, "pushed": pushed, "cooldown": not push_due}
+
+
 @dataclass(frozen=True)
 class Sample:
     asset_id: int
@@ -271,6 +364,32 @@ class ForecastEngine:
                 message="train/test split too small; model not trained",
             )
             return {"status": "insufficient_data", "samples": len(samples)}
+        # Real-only readout gate: when enabled, don't trust the *blended*
+        # metrics (which dense-label interpolation can inflate) and instead
+        # refuse to emit production forecasts unless the model is trustworthy
+        # on real observed samples. Degrades to yellow health so the operator
+        # sees the reason, and skips prediction entirely.
+        if self._real_metrics_untrustworthy():
+            readout = self._real_metrics_readout()
+            record_health(
+                session,
+                component="forecast",
+                state="yellow",
+                message=(
+                    f"forecast gated on real-only metrics: "
+                    f"real_test_samples={readout['real_test_samples']:.0f} (< min "
+                    f"{self.settings.forecast_gate_min_real_samples:.0f}) or "
+                    f"real-only cal {readout['calibration_error_real']:.3f} > cap "
+                    f"{self.settings.forecast_gate_max_real_cal_error:.3f}"
+                ),
+            )
+            return {
+                "status": "gated",
+                "samples": len(samples),
+                "labels": label_counts,
+                "metrics": dict(self._last_metrics),
+                "gate": readout,
+            }
         predicted = self._predict(session, model, decision_ts)
         record_health(
             session,
@@ -278,12 +397,23 @@ class ForecastEngine:
             state="ok",
             message=f"{len(predicted)} forecasts, {len(samples)} labeled samples",
         )
+        # Calibration-bias guard: compare the real-only vs blended test
+        # calibration error and warn (via health + ntfy) when dense-label
+        # interpolation is widening the gap past the threshold.
+        cal_gap = check_calibration_gap(
+            session,
+            blended_cal=float(self._last_metrics.get("calibration_error", 0.0)),
+            real_cal=float(self._last_metrics.get("calibration_error_real", 0.0)),
+            real_test_samples=float(self._last_metrics.get("real_test_samples", 0.0)),
+            settings=self.settings,
+        )
         return {
             "status": "ok",
             "samples": len(samples),
             "forecasts": len(predicted),
             "labels": label_counts,
             "metrics": dict(self._last_metrics),
+            "calibration_gap": cal_gap,
         }
 
     # ------------------------------------------------------------------ dataset
@@ -933,6 +1063,35 @@ class ForecastEngine:
                     details_json={},
                 )
             )
+
+    def _real_metrics_readout(self) -> dict[str, float]:
+        """Real-only (and blended) values from the most recent training run."""
+        return {
+            "real_test_samples": float(self._last_metrics.get("real_test_samples", 0.0)),
+            "calibration_error": float(self._last_metrics.get("calibration_error", 0.0)),
+            "calibration_error_real": float(
+                self._last_metrics.get("calibration_error_real", 0.0)
+            ),
+            "precision_at_10_real": float(
+                self._last_metrics.get("precision_at_10_real", 0.0)
+            ),
+        }
+
+    def _real_metrics_untrustworthy(self) -> bool:
+        """True when the trained model should not be trusted to emit forecasts.
+
+        Uses the real-only test readout (observed labels), never the blended
+        one — dense-label interpolation can make the blended calibration look
+        better than the model actually is on real outcomes. Empty when the
+        gate is disabled, or when there are too few real observed test samples,
+        or when the real-only calibration error exceeds the configured cap.
+        """
+        if not self.settings.forecast_gate_on_real_metrics:
+            return False
+        readout = self._real_metrics_readout()
+        if readout["real_test_samples"] < self.settings.forecast_gate_min_real_samples:
+            return True
+        return readout["calibration_error_real"] > self.settings.forecast_gate_max_real_cal_error
 
     # ---------------------------------------------------------------- predict
 

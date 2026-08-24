@@ -155,6 +155,34 @@ class RetentionRun(Base):
     duration_sec: Mapped[float | None] = mapped_column(Float)
 
 
+class ParityMismatch(Base):
+    """One lake-vs-SQL divergence recorded by a parity run.
+
+    Point-in-time evidence for operators: the run timestamp, the comparison
+    decision hour, the asset, the feature, the SQL value, the lake value, and
+    which side (if either) was missing — so divergence *history* can be
+    reviewed instead of only the latest ntfy page.
+    """
+
+    __tablename__ = "parity_mismatches"
+    __table_args__ = (
+        Index("ix_parity_mismatch_run_ts", "run_ts"),
+        Index("ix_parity_mismatch_decision_ts", "decision_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decision_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id"))
+    symbol: Mapped[str | None] = mapped_column(String(64))
+    feature_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    sql_value: Mapped[float | None] = mapped_column(Float)
+    lake_value: Mapped[float | None] = mapped_column(Float)
+    sql_missing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lake_missing: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
 class RawEvidenceItem(Base):
     __tablename__ = "raw_evidence_items"
     __table_args__ = (
@@ -409,6 +437,17 @@ class ScoreExplanation(Base):
     changed_features: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class AlertTypeControl(Base):
+    __tablename__ = "alert_type_controls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    alert_type: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    reenabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class Alert(Base):
     __tablename__ = "alerts"
     __table_args__ = (Index("ix_alerts_created_at", "created_at"),)
@@ -427,6 +466,7 @@ class Alert(Base):
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ack_quality: Mapped[str | None] = mapped_column(String(32))
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NotificationDigest(Base):

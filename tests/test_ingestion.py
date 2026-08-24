@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 import ingestion.service as ingestion_service
-from ingestion.service import IngestionService
+from common.time import ensure_utc
+from ingestion.contract_analyzer import ContractAnalysis
+from ingestion.service import IngestionService, _analysis_findings
 from ops.archive import LocalArchiveStore
 from storage import models
+from storage.repository import (
+    get_or_create_chain,
+    upsert_asset,
+    upsert_pool_and_pair,
+)
 from tests.conftest import seed_market_asset, seed_reference
 
 
@@ -143,6 +151,211 @@ class _FakeStage:
         return []
 
 
+def test_analysis_findings_maps_analysis_to_flagged_findings() -> None:
+    """The deterministic findings list covers the analyzer's risk dimensions
+    (honeypot patterns, mint authority, pause function, ownership not
+    renounced, rug deployer) and stays empty for a clean analysis."""
+    assert _analysis_findings(ContractAnalysis()) == []
+
+    findings = _analysis_findings(
+        ContractAnalysis(
+            suspicious_flags=5,
+            reasons=[
+                "Contract contains allowance-based sell block",
+                "Contract has mint function (supply can be inflated)",
+            ],
+            has_mint_function=True,
+            has_pause_function=True,
+            ownership_renounced=False,
+            deployer_known_rug=True,
+        )
+    )
+    assert findings == [
+        {"flag_type": "honeypot", "severity": "high"},
+        {"flag_type": "mint_authority", "severity": "warning"},
+        {"flag_type": "pause_function", "severity": "warning"},
+        {"flag_type": "ownership_not_renounced", "severity": "warning"},
+        {"flag_type": "rug_deployer", "severity": "critical"},
+    ]
+    # Ownership renounced (True) or unknown (None) is NOT a finding.
+    assert _analysis_findings(ContractAnalysis(ownership_renounced=True)) == []
+    assert _analysis_findings(ContractAnalysis(ownership_renounced=None)) == []
+
+
+def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> None:
+    """_run_contract_analysis persists each finding as point-in-time raw
+    evidence (the contract_analysis payload) AND one evidence-backed
+    ContractFlag row, so the SQL count and the lake replay see the full flag
+    set — and re-analysis is idempotent (no duplicate flags/evidence)."""
+    chain, _ = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="Token111111111111111111111111111111111111",
+        symbol="HYPE",
+        name="Hype Fixture",
+        first_seen_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+    )
+    session.flush()
+    service = IngestionService()
+    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    def fake_analyze(address, chain="ethereum", *, http=None):
+        assert address == asset.address
+        return ContractAnalysis(
+            suspicious_flags=2,
+            reasons=["Contract has mint function (supply can be inflated)"],
+            has_mint_function=True,
+            ownership_renounced=False,
+        )
+
+    monkeypatch.setattr(ingestion_service, "analyze_contract", fake_analyze)
+
+    result = service._run_contract_analysis(session, decision_ts)
+    session.flush()
+    assert result["analyzed"] == 1
+    assert result["flagged"] == 1
+    expected_findings = [
+        {"flag_type": "mint_authority", "severity": "warning"},
+        {"flag_type": "ownership_not_renounced", "severity": "warning"},
+    ]
+
+    evidence = [
+        row
+        for row in session.scalars(select(models.RawEvidenceItem)).all()
+        if "contract_analysis" in (row.payload or {})
+    ]
+    assert len(evidence) == 1
+    payload = evidence[0].payload["contract_analysis"]
+    assert payload["asset_address"] == asset.address
+    assert payload["chain"] == "solana"
+    assert payload["findings"] == expected_findings
+
+    contract = session.scalar(
+        select(models.Contract).where(models.Contract.asset_id == asset.id)
+    )
+    assert contract is not None
+    flags = session.scalars(
+        select(models.ContractFlag).where(models.ContractFlag.contract_id == contract.id)
+    ).all()
+    assert {flag.flag_type for flag in flags} == {
+        "mint_authority",
+        "ownership_not_renounced",
+    }
+    assert all(flag.severity == "warning" for flag in flags)
+    assert all(ensure_utc(flag.observed_at) == decision_ts for flag in flags)
+    assert all(flag.evidence_id == evidence[0].id for flag in flags)
+
+    # Re-analysis of the same asset is idempotent: evidence dedupes on content
+    # hash and existing (contract, flag_type) rows are never duplicated.
+    service._run_contract_analysis(session, decision_ts)
+    session.flush()
+    flags_after = session.scalars(
+        select(models.ContractFlag).where(models.ContractFlag.contract_id == contract.id)
+    ).all()
+    assert len(flags_after) == len(flags)
+    assert len(evidence) == 1
+
+
+def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(
+    session, monkeypatch
+) -> None:
+    """The EVM holder scan (Blockscout) stores the same evidence shape as the
+    Solana path on the evm_holders chain_rpc source, writes Holder rows with
+    pct-of-supply, reports source:evm_holders health, and is idempotent on a
+    repeat scan."""
+    chain = get_or_create_chain(
+        session, "base", name="Base", vm_type="evm", native_symbol="ETH"
+    )
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    service.settings.evm_holder_scan_limit = 1
+    service.settings.evm_holder_rpc_pause_seconds = 0.0
+    observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: observed_at)
+
+    created = observed_at - timedelta(hours=2)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x1111111111111111111111111111111111111111",
+        symbol="EVMT",
+        name="EVM Token",
+        first_seen_at=created,
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x2222222222222222222222222222222222222222",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=created - timedelta(days=365),
+    )
+    upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="uniswap-v2-base",
+        pair_address="0x3333333333333333333333333333333333333333",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=created,
+    )
+    session.flush()
+
+    class FakeEVMHolderClient:
+        def __init__(self, chain_slug: str) -> None:
+            assert chain_slug == "base"
+
+        def close(self) -> None:
+            return None
+
+        def token_supply(self, address: str) -> float:
+            assert address == asset.address
+            return 100.0
+
+        def top_holders(self, address: str):
+            assert address == asset.address
+            return [
+                {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
+                {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
+            ]
+
+    monkeypatch.setattr(ingestion_service, "EVMHolderClient", FakeEVMHolderClient)
+
+    assert service._ingest_evm_holder_snapshots(session) == 2
+    assert service._ingest_evm_holder_snapshots(session) == 2
+    session.commit()
+
+    holders = session.scalars(
+        select(models.Holder).where(models.Holder.asset_id == asset.id)
+    ).all()
+    assert len(holders) == 2
+    assert round(sum(holder.pct_supply or 0.0 for holder in holders), 6) == 0.9
+
+    evidence = [
+        row
+        for row in session.scalars(select(models.RawEvidenceItem)).all()
+        if "mint" in (row.payload or {})
+    ]
+    assert len(evidence) == 1
+    assert evidence[0].payload["mint"] == asset.address
+    assert evidence[0].payload["chain"] == "base"
+    assert evidence[0].payload["supply"] == pytest.approx(100.0)
+    assert evidence[0].payload["largest_accounts"] == [
+        {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
+        {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
+    ]
+
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:evm_holders")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert health is not None
+    assert health.state == "ok"
+    assert "2 holder rows across 1 chains" in (health.message or "")
+
+
 def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     """The ingestion worker must not compact: it reports the archive stage as
     skipped (archive=0 in scan results) and writes no parquet files — the
@@ -155,6 +368,7 @@ def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(service, "_ingest_geckoterminal_new_pools", lambda session: 0)
     monkeypatch.setattr(service, "_ingest_birdeye_solana", lambda session: 0)
     monkeypatch.setattr(service, "_ingest_solana_holder_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_evm_holder_snapshots", lambda session: 0)
     monkeypatch.setattr(service, "_run_data_quality_check", lambda session, decision_ts: {})
     monkeypatch.setattr(service, "_run_contract_analysis", lambda session, decision_ts: {})
     monkeypatch.setattr(ingestion_service, "run_mempool", lambda session, decision_ts=None: {})

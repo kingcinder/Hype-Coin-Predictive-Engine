@@ -8,6 +8,7 @@ Called after each ingestion scan to:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -255,11 +256,29 @@ def get_confidence_dashboard_data(
         for scan in reversed(list(scan_history))
     ]
 
+    calibration_health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "forecast_calibration")
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    gap = None
+    if calibration_health and calibration_health.message:
+        match = re.search(r"gap=([-+]?\\d+(?:\\.\\d+)?)", calibration_health.message)
+        if match:
+            gap = float(match.group(1))
+
     return {
         "label_progress": progress,
         "scoring_breakdown": scoring_breakdown,
         "scan_history": scan_chart,
         "forecast_metrics": _latest_forecast_metrics(session),
+        "forecast_calibration": {
+            "state": calibration_health.state if calibration_health else "unknown",
+            "ts": calibration_health.ts.isoformat() if calibration_health else None,
+            "gap": gap,
+            "message": calibration_health.message if calibration_health else None,
+        },
     }
 
 

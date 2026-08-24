@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 
 from common.config import Settings
-from common.time import utc_now
+from common.time import ensure_utc, utc_now
 from ops import parity as parity_module
 from ops.archive import LocalArchiveStore, RawEvidenceCompactor
 from ops.notifier import notify_parity_mismatch
@@ -228,6 +229,57 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         )
     )
 
+    # One contract-analysis pass: findings (mint authority + ownership not
+    # renounced) become evidence-backed ContractFlag rows in production; the
+    # lake must reconstruct the same count from the contract_analysis evidence.
+    ca = get_or_create_source(
+        session,
+        name="contract_analysis",
+        source_type="chain_rpc",
+        tier="chain",
+        base_url=None,
+    )
+    ca_observed = DECISION - timedelta(hours=4)
+    ca_findings = [
+        {"flag_type": "mint_authority", "severity": "warning"},
+        {"flag_type": "ownership_not_renounced", "severity": "warning"},
+    ]
+    raw_ca = store_raw_evidence(
+        session,
+        source=ca,
+        payload={
+            "contract_analysis": {
+                "chain": "solana",
+                "asset_address": BASE_ADDRESS,
+                "suspicious_flags": 2,
+                "is_honeypot": False,
+                "has_mint": True,
+                "has_pause": False,
+                "ownership_renounced": False,
+                "deployer_known_rug": False,
+                "reasons": [
+                    "Contract has mint function (supply can be inflated)",
+                    "Contract ownership not renounced",
+                ],
+                "findings": ca_findings,
+            }
+        },
+        observed_at=ca_observed,
+    )
+    for finding in ca_findings:
+        session.add(
+            models.ContractFlag(
+                contract_id=contract.id,
+                source_id=ca.id,
+                ts=ca_observed,
+                observed_at=ca_observed,
+                flag_type=finding["flag_type"],
+                severity=finding["severity"],
+                evidence_id=raw_ca.id,
+                details=dict(finding),
+            )
+        )
+
     # Holder snapshots: 5 accounts two hours before the decision, 7 at the
     # decision hour (the SQL Holder rows + the RPC evidence both paths read).
     supply = 10_000.0
@@ -396,6 +448,94 @@ def test_parity_disabled_skips(session, tmp_path) -> None:
     assert result == {"skipped": True}
 
 
+def test_parity_persists_mismatch_history(session, tmp_path) -> None:
+    """Every divergence is recorded as a reviewable history row (run/decision
+    timestamps, asset, feature, SQL vs lake values, missing flags, state), and
+    stale history older than the retention window is pruned on the next run."""
+    settings = _settings(tmp_path, parity_history_retention_days=30)
+    asset = _seed_consistent(session, tmp_path, settings)
+    _add_sql_only_holder(session, asset)
+    old = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    session.add(
+        models.ParityMismatch(
+            run_ts=old,
+            decision_ts=old,
+            asset_id=asset.id,
+            symbol=asset.symbol,
+            feature_name="holder_count",
+            sql_value=8.0,
+            lake_value=7.0,
+            sql_missing=False,
+            lake_missing=False,
+            state="red",
+        )
+    )
+    session.commit()
+
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    session.commit()
+    assert result["status"] == "red"
+    rows = session.scalars(
+        select(models.ParityMismatch).order_by(models.ParityMismatch.run_ts)
+    ).all()
+    assert rows, "divergences must persist as history rows"
+    assert all(ensure_utc(row.run_ts) > old for row in rows), (
+        "stale history must be pruned"
+    )
+    by_feature = {row.feature_name: row for row in rows}
+    # The SQL-only holder diverges on holder_count (and holder_growth).
+    row = by_feature.get("holder_count")
+    assert row is not None
+    assert row.asset_id == asset.id
+    assert row.symbol == asset.symbol
+    # The SQL-only holder is a VALUE divergence (SQL sees 8 holders, the lake
+    # reconstructs 7 from the archived evidence) — not a missing-flag split.
+    assert row.sql_missing is False
+    assert row.lake_missing is False
+    assert row.sql_value == pytest.approx(8.0)
+    assert row.lake_value == pytest.approx(7.0)
+    assert row.state == "red"
+    assert ensure_utc(row.decision_ts) == DECISION
+
+
+def test_parity_ok_run_leaves_no_mismatch_rows(session, tmp_path) -> None:
+    """A clean run persists no divergence rows."""
+    settings = _settings(tmp_path)
+    _seed_consistent(session, tmp_path, settings)
+    session.commit()
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    session.commit()
+    assert result["status"] == "ok"
+    assert not session.scalars(select(models.ParityMismatch)).all()
+
+
+def test_parity_builds_lake_block_once_per_run(session, tmp_path, monkeypatch) -> None:
+    """The full-lake parity job reconstructs the lake-covered block for ALL
+    assets in ONE ``build_for_assets`` call (one download / one DuckDB
+    session) instead of per-asset ``build_for_asset`` calls."""
+    settings = _settings(tmp_path)
+    _seed_consistent(session, tmp_path, settings)
+    session.commit()
+
+    calls = {"n": 0, "addresses": None}
+    real = parity_module.LakeFeatureFactory.build_for_assets
+
+    def counting_batch(self, addresses, decision_ts):
+        calls["n"] += 1
+        calls["addresses"] = list(addresses)
+        return real(self, addresses, decision_ts)
+
+    monkeypatch.setattr(
+        parity_module.LakeFeatureFactory, "build_for_assets", counting_batch
+    )
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    assert calls["n"] == 1
+    # Both the base token and its quote asset are compared in the one call.
+    assert calls["addresses"] is not None and len(calls["addresses"]) >= 2
+    assert result["compared_assets"] == len(calls["addresses"])
+    assert result["status"] in ("ok", "yellow", "red")
+
+
 def test_parity_due_gate(session, tmp_path) -> None:
     """The cadence gate: due with no run yet, quiet right after a run, due
     again once the frequency has elapsed."""
@@ -469,3 +609,32 @@ def test_notify_parity_mismatch_disabled_and_post(monkeypatch) -> None:
     )
     assert "3 mismatches across 10" in sent["message"]
     assert sent["headers"]["Title"] == "Serpent Circle - Lake Parity Mismatch"
+
+
+def test_latest_parity_reads_last_run(session) -> None:
+    """latest_parity returns None before any run, then the structured summary
+    (state, mismatch count, compared assets, decision time, tolerance) parsed
+    from the latest parity health row."""
+    from storage.repository import record_health
+
+    assert parity_module.latest_parity(session) is None
+    decision = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    record_health(
+        session,
+        component="parity",
+        state="yellow",
+        message=(
+            f"lake-vs-SQL parity: 2 mismatches across 10 assets at decision "
+            f"{decision.isoformat()}; tolerance=0.001"
+        ),
+        error_count=0,
+    )
+    session.commit()
+    latest = parity_module.latest_parity(session)
+    assert latest is not None
+    assert latest["state"] == "yellow"
+    assert latest["mismatch_count"] == 2
+    assert latest["compared_assets"] == 10
+    assert latest["decision_ts"] == decision
+    assert latest["tolerance"] == pytest.approx(0.001)
+    assert latest["compare_hours_ago"] == 96.0

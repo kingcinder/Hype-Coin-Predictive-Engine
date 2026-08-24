@@ -135,6 +135,79 @@ def test_s3_store_download_to_materializes_object(s3, tmp_path) -> None:
     assert dest.read_bytes() == b"lake-bytes"
 
 
+def test_s3_query_archive_skips_unreadable_partition(
+    session, s3, tmp_path, monkeypatch
+) -> None:
+    """One failed S3 download must degrade gracefully: query_archive logs and
+    skips the corrupt object while still querying every healthy partition.
+    If all objects are unreadable it returns an honest empty result."""
+    _seed_evidence(session, count=2, days_ago=11.0)
+    _seed_evidence(session, count=1, days_ago=77.0, batch="b")
+    settings = _settings()
+    store = S3ArchiveStore(settings)
+    RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
+    keys = sorted(store.list_objects("evidence"))
+    assert len(keys) == 2
+
+    original_download = store.download_to
+    bad_key = keys[0]
+
+    def fail_one(key, dest):
+        if key == bad_key:
+            raise OSError("simulated corrupt partition download")
+        return original_download(key, dest)
+
+    monkeypatch.setattr(store, "download_to", fail_one)
+    rows = query_archive(
+        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
+    )
+    assert rows == [{"n": 2}], "healthy partition remains queryable"
+
+    def fail_all(key, dest):
+        raise OSError(f"simulated unreadable object: {key}")
+
+    monkeypatch.setattr(store, "download_to", fail_all)
+    assert query_archive(
+        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
+    ) == []
+
+
+def test_s3_second_batch_in_same_partition_merges_not_clobbers(
+    session, s3, tmp_path
+) -> None:
+    """A second compaction batch landing in the same (source, year, month)
+    S3 partition must APPEND to the partition object, never overwrite the
+    rows an earlier pass compacted — the MinIO mirror of the local-store
+    merge test. A clobbering store would silently lose history and make the
+    retention report show fake negative lake growth.
+    """
+    _seed_evidence(session, count=2, days_ago=11.0)
+    settings = _settings()
+    store = S3ArchiveStore(settings)
+    compactor = RawEvidenceCompactor(store=store, settings=settings)
+
+    first = compactor.compact(session, DECISION_TS)
+    session.flush()
+    assert first["compacted"] == 2
+
+    # More evidence in the same month (days_ago=10 is also June).
+    _seed_evidence(session, count=3, days_ago=10.0, batch="b")
+    second = compactor.compact(session, DECISION_TS)
+    session.flush()
+    assert second["compacted"] == 3
+
+    manifest = session.scalar(select(models.ArchiveManifest))
+    assert manifest is not None
+    assert manifest.row_count == 5, "partition must hold both batches"
+    # One partition object in the bucket, not two clobbered fragments.
+    assert len(store.list_objects("evidence")) == 1
+
+    rows = query_archive(
+        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
+    )
+    assert rows == [{"n": 5}]
+
+
 def test_make_store_selects_backend_by_config(s3, tmp_path) -> None:
     assert isinstance(make_store(_settings()), S3ArchiveStore)
     local = _settings(

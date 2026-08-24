@@ -305,6 +305,9 @@ class IgnitionRadar:
         )
         if existing:
             return
+        from ops.alert_quality import alert_generation_allowed
+        if not alert_generation_allowed(session, alert_type, self.settings):
+            return
         session.add(
             models.Alert(
                 asset_id=asset.id,

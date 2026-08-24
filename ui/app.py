@@ -279,6 +279,13 @@ def alerts_view() -> None:
             cols[1].markdown(alert.get("alert_type", "").replace("_", " ").title())
             cols[2].caption(alert.get("created_at", ""))
             if cols[3].button(
+                "Snooze 4h",
+                key=f"snooze_{alert['id']}",
+                use_container_width=True,
+            ):
+                api_post(f"/alerts/{alert['id']}/snooze", json={"hours": 4})
+                st.rerun()
+            if cols[3].button(
                 "✓ Useful",
                 key=f"ack_useful_{alert['id']}",
                 use_container_width=True,
@@ -326,6 +333,38 @@ def alerts_view() -> None:
             hide_index=True,
         )
 
+    st.subheader("Weekly Signal Quality by Alert Type")
+    st.caption(
+        "Useful rate is useful ACKs divided by rated ACKs (useful + noise). "
+        "Unrated ACKs remain visible in the counts but do not change the rate."
+    )
+    trend = api_get("/alerts/quality/trend", params={"weeks": 26})
+    trend_rows = (trend or {}).get("weeks") if isinstance(trend, dict) else None
+    if not trend_rows:
+        st.info("No weekly quality history yet. ACK alerts over time to build the trend.")
+    else:
+        trend_df = pd.DataFrame(trend_rows)
+        trend_df["week_start"] = pd.to_datetime(trend_df["week_start"])
+        chart_df = trend_df.pivot(
+            index="week_start", columns="alert_type", values="useful_rate"
+        ).sort_index()
+        st.line_chart(chart_df, use_container_width=True)
+        st.dataframe(
+            trend_df[
+                [
+                    "week_start",
+                    "alert_type",
+                    "useful_rate",
+                    "useful",
+                    "noise",
+                    "unrated",
+                    "total_acked",
+                ]
+            ].sort_values(["week_start", "alert_type"], ascending=[False, True]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
 
 def live_ops_console() -> None:
     st.header("Live Ops Console")
@@ -340,6 +379,7 @@ def live_ops_console() -> None:
 
     last_scan = data.get("last_scan")
     notifier_health = data.get("notifier_health")
+    lake_budget = data.get("lake_budget")
     recent_alerts = data.get("recent_alerts") or []
 
     st.subheader("Last Scan")
@@ -357,6 +397,18 @@ def live_ops_console() -> None:
         if duration is not None:
             st.metric("Duration", f"{duration:.1f}s")
 
+        pre_scan = last_scan.get("pre_scan_health", {}).get("lake", {})
+        if pre_scan:
+            st.markdown("**Pre-scan Lake Freshness**")
+            if pre_scan.get("fresh", True):
+                st.success("Lake was fresh before this scan")
+            else:
+                warning_state = (
+                    "warning pushed" if pre_scan.get("warning_pushed", False) else "yellow only"
+                )
+                st.warning(
+                    f"Lake stale for {pre_scan.get('stale_hours', 0):.1f}h ({warning_state})"
+                )
         st.markdown("**Pipeline Stage Counts**")
         stage_cols = st.columns(4)
         stage_data = [
@@ -399,6 +451,25 @@ def live_ops_console() -> None:
             st.metric("Errors", notifier_health["error_count"])
     else:
         st.info("Notifier health not yet recorded.")
+
+    st.subheader("Lake Budget")
+    if lake_budget:
+        budget_state = lake_budget["state"]
+        text = f"Lake budget: {budget_state}"
+        if lake_budget.get("days_to_full") is not None:
+            text += f" — {lake_budget['days_to_full']:.1f} days to full"
+        if budget_state == "red":
+            st.error(text)
+        elif budget_state == "yellow":
+            st.warning(text)
+        else:
+            st.success(text)
+        if lake_budget.get("projected_full_at"):
+            st.caption(f"Projected fill: {lake_budget['projected_full_at']}")
+        if lake_budget.get("message"):
+            st.caption(lake_budget["message"])
+    else:
+        st.info("Lake budget health not yet recorded.")
 
     st.subheader("Recent Pushed Alerts")
     if recent_alerts:
@@ -730,6 +801,39 @@ def lifecycle_radar() -> None:
 
 def backtest_results() -> None:
     st.header("Backtest & Drift")
+    st.subheader("Run Backtest")
+    with st.form("backtest_run_form"):
+        source = st.selectbox(
+            "Feature source",
+            options=["sql", "lake"],
+            format_func=lambda value: (
+                "Live SQL tables" if value == "sql" else "Archived lake replay"
+            ),
+            help="Lake replay reads archived Parquet evidence instead of live feature tables.",
+        )
+        start = st.date_input("Start date")
+        end = st.date_input("End date")
+        top_k = st.number_input("Top K", min_value=1, max_value=200, value=10)
+        forward_hours = st.number_input(
+            "Forward hours", min_value=1, max_value=168, value=24
+        )
+        submitted = st.form_submit_button("Start backtest")
+    if submitted:
+        start_ts = pd.Timestamp(start).tz_localize("UTC").isoformat()
+        end_ts = pd.Timestamp(end).tz_localize("UTC").isoformat()
+        result = api_post(
+            "/backtest/run",
+            json={
+                "start": start_ts,
+                "end": end_ts,
+                "top_k": int(top_k),
+                "forward_hours": int(forward_hours),
+                "feature_source": source,
+            },
+        )
+        if result:
+            st.success(result.get("message", "Backtest started"))
+
     data = api_get("/backtest/results", params={"limit": 20})
     if not data:
         st.info(
@@ -894,6 +998,59 @@ def archive_retention() -> None:
     )
 
 
+def _parity_panel() -> None:
+    """Feed Health panel for the last lake-vs-SQL parity run."""
+    st.subheader("Lake-vs-SQL Parity")
+    st.caption(
+        "The daily parity job compares the DuckDB lake read path against the live "
+        "SQL path at a floored past decision hour (compare_hours_ago) and pages a "
+        "mismatch via ntfy. State and counts come from the latest parity run."
+    )
+    latest = api_get("/parity/latest")
+    if latest is None:
+        st.info("No parity run recorded yet. The daily job will populate this panel.")
+        return
+    state = latest.get("state", "unknown")
+    emoji = {"ok": "🟢", "yellow": "🟡", "red": "🔴"}.get(state, "⚪")
+    cols = st.columns(4)
+    cols[0].metric("State", f"{emoji} {state.upper()}")
+    cols[1].metric("Mismatches", latest.get("mismatch_count", 0))
+    cols[2].metric("Assets compared", latest.get("compared_assets", 0))
+    cols[3].metric("Pass errors", latest.get("error_count", 0))
+    decision = latest.get("decision_ts")
+    st.markdown(
+        f"**Decision time:** {decision or '—'}  ·  compare horizon: "
+        f"{latest.get('compare_hours_ago', '—')}h  ·  tolerance: "
+        f"{latest.get('tolerance', '—')}"
+    )
+    if latest.get("message"):
+        st.code(latest["message"])
+    mismatches = api_get("/parity/mismatches")
+    with st.expander("Divergence history", expanded=state != "ok"):
+        if not mismatches:
+            st.info("No recorded mismatches yet.")
+        else:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "run ts": row["run_ts"],
+                            "decision ts": row["decision_ts"],
+                            "symbol": row["symbol"] or "—",
+                            "feature": row["feature_name"],
+                            "sql": row["sql_value"],
+                            "lake": row["lake_value"],
+                            "sql missing": row["sql_missing"],
+                            "lake missing": row["lake_missing"],
+                        }
+                        for row in mismatches
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
 def feed_health() -> None:
     st.header("Feed Health")
     data = api_get("/health")
@@ -904,6 +1061,8 @@ def feed_health() -> None:
             st.info("No component health rows exist yet. Worker runs will populate this table.")
         else:
             st.dataframe(components, use_container_width=True, hide_index=True)
+
+    _parity_panel()
 
     pool_data = api_get("/rpc/pool")
     if not pool_data:
@@ -1408,6 +1567,24 @@ def confidence_dashboard() -> None:
             min(1.0, progress.get("progress_pct", 0) / 100.0),
             text=f"{progress.get('progress_pct', 0):.0f}% complete",
         )
+
+    calibration_health = data.get("forecast_calibration") or {}
+    if calibration_health:
+        state = calibration_health.get("state", "unknown")
+        gap = calibration_health.get("gap")
+        gap_text = f"{gap:+.3f}" if gap is not None else "n/a"
+        status = (
+            f"Forecast calibration: **{state.upper()}** · "
+            f"latest real-only − blended gap: **{gap_text}**"
+        )
+        if state == "red":
+            st.error(status)
+        elif state == "yellow":
+            st.warning(status)
+        else:
+            st.info(status)
+        if calibration_health.get("ts"):
+            st.caption(f"Last calibration check: {calibration_health['ts']}")
 
     # Forecast test metrics: blended (all test samples) vs real-only (test
     # samples whose labels were observed at real snapshots, excluding the

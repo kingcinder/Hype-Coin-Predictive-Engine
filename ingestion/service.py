@@ -14,7 +14,7 @@ from common.time import floor_to_hour, utc_now
 from fingerprint.engine import FingerprintEngine
 from forecast.engine import run_forecast_if_due
 from ingestion.birdeye_client import BirdeyeClient
-from ingestion.contract_analyzer import analyze_contract
+from ingestion.contract_analyzer import ContractAnalysis, analyze_contract
 from ingestion.data_quality import check_market_snapshots
 from ingestion.holder_tracker import get_evm_holders, get_solana_holders  # noqa: F401
 from ingestion.normalizers import (
@@ -31,6 +31,7 @@ from ingestion.rpc_pool import (
 )
 from ingestion.source_clients import (
     DexScreenerClient,
+    EVMHolderClient,
     GeckoTerminalClient,
     SolanaRpcClient,
     get_rpc_url,
@@ -142,6 +143,20 @@ class IngestionService:
         )
         get_or_create_source(
             session,
+            name="evm_holders",
+            source_type="chain_rpc",
+            tier="chain",
+            base_url=None,
+        )
+        get_or_create_source(
+            session,
+            name="contract_analysis",
+            source_type="chain_rpc",
+            tier="chain",
+            base_url=None,
+        )
+        get_or_create_source(
+            session,
             name="birdeye",
             source_type="market_data",
             tier="venue",
@@ -158,7 +173,9 @@ class IngestionService:
                 session, name=name, source_type=source_type, tier="public_metadata"
             )
 
-    def run_once(self, session: Session) -> dict[str, Any]:
+    def run_once(
+        self, session: Session, *, pre_scan_health: dict[str, object] | None = None
+    ) -> dict[str, Any]:
         self.ensure_reference_data(session)
         errors: list[str] = []
         result: dict[str, Any] = {
@@ -177,6 +194,7 @@ class IngestionService:
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
+            result["holder_snapshots"] += self._ingest_evm_holder_snapshots(session)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
             result["lp_removals"] = LiquidityRemovalWatcher().scan(
                 session, decision_ts=decision_ts
@@ -264,6 +282,7 @@ class IngestionService:
                 rpc_pool_notifications=result.get("rpc_pool_notifications", 0),
                 rpc_pool_snapshots=result.get("rpc_pool_snapshots", 0),
                 state="ok",
+                details={"pre_scan_health": pre_scan_health or {}},
             )
             session.commit()
         except Exception as exc:  # noqa: BLE001 - must preserve exact source failure.
@@ -310,7 +329,17 @@ class IngestionService:
         }
 
     def _run_contract_analysis(self, session: Session, decision_ts: Any) -> dict[str, Any]:
-        """Analyze contracts for recently discovered assets, skipping already-analyzed ones."""
+        """Analyze contracts for recently discovered assets, skipping already-analyzed ones.
+
+        Each analysis is persisted as point-in-time raw evidence (the
+        ``contract_analysis`` payload with a deterministic ``findings`` list)
+        plus one evidence-backed ``ContractFlag`` row per finding — so both
+        the SQL feature count and the lake replay see the honeypot /
+        mint-authority / ownership findings, not just low-liquidity scans.
+        Repeat scans of the same asset are idempotent: identical evidence
+        dedupes on content hash and an existing (contract, flag_type) row is
+        never re-created.
+        """
         # Find assets that don't yet have a contract_flag record
         analyzed_ids = session.scalars(
             select(models.ContractFlag.contract_id)
@@ -324,6 +353,9 @@ class IngestionService:
                 .limit(10)
             )
         recent_assets = session.scalars(query).all()
+        source = get_or_create_source(
+            session, name="contract_analysis", source_type="chain_rpc", tier="chain"
+        )
         results: list[dict[str, Any]] = []
         for asset in recent_assets:
             chain_obj = self._chain(session, asset.chain_id)
@@ -332,6 +364,58 @@ class IngestionService:
                 asset.address,
                 chain=chain_name,
             )
+            findings = _analysis_findings(analysis)
+            raw = store_raw_evidence(
+                session,
+                source=source,
+                payload={
+                    "contract_analysis": {
+                        "chain": chain_name,
+                        "asset_address": asset.address,
+                        "suspicious_flags": analysis.suspicious_flags,
+                        "is_honeypot": analysis.is_honeypot,
+                        "has_mint": analysis.has_mint_function,
+                        "has_pause": analysis.has_pause_function,
+                        "ownership_renounced": analysis.ownership_renounced,
+                        "deployer_known_rug": analysis.deployer_known_rug,
+                        "reasons": analysis.reasons,
+                        "findings": findings,
+                    }
+                },
+                observed_at=decision_ts,
+            )
+            contract = upsert_contract(
+                session,
+                chain_id=asset.chain_id,
+                asset_id=asset.id,
+                address=asset.address,
+                observed_at=decision_ts,
+            )
+            existing = {
+                flag.flag_type
+                for flag in session.scalars(
+                    select(models.ContractFlag).where(
+                        models.ContractFlag.contract_id == contract.id
+                    )
+                ).all()
+            }
+            for finding in findings:
+                flag_type = finding["flag_type"]
+                if flag_type in existing:
+                    continue
+                session.add(
+                    models.ContractFlag(
+                        contract_id=contract.id,
+                        source_id=source.id,
+                        ts=decision_ts,
+                        observed_at=decision_ts,
+                        flag_type=flag_type,
+                        severity=finding["severity"],
+                        evidence_id=raw.id,
+                        details={"chain": chain_name, **finding},
+                    )
+                )
+                existing.add(flag_type)
             results.append({
                 "asset_id": asset.id,
                 "address": asset.address,
@@ -339,6 +423,7 @@ class IngestionService:
                 "is_honeypot": analysis.is_honeypot,
                 "has_mint": analysis.has_mint_function,
                 "ownership_renounced": analysis.ownership_renounced,
+                "findings": findings,
                 "reasons": analysis.reasons,
             })
         flagged = sum(1 for r in results if r["suspicious_flags"] > 0)
@@ -526,7 +611,9 @@ class IngestionService:
         chain = self._chain(session, "solana")
         if not chain:
             return 0
-        assets = self._solana_holder_scan_assets(session, chain.id)
+        assets = self._holder_scan_assets(
+            session, chain.id, self.settings.solana_holder_scan_limit
+        )
         if not assets:
             record_health(
                 session,
@@ -607,9 +694,113 @@ class IngestionService:
             client.close()
         return count
 
-    def _solana_holder_scan_assets(self, session: Session, chain_id: int) -> list[models.Asset]:
-        limit = max(0, self.settings.solana_holder_scan_limit)
-        if limit == 0:
+    def _ingest_evm_holder_snapshots(self, session: Session) -> int:
+        """Holder snapshots for Base/Ethereum assets via free public Blockscout
+        instances (``EVMHolderClient``).
+
+        Stores the SAME evidence shape as the Solana path — ``mint`` / ``supply``
+        / ``largest_accounts`` — on the ``evm_holders`` chain_rpc source, so the
+        lake replay reconstructs ``holder_count`` / ``holder_growth`` /
+        ``top_holder_concentration`` for EVM assets exactly like Solana. One
+        aggregate ``source:evm_holders`` health row covers both chains.
+        """
+        evm_chains = [
+            slug for slug in ("base", "ethereum") if slug in self.settings.target_chains
+        ]
+        if not evm_chains:
+            return 0
+        source = get_or_create_source(
+            session, name="evm_holders", source_type="chain_rpc", tier="chain"
+        )
+        count = 0
+        errors: list[str] = []
+        scanned_chains: list[str] = []
+        found_chains: list[str] = []
+        for chain_slug in evm_chains:
+            chain = self._chain(session, chain_slug)
+            if not chain:
+                continue
+            found_chains.append(chain_slug)
+            limit = max(0, self.settings.evm_holder_scan_limit)
+            if limit == 0:
+                continue
+            assets = self._holder_scan_assets(session, chain.id, limit)
+            if not assets:
+                continue
+            scanned_chains.append(chain_slug)
+            observed_at = utc_now()
+            ts = floor_to_hour(observed_at)
+            client = EVMHolderClient(chain_slug)
+            try:
+                for asset in assets:
+                    try:
+                        supply = client.token_supply(asset.address)
+                        sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
+                        accounts = client.top_holders(asset.address)
+                        raw = store_raw_evidence(
+                            session,
+                            source=source,
+                            payload={
+                                "asset_id": asset.id,
+                                "chain": chain_slug,
+                                "mint": asset.address,
+                                "supply": supply,
+                                "largest_accounts": accounts,
+                            },
+                            observed_at=observed_at,
+                        )
+                        for account in accounts:
+                            address = str(account.get("address") or "")
+                            if not address:
+                                continue
+                            balance = _float_from_rpc(
+                                account.get("uiAmountString") or account.get("uiAmount")
+                            )
+                            if balance is None:
+                                continue
+                            pct_supply = balance / supply if supply and supply > 0 else None
+                            insert_holder_once(
+                                session,
+                                asset_id=asset.id,
+                                wallet_address=address,
+                                source_id=source.id,
+                                ts=ts,
+                                observed_at=observed_at,
+                                balance=balance,
+                                pct_supply=pct_supply,
+                            )
+                            count += 1
+                        raw.raw_path = (
+                            raw.raw_path
+                            or f"evm_holder_snapshot:{asset.id}:{ts.isoformat()}"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - per-asset source failure.
+                        errors.append(f"{chain_slug}:{asset.address}: {exc}")
+                    sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
+            finally:
+                client.close()
+        if found_chains:
+            state = "ok" if not errors else "yellow"
+            if scanned_chains:
+                message = f"{count} holder rows across {len(scanned_chains)} chains"
+            else:
+                state = "yellow"
+                message = "0 eligible assets"
+            if errors:
+                message = f"{message}; {len(errors)} asset errors; first={errors[0]}"
+            record_health(
+                session,
+                component="source:evm_holders",
+                state=state,
+                message=message,
+                error_count=len(errors),
+            )
+        return count
+
+    def _holder_scan_assets(
+        self, session: Session, chain_id: int, limit: int
+    ) -> list[models.Asset]:
+        if limit <= 0:
             return []
         rows = session.scalars(
             select(models.Asset)
@@ -737,6 +928,33 @@ class IngestionService:
             )
             session.add(flag)
         return True
+
+
+def _analysis_findings(analysis: ContractAnalysis) -> list[dict[str, str]]:
+    """Map a contract analysis result to a deterministic list of
+    ``{flag_type, severity}`` findings.
+
+    This list is the single source of truth for BOTH the SQL side (one
+    evidence-backed ``ContractFlag`` row per finding) and the lake replay
+    (which counts the archived ``contract_analysis`` payload's ``findings``
+    array), so the two read paths count the same flags. Every severity used
+    here is in the set the SQL path's ``_contract_flag_count`` counts
+    (``warning | high | critical | black``).
+    """
+    findings: list[dict[str, str]] = []
+    if any(reason.startswith("Contract contains") for reason in analysis.reasons):
+        findings.append({"flag_type": "honeypot", "severity": "high"})
+    if analysis.has_mint_function:
+        findings.append({"flag_type": "mint_authority", "severity": "warning"})
+    if analysis.has_pause_function:
+        findings.append({"flag_type": "pause_function", "severity": "warning"})
+    if analysis.ownership_renounced is False:
+        findings.append(
+            {"flag_type": "ownership_not_renounced", "severity": "warning"}
+        )
+    if analysis.deployer_known_rug:
+        findings.append({"flag_type": "rug_deployer", "severity": "critical"})
+    return findings
 
 
 def backoff_sleep_seconds(iteration: int, base: int) -> int:

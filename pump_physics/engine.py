@@ -464,6 +464,11 @@ class LifecycleEngine:
             f"withdrawal_events={details.get('withdrawal_events')}, "
             f"liquidity_usd={details.get('liquidity_usd')}"
         )
+        from ops.alert_quality import alert_generation_allowed
+        if not alert_generation_allowed(
+            session, AlertType.LIFECYCLE_TRANSITION.value, self.settings
+        ):
+            return
         session.add(
             models.Alert(
                 asset_id=asset.id,

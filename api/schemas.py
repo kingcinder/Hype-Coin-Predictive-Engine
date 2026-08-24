@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class HealthComponent(BaseModel):
@@ -20,6 +20,31 @@ class HealthResponse(BaseModel):
     status: str
     database: str
     components: list[HealthComponent]
+
+
+class ParityLatestResponse(BaseModel):
+    state: str
+    ts: datetime | None
+    message: str | None
+    error_count: int
+    mismatch_count: int
+    compared_assets: int
+    decision_ts: datetime | None
+    tolerance: float | None
+    compare_hours_ago: float
+
+
+class ParityMismatchRow(BaseModel):
+    run_ts: datetime
+    decision_ts: datetime
+    asset_id: int | None
+    symbol: str | None
+    feature_name: str
+    sql_value: float | None
+    lake_value: float | None
+    sql_missing: bool
+    lake_missing: bool
+    state: str
 
 
 class TokenScoreRow(BaseModel):
@@ -75,6 +100,11 @@ class AlertRow(BaseModel):
     notified_at: datetime | None
     acked_at: datetime | None
     ack_quality: str | None
+    snoozed_until: datetime | None = None
+
+
+class AlertSnoozeRequest(BaseModel):
+    hours: float = Field(gt=0, le=168)
 
 
 class AlertAckRequest(BaseModel):
@@ -98,6 +128,7 @@ class AlertQualityRow(BaseModel):
     created_at: datetime
     acked_at: datetime | None
     ack_quality: str | None
+    snoozed_until: datetime | None = None
 
 
 class AlertQualityLedger(BaseModel):
@@ -109,6 +140,24 @@ class AlertQualityLedger(BaseModel):
     unrated: int
     useful_rate: float | None
     recent: list[AlertQualityRow]
+
+
+class AlertQualityTrendRow(BaseModel):
+    """One alert type's weekly signal-quality aggregate."""
+
+    week_start: datetime
+    alert_type: str
+    useful: int
+    noise: int
+    unrated: int
+    total_acked: int
+    useful_rate: float | None
+
+
+class AlertQualityTrendResponse(BaseModel):
+    """Weekly useful-rate history grouped by alert family."""
+
+    weeks: list[AlertQualityTrendRow]
 
 
 class RiskResponse(BaseModel):
@@ -341,6 +390,7 @@ class ScanResultRow(BaseModel):
     state: str
     error_message: str | None
     details: dict[str, Any]
+    pre_scan_health: dict[str, Any] = {}
 
 
 class NotifierHealthRow(BaseModel):
@@ -351,9 +401,20 @@ class NotifierHealthRow(BaseModel):
     error_count: int
 
 
+class LakeBudgetHealthRow(BaseModel):
+    component: str
+    state: str
+    ts: datetime
+    message: str | None
+    error_count: int
+    projected_full_at: datetime | None
+    days_to_full: float | None
+
+
 class OpsConsoleResponse(BaseModel):
     last_scan: ScanResultRow | None
     notifier_health: NotifierHealthRow | None
+    lake_budget: LakeBudgetHealthRow | None
     recent_alerts: list[AlertRow]
 
 
@@ -392,6 +453,14 @@ class SeedResponse(BaseModel):
 class TriggerResponse(BaseModel):
     status: str
     message: str
+
+
+class BacktestRequest(BaseModel):
+    start: datetime
+    end: datetime | None = None
+    top_k: int = Field(ge=1, le=200, default=10)
+    forward_hours: int = Field(ge=1, le=168, default=24)
+    feature_source: str = "sql"
 
 
 class SignalScoreRow(BaseModel):

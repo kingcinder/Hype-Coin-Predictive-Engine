@@ -160,6 +160,11 @@ class PrelaunchQueue:
         )
         if existing:
             return
+        from ops.alert_quality import alert_generation_allowed
+        if not alert_generation_allowed(
+            session, AlertType.PRELAUNCH_CANDIDATE.value, self.settings
+        ):
+            return
         session.add(
             models.Alert(
                 asset_id=asset.id,

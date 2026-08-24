@@ -4,10 +4,12 @@ import asyncio
 import json
 import time
 from collections import defaultdict
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dt_time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
@@ -16,8 +18,12 @@ from api.schemas import (
     AlertAckRequest,
     AlertQualityLedger,
     AlertQualityRow,
+    AlertQualityTrendResponse,
+    AlertQualityTrendRow,
     AlertRow,
+    AlertSnoozeRequest,
     ArchiveManifestRow,
+    BacktestRequest,
     BacktestResultRow,
     CatalystRow,
     EngineScanProgressRow,
@@ -28,11 +34,14 @@ from api.schemas import (
     HealthComponent,
     HealthResponse,
     IgnitionEventRow,
+    LakeBudgetHealthRow,
     LifecycleEventRow,
     LifecycleTransitionAlertRow,
     NarrativeClusterRow,
     NotifierHealthRow,
     OpsConsoleResponse,
+    ParityLatestResponse,
+    ParityMismatchRow,
     PrelaunchRow,
     RetentionGrowthRow,
     RetentionRunRow,
@@ -54,7 +63,8 @@ from common.logging import get_logger
 from common.time import utc_now
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
-from risk_engine.rules import assess_risk
+from ops.parity import latest_parity
+from risk_engine.rules import assess_risk, mask_unreliable_forecast
 from storage import models
 from storage.database import get_session
 from storage.repository import latest_health, latest_scan_result, latest_scores
@@ -120,6 +130,58 @@ def health(session: DbSession) -> HealthResponse:
         else "degraded"
     )
     return HealthResponse(status=status, database=database, components=components)
+
+
+@app.get("/parity/latest", response_model=ParityLatestResponse)
+def parity_latest(session: DbSession) -> ParityLatestResponse | JSONResponse:
+    """Structured summary of the most recent lake-vs-SQL parity run.
+
+    Reads the latest ``component:parity`` health row, so the API/UI process can
+    show the last run's mismatch count, decision window, and state without
+    re-running the expensive comparison. 404 when no parity pass has run yet.
+    """
+    latest = latest_parity(session)
+    if latest is None:
+        return JSONResponse(status_code=404, content={"detail": "no parity run yet"})
+    return ParityLatestResponse(**latest)
+
+
+@app.get("/parity/mismatches", response_model=list[ParityMismatchRow])
+def parity_mismatches(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    asset_id: int | None = None,
+    feature: str | None = None,
+) -> list[ParityMismatchRow]:
+    """Reviewable divergence history: every recorded lake-vs-SQL mismatch,
+    newest run first, optionally filtered by asset or feature."""
+    stmt = (
+        select(models.ParityMismatch)
+        .order_by(
+            models.ParityMismatch.run_ts.desc(),
+            models.ParityMismatch.decision_ts.desc(),
+        )
+        .limit(limit)
+    )
+    if asset_id is not None:
+        stmt = stmt.where(models.ParityMismatch.asset_id == asset_id)
+    if feature:
+        stmt = stmt.where(models.ParityMismatch.feature_name == feature)
+    return [
+        ParityMismatchRow(
+            run_ts=row.run_ts,
+            decision_ts=row.decision_ts,
+            asset_id=row.asset_id,
+            symbol=row.symbol,
+            feature_name=row.feature_name,
+            sql_value=row.sql_value,
+            lake_value=row.lake_value,
+            sql_missing=row.sql_missing,
+            lake_missing=row.lake_missing,
+            state=row.state,
+        )
+        for row in session.scalars(stmt).all()
+    ]
 
 
 @app.get("/tokens/hot", response_model=list[TokenScoreRow])
@@ -214,6 +276,7 @@ def _alert_row(session: DbSession, row: models.Alert) -> AlertRow:
         notified_at=row.notified_at,
         acked_at=row.acked_at,
         ack_quality=row.ack_quality,
+        snoozed_until=row.snoozed_until,
     )
 
 
@@ -223,6 +286,23 @@ def alerts(session: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 50) 
         select(models.Alert).order_by(desc(models.Alert.created_at)).limit(limit)
     ).all()
     return [_alert_row(session, row) for row in rows]
+
+
+@app.post("/alerts/{alert_id}/snooze", response_model=AlertRow)
+def snooze_alert(
+    alert_id: int,
+    payload: AlertSnoozeRequest,
+    session: DbSession,
+) -> AlertRow:
+    """Temporarily suppress an alert; it returns to open when the snooze expires."""
+    alert = session.get(models.Alert, alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"alert not found: {alert_id}")
+    alert.state = AlertState.OPEN.value
+    alert.snoozed_until = utc_now() + timedelta(hours=payload.hours)
+    session.commit()
+    session.refresh(alert)
+    return _alert_row(session, alert)
 
 
 @app.post("/alerts/{alert_id}/ack", response_model=AlertRow)
@@ -253,6 +333,14 @@ def ack_alert(
     session.commit()
     session.refresh(alert)
     return _alert_row(session, alert)
+
+
+@app.post("/alerts/types/{alert_type}/reenable", response_model=dict)
+def reenable_alert_type(alert_type: str, session: DbSession) -> dict[str, object]:
+    """Explicitly resume an alert family quieted by the quality gate."""
+    from ops.alert_quality import reenable_alert_type as _reenable
+    control = _reenable(session, alert_type)
+    return {"alert_type": control.alert_type, "reenabled": control.reenabled}
 
 
 @app.get("/alerts/quality", response_model=AlertQualityLedger)
@@ -297,6 +385,62 @@ def alert_quality_ledger(
     )
 
 
+@app.get("/alerts/quality/trend", response_model=AlertQualityTrendResponse)
+def alert_quality_trend(
+    session: DbSession,
+    weeks: Annotated[int, Query(ge=1, le=104)] = 26,
+) -> AlertQualityTrendResponse:
+    """Weekly ACK signal quality by alert type.
+
+    ``useful_rate`` is useful/(useful+noise); unrated ACKs remain visible in
+    the bucket counts but do not distort the rate. SQLite and PostgreSQL use
+    different date-truncation functions, so bucketing is intentionally done
+    in Python after fetching the bounded ACK history.
+    """
+    cutoff = utc_now() - timedelta(weeks=weeks)
+    rows = session.scalars(
+        select(models.Alert)
+        .where(
+            models.Alert.acked_at.is_not(None),
+            models.Alert.acked_at >= cutoff,
+        )
+        .order_by(models.Alert.acked_at)
+    ).all()
+    buckets: dict[tuple[date, str], dict[str, int]] = {}
+    for row in rows:
+        assert row.acked_at is not None
+        acked_at = row.acked_at
+        if acked_at.tzinfo is None:
+            acked_at = acked_at.replace(tzinfo=UTC)
+        day = acked_at.astimezone(UTC).date()
+        week_start = day - timedelta(days=day.weekday())
+        key = (week_start, row.alert_type)
+        bucket = buckets.setdefault(key, {"useful": 0, "noise": 0, "unrated": 0})
+        quality = row.ack_quality
+        if quality == "useful":
+            bucket["useful"] += 1
+        elif quality == "noise":
+            bucket["noise"] += 1
+        else:
+            bucket["unrated"] += 1
+    output: list[AlertQualityTrendRow] = []
+    for (week_start, alert_type), bucket in sorted(buckets.items()):
+        week_date = week_start
+        rated = bucket["useful"] + bucket["noise"]
+        output.append(
+            AlertQualityTrendRow(
+                week_start=datetime.combine(week_date, dt_time.min, tzinfo=UTC),
+                alert_type=alert_type,
+                useful=bucket["useful"],
+                noise=bucket["noise"],
+                unrated=bucket["unrated"],
+                total_acked=sum(bucket.values()),
+                useful_rate=(bucket["useful"] / rated) if rated else None,
+            )
+        )
+    return AlertQualityTrendResponse(weeks=output)
+
+
 @app.get("/risk/{asset_id}", response_model=RiskResponse)
 def risk(asset_id: int, session: DbSession) -> RiskResponse:
     asset = session.get(models.Asset, asset_id)
@@ -322,6 +466,7 @@ def risk(asset_id: int, session: DbSession) -> RiskResponse:
             )
         )
     }
+    features, _ = mask_unreliable_forecast(session, features)
     assessment = assess_risk(features)
     return RiskResponse(
         asset_id=asset_id,
@@ -928,6 +1073,33 @@ def features_velocity(
     return output[:limit]
 
 
+@app.post("/backtest/run", response_model=TriggerResponse)
+def trigger_backtest(payload: BacktestRequest) -> TriggerResponse:
+    """Launch a backtest from the UI, including lake replay mode."""
+    if payload.feature_source not in ("sql", "lake"):
+        raise HTTPException(status_code=422, detail="feature_source must be 'sql' or 'lake'")
+    import threading
+
+    def _run() -> None:
+        from backtest.runner import run_backtest
+        from storage.database import SessionLocal
+        with SessionLocal() as session:
+            run_backtest(
+                session,
+                start=payload.start,
+                end=payload.end,
+                top_k=payload.top_k,
+                forward_hours=payload.forward_hours,
+                feature_source=payload.feature_source,
+            )
+            session.commit()
+
+    threading.Thread(target=_run, name="api-backtest", daemon=True).start()
+    return TriggerResponse(
+        status="accepted", message=f"Backtest started with feature_source={payload.feature_source}"
+    )
+
+
 @app.get("/backtest/results", response_model=list[BacktestResultRow])
 def backtest_results(
     session: DbSession, limit: Annotated[int, Query(ge=1, le=100)] = 20
@@ -990,9 +1162,18 @@ def ops_console(session: DbSession) -> OpsConsoleResponse:
             state=scan.state,
             error_message=scan.error_message,
             details=scan.details,
+            pre_scan_health=(scan.details or {}).get("pre_scan_health", {}),
         )
     notifier_health_row = None
+    lake_budget_row = None
     notifier_components = latest_health(session, limit=50)
+    from ops.retention import project_lake_growth
+    retention_rows = session.scalars(
+        select(models.RetentionRun).order_by(desc(models.RetentionRun.ts)).limit(30)
+    ).all()
+    projection = project_lake_growth(
+        retention_rows, max_bytes=get_settings().archive_lake_max_bytes
+    )
     for component in notifier_components:
         if component.component == "notifier":
             notifier_health_row = NotifierHealthRow(
@@ -1002,6 +1183,17 @@ def ops_console(session: DbSession) -> OpsConsoleResponse:
                 message=component.message,
                 error_count=component.error_count,
             )
+        elif component.component == "lake_budget":
+            lake_budget_row = LakeBudgetHealthRow(
+                component=component.component,
+                state=component.state,
+                ts=component.ts,
+                message=component.message,
+                error_count=component.error_count,
+                projected_full_at=projection["projected_full_at"],
+                days_to_full=projection["days_to_full"],
+            )
+        if notifier_health_row is not None and lake_budget_row is not None:
             break
     alert_rows = session.scalars(
         select(models.Alert)
@@ -1013,6 +1205,7 @@ def ops_console(session: DbSession) -> OpsConsoleResponse:
     return OpsConsoleResponse(
         last_scan=scan_row,
         notifier_health=notifier_health_row,
+        lake_budget=lake_budget_row,
         recent_alerts=recent_alerts,
     )
 

@@ -35,17 +35,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
+from typing import TypedDict
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from common.config import Settings, get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
-from features.factory import FeatureFactory
+from features.factory import FeatureFactory, FeatureValue
 from features.lake import LAKE_FEATURE_NAMES, LakeFeatureFactory
 from ops.notifier import notify_parity_mismatch
 from storage import models
@@ -90,23 +92,29 @@ def compare_asset(
     decision_ts: datetime,
     tolerance: float,
     settings: Settings | None = None,
+    lake_values: dict[str, FeatureValue] | None = None,
 ) -> list[ParityMismatch]:
     """Build the same asset's features through both read paths and return the
     divergences among the lake-covered names.
 
     SQL path: ``FeatureFactory.build_for_asset`` over the live normalized
     tables. Lake path: ``LakeFeatureFactory.build_for_asset`` over the
-    archived Parquet evidence (DuckDB). Only the names in
-    ``LAKE_FEATURE_NAMES`` are compared — the other features need SQL-side
-    state (narratives, forecasts, lifecycle) by design.
+    archived Parquet evidence (DuckDB) — or the precomputed ``lake_values``
+    from a batched run, so the full-lake parity job downloads the lake once
+    instead of once per asset. Only the names in ``LAKE_FEATURE_NAMES`` are
+    compared — the other features need SQL-side state (narratives, forecasts,
+    lifecycle) by design.
     """
     sql_values = {
         value.name: value
         for value in FeatureFactory().build_for_asset(session, asset, decision_ts)
     }
-    lake_values = LakeFeatureFactory(settings=settings or get_settings()).build_for_asset(
-        asset_address=asset.address, decision_ts=decision_ts
-    )
+    if lake_values is None:
+        lake_values = LakeFeatureFactory(
+            settings=settings or get_settings()
+        ).build_for_asset(
+            asset_address=asset.address, decision_ts=decision_ts
+        )
     mismatches: list[ParityMismatch] = []
     for name in LAKE_FEATURE_NAMES:
         sql_feature = sql_values[name]
@@ -149,6 +157,41 @@ def parity_decision_ts(settings: Settings, now: datetime) -> datetime:
         settings.archive_compact_after_hours + settings.retention_cadence_hours + 1.0,
     )
     return floor_to_hour(now) - timedelta(hours=horizon)
+
+
+def _persist_mismatches(
+    session: Session,
+    *,
+    run_ts: datetime,
+    decision_ts: datetime,
+    state: str,
+    mismatches: list[ParityMismatch],
+    settings: Settings,
+) -> int:
+    """Record each divergence as a history row, pruning anything older than
+    the retention window first, so operators can review divergence history
+    instead of only the latest ntfy page."""
+    cutoff = run_ts - timedelta(days=settings.parity_history_retention_days)
+    session.execute(
+        delete(models.ParityMismatch).where(models.ParityMismatch.run_ts < cutoff)
+    )
+    for mismatch in mismatches:
+        session.add(
+            models.ParityMismatch(
+                run_ts=run_ts,
+                decision_ts=decision_ts,
+                asset_id=mismatch.asset_id,
+                symbol=mismatch.symbol,
+                feature_name=mismatch.feature_name,
+                sql_value=mismatch.sql_value,
+                lake_value=mismatch.lake_value,
+                sql_missing=mismatch.sql_missing,
+                lake_missing=mismatch.lake_missing,
+                state=state,
+            )
+        )
+    session.flush()
+    return len(mismatches)
 
 
 def _parity_push_due(session: Session, now: datetime, cooldown_hours: float) -> bool:
@@ -226,6 +269,12 @@ def run_parity(
         assets = session.scalars(stmt).all()
         mismatches: list[ParityMismatch] = []
         errors = 0
+        # Reconstruct the lake-covered block for every asset in ONE download /
+        # one DuckDB session, so a full-lake pass is not O(assets) downloads.
+        lake_factory = LakeFeatureFactory(settings=settings)
+        lake_values = lake_factory.build_for_assets(
+            [asset.address for asset in assets], decision_ts
+        )
         for asset in assets:
             try:
                 mismatches.extend(
@@ -235,6 +284,7 @@ def run_parity(
                         decision_ts=decision_ts,
                         tolerance=settings.parity_tolerance,
                         settings=settings,
+                        lake_values=lake_values.get(asset.address),
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - one asset must not kill the pass.
@@ -266,6 +316,16 @@ def run_parity(
                 f"tolerance={settings.parity_tolerance}"
             ),
             error_count=errors,
+        )
+        # Persist every divergence as a reviewable history row (bounded by the
+        # retention window, pruned at the start of each pass).
+        _persist_mismatches(
+            session,
+            run_ts=utc_now(),
+            decision_ts=decision_ts,
+            state=state,
+            mismatches=mismatches,
+            settings=settings,
         )
         pushed = False
         if push_due:
@@ -308,6 +368,92 @@ def maybe_run_parity() -> dict[str, object]:
         result = run_parity(session)
         session.commit()
         return result
+
+
+_PARITY_MSG_RE = re.compile(
+    r"lake-vs-SQL parity: (\d+) mismatches across (\d+) assets at decision "
+    r"([^;]+); tolerance=(\S+)"
+)
+
+
+class ParityLatest(TypedDict):
+    state: str
+    ts: datetime | None
+    message: str | None
+    error_count: int
+    mismatch_count: int
+    compared_assets: int
+    decision_ts: datetime | None
+    tolerance: float | None
+    compare_hours_ago: float
+
+
+class _ParsedParity(TypedDict):
+    mismatch_count: int
+    compared_assets: int
+    decision_ts: datetime | None
+    tolerance: float | None
+
+
+def _parse_parity_message(message: str) -> _ParsedParity:
+    """Extract structured numbers from the parity health-row message."""
+    match = _PARITY_MSG_RE.search(message or "")
+    if not match:
+        return {
+            "mismatch_count": 0,
+            "compared_assets": 0,
+            "decision_ts": None,
+            "tolerance": None,
+        }
+    decision_ts: datetime | None = None
+    try:
+        decision_ts = datetime.fromisoformat(match.group(3))
+    except ValueError:
+        pass
+    tolerance: float | None = None
+    try:
+        tolerance = float(match.group(4))
+    except (TypeError, ValueError):
+        pass
+    return {
+        "mismatch_count": int(match.group(1)),
+        "compared_assets": int(match.group(2)),
+        "decision_ts": decision_ts,
+        "tolerance": tolerance,
+    }
+
+
+def latest_parity(
+    session: Session, *, settings: Settings | None = None
+) -> ParityLatest | None:
+    """Structured summary of the most recent parity run from its health row.
+
+    Returns ``None`` when no parity pass has run yet. Used by ``GET
+    /parity/latest`` and the Feed Health parity panel, so the API/UI process
+    can show the last run's mismatch count, decision window, and state without
+    re-running the expensive comparison.
+    """
+    settings = settings or get_settings()
+    last = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == PARITY_HEALTH_COMPONENT)
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    if last is None:
+        return None
+    parsed = _parse_parity_message(last.message or "")
+    return {
+        "state": last.state,
+        "ts": last.ts,
+        "message": last.message,
+        "error_count": last.error_count,
+        "compared_assets": parsed["compared_assets"],
+        "mismatch_count": parsed["mismatch_count"],
+        "decision_ts": parsed["decision_ts"],
+        "tolerance": parsed["tolerance"],
+        "compare_hours_ago": settings.parity_compare_hours_ago,
+    }
 
 
 def main() -> None:

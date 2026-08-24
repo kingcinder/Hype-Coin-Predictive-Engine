@@ -1,6 +1,8 @@
 # Serpent Circle — retention autopilot timer.
 #
 # Fires serpent-retention.service daily (matching RETENTION_CADENCE_HOURS=24).
+# The service's --check-due gate makes duplicate/catch-up timer activations
+# exit cleanly without recording a no-op retention pass.
 # If you change RETENTION_CADENCE_HOURS in .env, adjust OnCalendar here to
 # match. Persistent=true catches up after the machine was off.
 #

@@ -161,6 +161,9 @@ def alert_upcoming_catalysts(
             0.0,
             (ensure_utc(scheduled_at) - decision_ts).total_seconds() / 3600.0,
         )
+        from ops.alert_quality import alert_generation_allowed
+        if not alert_generation_allowed(session, AlertType.UPCOMING_CATALYST.value, settings):
+            continue
         session.add(
             models.Alert(
                 asset_id=asset.id,

@@ -173,6 +173,8 @@ Register HTTP endpoints to receive real-time alerts:
 - `GET /retention/runs` — Retention history
 - `GET /retention/growth` — Lake-growth trendline + projected disk-full horizon
 - `GET /backtest/results` — Backtest results
+- `GET /parity/latest` — Latest lake-vs-SQL parity run (mismatch count, decision window, state)
+- `GET /parity/mismatches` — Reviewable lake-vs-SQL divergence history (per-asset/feature filters)
 - `GET /ops/console` — Live ops console
 
 ## GUI Views
@@ -229,6 +231,7 @@ Key environment variables (set in `.env`):
 | `FORECAST_TRAIN_FREQUENCY_HOURS` | 24 | Hours between forecast retraining |
 | `PARITY_FREQUENCY_HOURS` | 24 | Hours between lake-vs-SQL parity checks (`make parity`) |
 | `PARITY_COMPARE_HOURS_AGO` | 96 | Decision-time horizon for the parity comparison (clamped to the archive window) |
+| `PARITY_HISTORY_RETENTION_DAYS` | 90 | How long per-mismatch divergence history is kept for review |
 | `UI_REFRESH_SECONDS` | 30 | GUI auto-refresh interval |
 
 ## License

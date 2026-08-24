@@ -52,6 +52,18 @@ class NtfyNotifier:
             return {"skipped": True}
         decision_ts = ensure_utc(decision_ts or utc_now())
         session.flush()  # make event and alert rows created earlier in the scan visible
+        # Expired snoozes re-open notification eligibility only if the alert is
+        # still open; the original alert row is the persisted condition.
+        expired = session.scalars(
+            select(models.Alert).where(
+                models.Alert.snoozed_until.is_not(None),
+                models.Alert.snoozed_until <= decision_ts,
+            )
+        ).all()
+        for alert in expired:
+            alert.snoozed_until = None
+            alert.state = AlertState.OPEN.value
+        session.flush()
         backlog_start = decision_ts - timedelta(hours=self.settings.ntfy_backlog_hours)
         rows = session.scalars(
             select(models.Alert).where(
@@ -59,6 +71,8 @@ class NtfyNotifier:
                 models.Alert.notified_at.is_(None),
                 models.Alert.state == AlertState.OPEN.value,
                 models.Alert.created_at >= backlog_start,
+                models.Alert.snoozed_until.is_(None)
+                | (models.Alert.snoozed_until <= decision_ts),
             )
         ).all()
         sent = 0
@@ -283,6 +297,70 @@ def notify_rpc_pool_event(event: RpcPoolAlert) -> bool:
         return False
 
 
+def notify_lake_backlog(
+    backlog_rows: int,
+    batch_size: int,
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    """Page when aged evidence outgrows the archive batch capacity."""
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    try:
+        notifier._post(
+            (
+                f"Retention backlog is growing: {backlog_rows:,} aged rows remain "
+                f"after a {batch_size:,}-row archive batch."
+            ),
+            {
+                "Title": "Serpent Circle - Retention Backlog Warning",
+                "Priority": "4",
+                "Tags": "warning",
+                "Click": f"{notifier.settings.api_base_url}/retention/growth",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - notifier failure must not block retention.
+        log.warning("ntfy_lake_backlog_push_failed", error=str(exc))
+        return False
+
+
+def notify_lake_stale(
+    stale_hours: float,
+    cadence_hours: float,
+    stale_cycles: int,
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    """Warn when the archive has remained stale across repeated scan cycles."""
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    try:
+        notifier._post(
+            (
+                f"Lake retention is stale for {stale_hours:.1f} hours "
+                f"({stale_cycles} scan cycles; cadence {cadence_hours:g}h). "
+                "Run the retention pass before relying on archive-backed features."
+            ),
+            {
+                "Title": "Serpent Circle - Stale Lake Warning",
+                "Priority": "4",
+                "Tags": "warning",
+                "Click": f"{notifier.settings.api_base_url}/health",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - notifier failure must not block scans.
+        log.warning("ntfy_lake_stale_push_failed", error=str(exc))
+        return False
+
+
 def notify_lake_budget(
     days_to_full: float,
     pct_full: float,
@@ -375,6 +453,53 @@ def notify_parity_mismatch(
         return True
     except Exception as exc:  # noqa: BLE001 - parity health must not depend on ntfy.
         log.warning("ntfy_parity_push_failed", error=str(exc))
+        return False
+
+
+def notify_calibration_bias(
+    gap: float,
+    blended_cal: float,
+    real_cal: float,
+    real_test_samples: float,
+    *,
+    threshold: float,
+    settings: Settings | None = None,
+) -> bool:
+    """Warn that dense-label interpolation may be masking model performance.
+
+    Compares the real-only test calibration error against the blended (all
+    test samples, dense labels included) one. A positive ``gap``
+    (real - blended) past ``threshold`` means the model looks well-calibrated
+    on interpolated labels but worse on observed outcomes — the signature of
+    growing label-interpolation bias. Returns False when ntfy is disabled or
+    the push fails, so the next training pass retries (the health row is
+    recorded either way by the caller).
+    """
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    message = (
+        f"Calibration gap widened to {gap:.3f} — real-only test calibration "
+        f"error ({real_cal:.3f}) now exceeds blended ({blended_cal:.3f}) by "
+        f"more than the {threshold:.3f} threshold across {real_test_samples:.0f} "
+        "real observed test samples. Dense-label interpolation may be masking "
+        "true model performance."
+    )
+    try:
+        notifier._post(
+            message,
+            {
+                "Title": "Serpent Circle - Calibration Bias Warning",
+                "Priority": "4",
+                "Tags": "warning",
+                "Click": f"{notifier.settings.api_base_url}/confidence",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - calibration health must not depend on ntfy.
+        log.warning("ntfy_calibration_bias_failed", error=str(exc))
         return False
 
 

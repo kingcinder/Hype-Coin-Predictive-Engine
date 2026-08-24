@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -319,6 +320,53 @@ def test_velocity_features_endpoint_reports_live_values(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_alert_quality_trend_groups_weekly_rates_by_type(session) -> None:
+    """Weekly useful rates are grouped by alert family; unrated ACKs remain
+    visible but are excluded from the useful-rate denominator."""
+    asset = seed_market_asset(session)
+    base = datetime(2026, 5, 20, 12, 0, tzinfo=UTC)
+    for offset, alert_type, quality in [
+        (0, "ignition_detected", "useful"),
+        (1, "ignition_detected", "noise"),
+        (2, "ignition_detected", None),
+        (3, "lifecycle_transition", "useful"),
+        (14, "lifecycle_transition", "useful"),
+    ]:
+        session.add(
+            models.Alert(
+                asset_id=asset.id,
+                alert_type=alert_type,
+                threshold_version="test",
+                message="fixture",
+                state="acked",
+                created_at=base - timedelta(days=offset),
+                acked_at=base - timedelta(days=offset),
+                ack_quality=quality,
+            )
+        )
+    session.commit()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        response = TestClient(app).get("/alerts/quality/trend", params={"weeks": 104})
+        assert response.status_code == 200
+        rows = response.json()["weeks"]
+        ignition = next(row for row in rows if row["alert_type"] == "ignition_detected")
+        assert ignition["useful"] == 1
+        assert ignition["noise"] == 1
+        assert ignition["unrated"] == 1
+        assert ignition["total_acked"] == 3
+        assert ignition["useful_rate"] == pytest.approx(0.5)
+        lifecycle = [row for row in rows if row["alert_type"] == "lifecycle_transition"]
+        assert len(lifecycle) == 2
+        assert all(row["useful_rate"] == 1.0 for row in lifecycle)
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_ops_console_api(session) -> None:
     asset = seed_market_asset(session)
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
@@ -488,3 +536,98 @@ def test_retention_growth_api_projects_disk_full_horizon(session, monkeypatch) -
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
+
+
+def test_parity_latest_endpoint(session) -> None:
+    """GET /parity/latest returns the last parity run's state, mismatch count,
+    decision window, and compared assets from its health row; 404 before any run."""
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        assert client.get("/parity/latest").status_code == 404
+        decision = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+        record_health(
+            session,
+            component="parity",
+            state="red",
+            message=(
+                f"lake-vs-SQL parity: 3 mismatches across 42 assets at decision "
+                f"{decision.isoformat()}; tolerance=0.001"
+            ),
+            error_count=1,
+        )
+        session.commit()
+        body = client.get("/parity/latest").json()
+        assert body["state"] == "red"
+        assert body["mismatch_count"] == 3
+        assert body["compared_assets"] == 42
+        assert datetime.fromisoformat(body["decision_ts"]) == decision
+        assert body["error_count"] == 1
+        assert body["tolerance"] == pytest.approx(0.001)
+        assert body["compare_hours_ago"] == get_settings().parity_compare_hours_ago
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_parity_mismatches_endpoint_returns_history(session) -> None:
+    """GET /parity/mismatches returns reviewable divergence history, newest
+    run first, with per-asset/feature filtering."""
+    asset = seed_market_asset(session)
+    decision_ts = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    run_ts = datetime(2026, 5, 2, 0, 0, tzinfo=UTC)
+    session.add_all(
+        [
+            models.ParityMismatch(
+                run_ts=run_ts,
+                decision_ts=decision_ts,
+                asset_id=asset.id,
+                symbol=asset.symbol,
+                feature_name="holder_count",
+                sql_value=8.0,
+                lake_value=7.0,
+                sql_missing=False,
+                lake_missing=True,
+                state="red",
+            ),
+            models.ParityMismatch(
+                run_ts=run_ts + timedelta(hours=1),
+                decision_ts=decision_ts,
+                asset_id=asset.id,
+                symbol=asset.symbol,
+                feature_name="liquidity_depth",
+                sql_value=200_000.0,
+                lake_value=199_000.0,
+                sql_missing=False,
+                lake_missing=False,
+                state="yellow",
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        rows = client.get("/parity/mismatches").json()
+        assert len(rows) == 2
+        assert rows[0]["feature_name"] == "liquidity_depth"  # newest run first
+        assert rows[0]["sql_value"] == pytest.approx(200_000.0)
+        assert rows[0]["state"] == "yellow"
+        assert rows[1]["feature_name"] == "holder_count"
+        assert rows[1]["lake_missing"] is True
+        assert rows[1]["symbol"] == asset.symbol
+        filtered = client.get(
+            "/parity/mismatches", params={"feature": "holder_count"}
+        ).json()
+        assert len(filtered) == 1
+        assert filtered[0]["feature_name"] == "holder_count"
+    finally:
+        app.dependency_overrides.clear()

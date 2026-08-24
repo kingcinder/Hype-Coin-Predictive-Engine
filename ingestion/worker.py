@@ -22,9 +22,9 @@ def run_once() -> dict[str, object]:
         # since the last pass, surface the stale lake as yellow Feed Health
         # (same gate as `ops.retention --check-due`). Committed here so the
         # yellow row survives even if the scan itself fails and rolls back.
-        check_lake_freshness(session)
+        freshness = check_lake_freshness(session)
         session.commit()
-        return service.run_once(session)
+        return service.run_once(session, pre_scan_health={"lake": freshness})
 
 
 def main() -> None:

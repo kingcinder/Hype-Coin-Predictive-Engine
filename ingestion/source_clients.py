@@ -198,6 +198,67 @@ class SolanaRpcClient:
         return value if isinstance(value, list) else []
 
 
+class EVMHolderClient:
+    """Top-holder snapshots for EVM tokens via the free public Blockscout v2
+    API (no key): token info (``total_supply``) + the token-holders list.
+
+    Public Blockscout instances rate-limit unauthenticated requests (~3/min),
+    so callers must pause between tokens (``EVM_HOLDER_RPC_PAUSE_SECONDS``).
+    Balances and supply are returned in the token's raw units — pct-of-supply
+    and ranking are invariant to that common scale, and the SQL and lake read
+    paths both consume the same numbers, so the holder features agree.
+    """
+
+    BLOCKSCOUT_BASES = {
+        "base": "https://base.blockscout.com",
+        "ethereum": "https://eth.blockscout.com",
+    }
+
+    def __init__(self, chain_slug: str) -> None:
+        base = self.BLOCKSCOUT_BASES.get(chain_slug)
+        if not base:
+            raise ValueError(f"no blockscout instance for chain {chain_slug!r}")
+        self.chain_slug = chain_slug
+        self.http = HttpClient(base_url=base)
+
+    def close(self) -> None:
+        self.http.close()
+
+    def token_supply(self, address: str) -> float | None:
+        """Total supply in raw token units (``total_supply``), or None when
+        the token info call fails."""
+        data = self.http.get_json(f"/api/v2/tokens/{address}")
+        if not isinstance(data, dict):
+            return None
+        try:
+            return float(data["total_supply"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def top_holders(self, address: str) -> list[dict[str, Any]]:
+        """The token-holders page normalized to the canonical evidence shape
+        the lake reconstruction parses (``[{address, uiAmountString}]``)."""
+        data = self.http.get_json(f"/api/v2/tokens/{address}/holders")
+        if not isinstance(data, dict):
+            return []
+        items = data.get("items") or []
+        out: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            holder = item.get("address_hash")
+            address_hash = holder.get("hash") if isinstance(holder, dict) else None
+            raw_value = item.get("value")
+            if not address_hash or raw_value is None:
+                continue
+            try:
+                balance = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            out.append({"address": str(address_hash), "uiAmountString": str(balance)})
+        return out
+
+
 class EtherscanClient:
     CHAIN_IDS = {"ethereum": "1", "base": "8453"}
 

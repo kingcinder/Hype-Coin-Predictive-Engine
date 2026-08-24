@@ -26,6 +26,11 @@ Confirm:
 
 Backtests must only read source, feature, score, and market rows with `observed_at <= decision_time`. A late-arriving record can be used in future decisions, not retroactively in historical scans.
 
+For a full catalog of look-ahead / leakage vectors in the feature and label
+pipelines — including the model-output `collapse_probability_24h` feedback loop,
+non-point-in-time static asset metadata, and the bootstrap-label
+`observed_at` gap — see `docs/leakage-audit.md`.
+
 ## Source Normalization Proof
 
 Venue-source health must mean normalized rows were written, not only that an HTTP response was received.
@@ -142,8 +147,20 @@ Venue-source health must mean normalized rows were written, not only that an HTT
 - A trailing window with fewer than `FORECAST_DRIFT_MIN_SAMPLES` samples reports `yellow` with `drift=insufficient_trailing` instead of a false alarm.
 - Drift measures (`trailing_precision_at_10`, `baseline_precision_at_10`, `historical_precision_at_10`, `trailing_calibration_error`, and a numeric `drift.status`) must be persisted as `forecast.drift.*` backtest metrics on the same run.
 
+## Calibration-Bias Guard Proof
+
+- Each completed training run must compute the gap `real-only calibration error − blended calibration error` across the TEST set. A positive gap past `FORECAST_CAL_GAP_THRESHOLD` (default 0.10) with at least `FORECAST_CAL_GAP_MIN_SAMPLES` real observed test samples reports `component:forecast_calibration` health as `red`; otherwise `ok` (and `n/a` when too few real samples) — surfaced in Feed Health.
+- Over threshold, the notifier must push a **Calibration Bias Warning** (priority 4, `warning` tag) with the gap, blended vs real-only calibration errors, and real-sample count, once per `FORECAST_CAL_GAP_COOLDOWN_HOURS` (deduped against the last red row, evaluated before writing the current run's marker so it cannot suppress itself).
+- The check must run as part of the shared training path (`ForecastEngine.run`), so the scheduler profile, the zero-container worker loop, and the `python -m engine` loop all get it for free; a disabled ntfy must record health without pushing.
+
+## Real-Only Usage Gate Proof
+
+- With `FORECAST_GATE_ON_REAL_METRICS` enabled, `ForecastEngine.run` must judge the trained model by its **real-only** test readout, never the blended one. When `forecast.real_test_samples` < `FORECAST_GATE_MIN_REAL_SAMPLES` (default 5) or the real-only calibration error > `FORECAST_GATE_MAX_REAL_CAL_ERROR` (default 0.25), it must emit **no** production forecasts and report `component:forecast` health as `yellow` with the reason, returning `status="gated"` and the real-only readout.
+- When trusted (enough real samples and a healthy real-only calibration), behavior is unchanged. The gate is off by default — enabling it can stop forecast production until the real-only metrics recover, so it is an explicit operator decision.
+
 ## Push Notifier Proof
 
+- Alert generation applies the configurable signal-quality gate (`ALERT_QUALITY_NOISE_FLOOR` after `ALERT_QUALITY_MIN_RATINGS` rated ACKs) consistently across scoring, radar, fingerprint, lifecycle, prelaunch, and catalyst alerts; a quieted family is explicitly resumed with `POST /alerts/types/{alert_type}/reenable`.
 - Operators must be able to **ACK open alerts**: `POST /alerts/{id}/ack` must set `state=acked` with `acked_at` and an optional `ack_quality` (`useful`/`noise`), be idempotent on re-ack (updating the rating), reject invalid quality (422), and 404 on a missing alert. An ACKed alert must leave the notifier's open set — `NTFY` flushes must not push it (repeat-push suppression) — and, because alert creation dedupes on event ref regardless of state, later scans must not re-create it.
 - `GET /alerts/quality` must return the **signal-quality ledger**: total ACKed, useful/noise/unrated counts, the useful rate, and the most recently ACKed alerts with their ratings, so the operator can see which alert types earn their keep.
 - With `NTFY_ENABLED` and `NTFY_TOPIC` set, each new open alert of a configured type (`NTFY_ALERT_TYPES_CSV`) within the `NTFY_BACKLOG_HOURS` window must POST to ntfy.sh exactly once and be marked `notified_at`.
@@ -271,12 +288,22 @@ python -m ops.archive --query "SELECT partition_year, count(*) AS n FROM evidenc
 
 Inspect `GET /archive/manifests` (API) or the **Archive & Retention** UI view.
 
+CI must run both archive modes: the `moto-s3` job executes
+`tests/test_archive_s3.py` without a live service, while the
+`docker-minio-parity` job starts the Docker profile's real MinIO/Postgres/
+Redis services, runs migrations and fixture seeding, executes a live
+`ops.archive --once` smoke, and runs `ops.parity --once` against the S3 lake.
 The S3 backend must also be covered **without a live MinIO container** via
 moto (`tests/test_archive_s3.py`): `object_exists` (missing vs present),
 `list_objects` (prefix narrowing, parquet-only, missing prefix), `download_to`
 materialization, `make_store` backend selection, and the full
 compaction→`query_archive` DuckDB path (partitioned Parquet written to the
-mock bucket, then queried back with `SELECT ... FROM evidence`).
+mock bucket, then queried back with `SELECT ... FROM evidence`). A second
+compaction batch landing in the same `(source, year, month)` S3 partition
+must merge into the existing partition object (manifest `row_count` grows,
+one object in the bucket, `query_archive` returns both batches) — the moto
+mirror of the local-store merge test, proving the compactor never clobbers
+lake history on MinIO either.
 
 ### 4.5 Zero-cost audit
 
@@ -329,6 +356,13 @@ The stack must not require any paid key or subscription:
   `false_alarm_rate` (alerts that did not collapse within the forward window).
 - `python -m backtest.runner --start ...` must run a replay-safe backtest and
   print run id, status, git sha, and metrics.
+- Each scoring `BacktestRun` must also surface the latest forecast training
+  run's blended **and** real-only metrics (`forecast.precision_at_10`,
+  `forecast.calibration_error`, `forecast.precision_at_10_real`,
+  `forecast.calibration_error_real`, `forecast.real_test_samples`,
+  `forecast.test_samples`), so walk-forward output reports both readings next to
+  the scoring metrics and the operator can see the real-only numbers that
+  dense-label interpolation could otherwise mask.
 
 ## Lifecycle Walk-Forward Backtest Proof (pump_physics §9)
 
@@ -369,6 +403,19 @@ The stack must not require any paid key or subscription:
 - `component:archive` health must report `ok` after a successful run and `red`
   with the reason when the store fails.
 
+## Contract Analysis Persistence Proof
+
+- Each analyzed asset's findings (honeypot patterns, mint authority, pause
+  function, ownership not renounced, rug deployer) must be persisted as
+  point-in-time `contract_analysis` raw evidence (the `findings` list is the
+  single source of truth) plus one evidence-backed `ContractFlag` row per
+  finding — so `suspicious_contract_flags` counts the FULL flag set and the
+  lake replay reconstructs it from the archived evidence, not just
+  low-liquidity scans.
+- Re-analysis of the same asset must be idempotent: identical evidence
+  dedupes on content hash and an existing `(contract, flag_type)` flag row is
+  never duplicated.
+
 ## DuckDB Lake Feature Parity Proof (features §6)
 
 - `features/lake.py` must reconstruct the normalized market/liquidity series
@@ -386,13 +433,24 @@ The stack must not require any paid key or subscription:
 - The lake path must reconstruct the on-chain holder features
   (`holder_count`, `holder_growth`, `top_holder_concentration`) from the
   archived `chain_rpc` holder-snapshot evidence (`solana_rpc` payloads with
-  `mint`/`supply`/`largest_accounts`), deduping per `(hour, wallet)` exactly
+  `mint`/`supply`/`largest_accounts`, deduping per `(hour, wallet)` exactly
   like `insert_holder_once`, with the same latest-snapshot count, top-10
-  concentration, and one-hour-ago growth delta the SQL path computes.
-- `suspicious_contract_flags` must reconstruct as the count of evidence-backed
-  `low_liquidity` contract flags — GeckoTerminal pool scans whose
-  `reserve_in_usd` fell below `min_discovery_liquidity_usd` — and, like the
-  SQL path, report `0.0` (never missing) when no flags exist.
+  concentration, and one-hour-ago growth delta the SQL path computes). The
+  reconstruction is **chain-agnostic**: an EVM asset whose holder evidence
+  arrives on the `evm_holders` source (Blockscout v2, `base.blockscout.com`
+  / `eth.blockscout.com`, no key) with the same payload shape must
+  reconstruct identically — a parity test seeds Base-chain holder evidence
+  and asserts the lake matches the SQL path.
+- `suspicious_contract_flags` must reconstruct as the FULL count of
+  evidence-backed contract flags: the GeckoTerminal pool scans whose
+  `reserve_in_usd` fell below `min_discovery_liquidity_usd` (one
+  `low_liquidity` flag each) PLUS the contract analyzer's findings —
+  honeypot patterns, mint authority, pause function, ownership not
+  renounced, rug deployer — archived as `contract_analysis` evidence with a
+  deterministic `findings` list. Both paths apply the SQL severity filter
+  (`warning | high | critical | black`) so they count the same
+  `ContractFlag` rows; like the SQL path, the feature must report `0.0`
+  (never missing) when no flags exist.
 - An empty lake must report the market block as honest `missing`, never
   fabricated zeros; evidence for other base addresses must be ignored.
 - `build_and_persist_features(..., feature_source="lake")` must replay the
@@ -403,6 +461,13 @@ The stack must not require any paid key or subscription:
   `BacktestConfig`/`run_backtest`/`python -m backtest.runner --feature-source
   lake` must thread the switch through, and the run's `config_json` must
   record which source produced its features.
+- The parity test must also run the **full pipeline** through
+  `build_and_persist_features` on the same seeded fixture: persisting with
+  `feature_source='sql'` and then `'lake'` must yield IDENTICAL persisted
+  `Feature` rows for all 15 lake-covered names — `feature_value`, missing
+  flag, `source_count`, and `freshness_score` — not just matching in-memory
+  values, so the write path (not only the read path) is provably
+  interchangeable.
 - Lake timestamps must be written as naive UTC (`TIMESTAMP`, not `TIMESTAMP
   WITH TIME ZONE`) so DuckDB truncation/comparison needs no optional `pytz`.
 - Reconstructions must be cached at the class level on `LakeFeatureFactory`
@@ -412,7 +477,28 @@ The stack must not require any paid key or subscription:
   hour)` bucket. The cache is exact for hour-boundary decisions (the
   backtest contract) and bypassed for sub-hour decision times; a
   `clear_cache()` classmethod drops it (e.g. after new evidence is compacted
-  into the lake).
+  into the lake). The retention autopilot must call `clear_cache()` whenever
+  a pass actually compacts new Parquet (`compacted > 0`), so long-lived
+  worker/API processes invalidate stale reconstructions; a pass with nothing
+  due keeps the cache warm.
+  due keeps the cache warm. The cache must stay consistent under concurrent
+  access: simultaneous threads building the same `(asset, hour)` must all
+  return identical reconstructions, leave exactly one cache entry per key,
+  and keep `hits + misses == lookups` (a regression test races 8 threads on
+  the single-asset and batched paths).
+- `LakeFeatureFactory` must expose process-lifetime cache hit/miss counters
+  (`cache_stats()` / `reset_cache_stats()`), and a `feature_source="lake"`
+  backtest run must snapshot them around the walk-forward and persist the
+  delta as `lake_cache.hits`, `lake_cache.misses`, and
+  `lake_cache.saved_queries` (`hits == saved_queries`) metrics — so replay
+  runs report how many DuckDB queries the cache saved (a warm second run
+  over the same window serves everything from cache: hits ≥ 1, misses 0).
+- `LakeFeatureFactory.build_for_assets` (and `persist_for_assets`) must
+  reconstruct **all assets in one pass**: the Parquet lake is listed and
+  downloaded once and every asset is queried in a single DuckDB session
+  (the reconstruction SQL filters by `LIST_CONTAINS($asset_addresses, ...)`
+  and the results are grouped per asset), so a full-lake job like the
+  parity CI is O(1) downloads, not O(assets).
 
 ## Lake-vs-SQL Parity CI Proof
 
@@ -447,6 +533,19 @@ The stack must not require any paid key or subscription:
 - A failed run must never kill the caller: it records `component:parity`
   health as `red` and returns `{"error": ...}`, and a single asset's
   comparison failure counts as an error instead of aborting the pass.
+- `GET /parity/latest` must return the most recent parity run's structured
+  summary — state, mismatch count, compared assets, decision time (parsed
+  from the health-row message), tolerance, compare horizon, and error
+  count — or 404 before any run has completed, and the **Feed Health** view
+  must render it in a Lake-vs-SQL Parity panel.
+- Each run must persist every divergence as a `parity_mismatches` history
+  row (run timestamp, comparison decision hour, asset, symbol, feature,
+  SQL and lake values, missing flags, run state), pruning rows older than
+  `PARITY_HISTORY_RETENTION_DAYS` (default 90) at the start of each pass;
+  a clean run must leave no rows. `GET /parity/mismatches` must return the
+  history newest-run-first with optional `asset_id` / `feature` filters, and
+  the Feed Health parity panel must render it in a Divergence history
+  expander.
 
 ## Zero-Container Profile Proof
 
@@ -464,3 +563,4 @@ The stack must not require any paid key or subscription:
 
 - Solana holder ingestion must write idempotent `holders` rows from RPC token-account evidence before scoring runs.
 - `source:solana_holders` health must report the number of holder rows and assets scanned, or preserve the exact RPC failure reason when public RPC/provider limits block the scan.
+- Base/Ethereum holder ingestion must write idempotent `holders` rows from free public Blockscout v2 token-holder evidence (`EVMHolderClient`, no key): token info for `total_supply` plus the token-holders page, normalized to the same `mint`/`supply`/`largest_accounts` evidence shape the Solana path and the lake replay parse. The scan is bounded by `EVM_HOLDER_SCAN_LIMIT` per chain and paced by `EVM_HOLDER_RPC_PAUSE_SECONDS` to stay under Blockscout's unauthenticated rate limit (~3 req/min). One aggregate `source:evm_holders` health row must report the holder rows and scanned-chain count (`yellow` with `0 eligible assets` when chains exist but nothing is scannable), and the whole scan must be idempotent on repeat runs.
