@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from backtest.runner import point_in_time_market_rows, run_backtest
+from backtest.runner import BacktestConfig, point_in_time_market_rows, run_backtest
 from common.time import ensure_utc
 from storage import models
 from storage.repository import insert_market_snapshot_once
@@ -54,3 +54,37 @@ def test_backtest_run_writes_metrics(session) -> None:
         "false_alarm_rate",
     }
     assert run.git_sha is None or len(run.git_sha) == 40
+
+
+def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> None:
+    """feature_source flows from the config through the runner into
+    build_and_persist_features and is recorded on the run for audit."""
+    import scoring.engine as scoring_engine
+
+    captured: dict[str, str] = {}
+
+    def _fake_build(
+        session, *, decision_ts=None, asset_ids=None, feature_source="sql"
+    ):
+        captured["feature_source"] = feature_source
+        return {}
+
+    monkeypatch.setattr(scoring_engine, "build_and_persist_features", _fake_build)
+    seed_market_asset(session)
+    run = run_backtest(
+        session,
+        start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        top_k=10,
+        forward_hours=1,
+        feature_source="lake",
+    )
+    session.commit()
+
+    assert captured["feature_source"] == "lake"
+    assert run.status == "completed"
+    assert run.config_json["feature_source"] == "lake"
+    assert BacktestConfig(
+        start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+    ).feature_source == "sql"

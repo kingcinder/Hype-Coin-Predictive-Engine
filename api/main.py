@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 
 from api.analytics import similar_setups
 from api.schemas import (
+    AlertAckRequest,
+    AlertQualityLedger,
+    AlertQualityRow,
     AlertRow,
     ArchiveManifestRow,
     BacktestResultRow,
@@ -31,6 +34,7 @@ from api.schemas import (
     NotifierHealthRow,
     OpsConsoleResponse,
     PrelaunchRow,
+    RetentionGrowthRow,
     RetentionRunRow,
     RiskResponse,
     RpcPoolChainRow,
@@ -44,7 +48,10 @@ from api.schemas import (
     TriggerResponse,
     VelocityFeatureRow,
 )
+from common.config import get_settings
+from common.enums import AlertState
 from common.logging import get_logger
+from common.time import utc_now
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
 from risk_engine.rules import assess_risk
@@ -194,26 +201,100 @@ def token_detail(asset_id: int, session: DbSession) -> TokenDetail:
     )
 
 
+def _alert_row(session: DbSession, row: models.Alert) -> AlertRow:
+    asset = session.get(models.Asset, row.asset_id)
+    return AlertRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        created_at=row.created_at,
+        alert_type=row.alert_type,
+        state=row.state,
+        message=row.message,
+        notified_at=row.notified_at,
+        acked_at=row.acked_at,
+        ack_quality=row.ack_quality,
+    )
+
+
 @app.get("/alerts", response_model=list[AlertRow])
 def alerts(session: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 50) -> list[AlertRow]:
     rows = session.scalars(
         select(models.Alert).order_by(desc(models.Alert.created_at)).limit(limit)
     ).all()
-    out: list[AlertRow] = []
-    for row in rows:
+    return [_alert_row(session, row) for row in rows]
+
+
+@app.post("/alerts/{alert_id}/ack", response_model=AlertRow)
+def ack_alert(
+    alert_id: int,
+    payload: AlertAckRequest,
+    session: DbSession,
+) -> AlertRow:
+    """ACK an open alert, optionally rating its signal quality.
+
+    An ACKed alert leaves the notifier's open set (``state=open``), so repeat
+    pushes are suppressed — the event-ref dedup means it is not re-created on
+    later scans either. ``quality`` (``useful``/``noise``) feeds the
+    signal-quality ledger; re-acking updates the rating."""
+    alert = session.get(models.Alert, alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail=f"alert not found: {alert_id}")
+    quality = payload.quality.strip().lower() if payload.quality else None
+    if quality not in (None, "useful", "noise"):
+        raise HTTPException(
+            status_code=422,
+            detail="quality must be 'useful', 'noise', or empty",
+        )
+    now = utc_now()
+    alert.state = AlertState.ACKED.value
+    alert.acked_at = now
+    alert.ack_quality = quality
+    session.commit()
+    session.refresh(alert)
+    return _alert_row(session, alert)
+
+
+@app.get("/alerts/quality", response_model=AlertQualityLedger)
+def alert_quality_ledger(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AlertQualityLedger:
+    """Signal-quality ledger: how often acked alerts were rated useful."""
+    acked = session.scalars(
+        select(models.Alert)
+        .where(models.Alert.acked_at.is_not(None))
+        .order_by(desc(models.Alert.acked_at))
+    ).all()
+    useful = sum(1 for row in acked if row.ack_quality == "useful")
+    noise = sum(1 for row in acked if row.ack_quality == "noise")
+    unrated = len(acked) - useful - noise
+    rated = useful + noise
+    useful_rate = (useful / rated) if rated else None
+    recent: list[AlertQualityRow] = []
+    for row in acked[:limit]:
         asset = session.get(models.Asset, row.asset_id)
-        out.append(
-            AlertRow(
+        recent.append(
+            AlertQualityRow(
                 id=row.id,
                 asset_id=row.asset_id,
                 symbol=asset.symbol if asset else None,
-                created_at=row.created_at,
                 alert_type=row.alert_type,
                 state=row.state,
                 message=row.message,
+                created_at=row.created_at,
+                acked_at=row.acked_at,
+                ack_quality=row.ack_quality,
             )
         )
-    return out
+    return AlertQualityLedger(
+        total_acked=len(acked),
+        useful=useful,
+        noise=noise,
+        unrated=unrated,
+        useful_rate=useful_rate,
+        recent=recent,
+    )
 
 
 @app.get("/risk/{asset_id}", response_model=RiskResponse)
@@ -657,6 +738,45 @@ def retention_runs(
     ]
 
 
+@app.get("/retention/growth", response_model=RetentionGrowthRow)
+def retention_growth(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=2, le=200)] = 30,
+) -> RetentionGrowthRow:
+    """Lake-growth trendline data: retention-pass history plus a projected
+    disk-full horizon extrapolated from the recent growth rate (linear fit of
+    ``byte_size`` over elapsed time, capped by ``ARCHIVE_LAKE_MAX_BYTES``)."""
+    from ops.retention import project_lake_growth
+
+    rows = session.scalars(
+        select(models.RetentionRun).order_by(desc(models.RetentionRun.ts)).limit(limit)
+    ).all()
+    settings = get_settings()
+    projection = project_lake_growth(rows, max_bytes=settings.archive_lake_max_bytes)
+    return RetentionGrowthRow(
+        runs=[
+            RetentionRunRow(
+                id=row.id,
+                ts=row.ts,
+                partitions=row.partitions,
+                archived_rows=row.archived_rows,
+                byte_size=row.byte_size,
+                compacted=row.compacted,
+                pruned=row.pruned,
+                growth_bytes=row.growth_bytes,
+                growth_pct=row.growth_pct,
+                duration_sec=row.duration_sec,
+            )
+            for row in rows
+        ],
+        max_bytes=settings.archive_lake_max_bytes,
+        growth_rate_bytes_per_hour=projection["growth_rate_bytes_per_hour"],
+        projected_full_at=projection["projected_full_at"],
+        days_to_full=projection["days_to_full"],
+        pct_full=projection["pct_full"],
+    )
+
+
 @app.get("/rpc/pool", response_model=list[RpcPoolChainRow])
 def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
     """Per-chain RPC pool state, preferring the worker's persisted snapshots.
@@ -889,20 +1009,7 @@ def ops_console(session: DbSession) -> OpsConsoleResponse:
         .order_by(desc(models.Alert.notified_at))
         .limit(20)
     ).all()
-    recent_alerts: list[AlertRow] = []
-    for row in alert_rows:
-        asset = session.get(models.Asset, row.asset_id)
-        recent_alerts.append(
-            AlertRow(
-                id=row.id,
-                asset_id=row.asset_id,
-                symbol=asset.symbol if asset else None,
-                created_at=row.created_at,
-                alert_type=row.alert_type,
-                state=row.state,
-                message=row.message,
-            )
-        )
+    recent_alerts = [_alert_row(session, row) for row in alert_rows]
     return OpsConsoleResponse(
         last_scan=scan_row,
         notifier_health=notifier_health_row,

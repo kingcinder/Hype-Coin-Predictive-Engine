@@ -459,6 +459,8 @@ CREATE TABLE alerts (
 	state VARCHAR(32) NOT NULL, 
 	message TEXT NOT NULL, 
 	notified_at TIMESTAMP WITH TIME ZONE, 
+	acked_at TIMESTAMP WITH TIME ZONE, 
+	ack_quality VARCHAR(32), 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(asset_id) REFERENCES assets (id), 
 	FOREIGN KEY(score_id) REFERENCES scores (id)

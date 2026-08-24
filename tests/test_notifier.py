@@ -37,6 +37,41 @@ def _enable_ntfy(notifier: NtfyNotifier, *, digest: bool = False) -> None:
     notifier.settings.ntfy_daily_digest_enabled = digest
 
 
+def test_acked_alerts_are_not_pushed(session) -> None:
+    """ACKing an alert removes it from the notifier's open set: repeat pushes
+    are suppressed while other open alerts still flush."""
+    asset = seed_market_asset(session)
+    open_alert = _seed_alert(
+        session, asset_id=asset.id, alert_type="ignition_detected", created_at=NOW
+    )
+    acked = _seed_alert(
+        session, asset_id=asset.id, alert_type="syndicate_recidivism", created_at=NOW
+    )
+    acked.state = "acked"
+    acked.acked_at = NOW
+    acked.ack_quality = "noise"
+    session.commit()
+    assert open_alert.id
+
+    notifier = NtfyNotifier()
+    _enable_ntfy(notifier)
+    titles: list[str] = []
+
+    def handler(request):
+        titles.append(request.headers.get("title", ""))
+        return Response(200, content=b"ok")
+
+    with respx.mock:
+        respx.post(NTFY_URL).mock(side_effect=handler)
+        result = notifier.flush(session, decision_ts=NOW)
+        session.commit()
+
+    assert result["sent"] == 1
+    assert len(titles) == 1
+    assert "Ignition Detected" in titles[0]
+    assert not any("Syndicate Recidivism" in title for title in titles)
+
+
 def test_notifier_pushes_each_type_once(session) -> None:
     asset = seed_market_asset(session)
     for alert_type in (

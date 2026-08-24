@@ -229,7 +229,22 @@ reconstructs the normalized market/liquidity series from the GeckoTerminal
 `new_pools` evidence payloads (same h1|h24|m5 window precedence, same hourly floor,
 same first-wins dedup as ingestion) and feeds the *shared*
 `compute_market_block` math the SQL path uses — so the two read paths are provably
-identical, enforced by the parity test in `tests/test_lake_features.py`.
+identical, enforced by the parity test in `tests/test_lake_features.py`. The lake
+path also reconstructs the on-chain features from the archived RPC evidence:
+`holder_count` / `holder_growth` / `top_holder_concentration` from the
+`solana_rpc` holder-snapshot payloads (`largest_accounts` + `supply`, deduped per
+hour/wallet like `insert_holder_once`) and `suspicious_contract_flags` as the
+count of evidence-backed `low_liquidity` scans (`reserve_in_usd` below
+`min_discovery_liquidity_usd`). Reconstructions are cached per `(asset, hour)`
+at the class level (bounded LRU, shared across factory instances), so repeated
+backtest steps over the same window never re-query DuckDB; sub-hour decision
+times bypass the cache and `LakeFeatureFactory.clear_cache()` drops it. A
+**daily parity CI job** (`ops/parity.py`, `PARITY_FREQUENCY_HOURS`) runs the
+same comparison against the full production lake at a decision time provably
+inside the archived window and pages any divergence via ntfy
+(`Serpent Circle - Lake Parity Mismatch`), so a payload-shape change or
+reconstruction drift that would silently skew lake-replayed backtests is
+surfaced instead of quietly corrupting results.
 
 ---
 
@@ -463,15 +478,20 @@ evidence), FastAPI, Streamlit, APScheduler.
   evidence into `source/year/month` partitioned Parquet over MinIO (docker) or local
   disk (zero-container), marks rows `archived_at`, prunes unreferenced rows older than
   `ARCHIVE_RETENTION_DAYS`, exposes the lake to DuckDB via `python -m ops.archive
-  --query`, and reports `component:archive` health. The compactor runs inside the
-  ingestion worker each scan and standalone via `make archive`. `GET /archive/manifests`
-  + the **Archive & Retention** UI view surface the lake. The retention autopilot
-  (`ops/retention.py`) schedules compaction + pruning on `RETENTION_CADENCE_HOURS`
-  (APScheduler job, worker-loop cadence check, or a systemd timer /
-  Task Scheduler entry invoking `python -m ops.retention --once`), persists one
-  `RetentionRun` per pass with lake totals + `growth_bytes`/`growth_pct`, and reports
-  the growth in Feed Health as `component:lake`. A full $0 stack validation
-  runbook lives in `docs/validation.md` §Phase 4.)*
+  --query`, and reports `component:archive` health. Compaction runs on a
+  **per-partition schedule**: each pass computes the `(source, year, month)`
+  partitions whose evidence has aged past `ARCHIVE_COMPACT_AFTER_HOURS` and
+  compacts exactly those (zero work when nothing is due). The ingestion worker
+  never touches the archive — the retention autopilot (`ops/retention.py`)
+  fully owns compaction + pruning on `RETENTION_CADENCE_HOURS` (APScheduler
+  job, worker-loop cadence check, or a systemd timer /
+  Task Scheduler entry invoking `python -m ops.retention --once`, or run one
+  pass by hand via `make retention`), and manual compaction-only passes run
+  standalone via `make archive`. Each pass persists one
+  `RetentionRun` with lake totals + `growth_bytes`/`growth_pct`, and reports
+  the growth in Feed Health as `component:lake`. `GET /archive/manifests`
+  + the **Archive & Retention** UI view surface the lake. A full $0 stack
+  validation runbook lives in `docs/validation.md` §Phase 4.)*
 
 **North star metric:** *median minutes of advance warning for collapse onset at a 70%
 recall and <30% false-alarm rate, measured on a walk-forward backtest.* If the engine

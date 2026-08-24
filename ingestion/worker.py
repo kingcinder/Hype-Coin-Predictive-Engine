@@ -8,7 +8,8 @@ from common.logging import get_logger
 from forecast.engine import maybe_run_forecast
 from ingestion.service import IngestionService, backoff_sleep_seconds
 from ingestion.source_clients import ensure_background_probe
-from ops.retention import maybe_run_retention
+from ops.parity import maybe_run_parity
+from ops.retention import check_lake_freshness, maybe_run_retention
 from storage.database import SessionLocal
 
 log = get_logger(__name__)
@@ -17,6 +18,12 @@ log = get_logger(__name__)
 def run_once() -> dict[str, object]:
     service = IngestionService()
     with SessionLocal() as session:
+        # Pre-scan lake freshness check: when the retention cadence has elapsed
+        # since the last pass, surface the stale lake as yellow Feed Health
+        # (same gate as `ops.retention --check-due`). Committed here so the
+        # yellow row survives even if the scan itself fails and rolls back.
+        check_lake_freshness(session)
+        session.commit()
         return service.run_once(session)
 
 
@@ -46,11 +53,16 @@ def main() -> None:
             log.info("forecast_training_complete", result=forecast)
         # Retention autopilot: run the compaction + pruning + lake-growth pass
         # when the configured cadence has elapsed since the last pass. The scan
-        # itself still compacts incrementally; this is the cadence-gated pass
-        # with the Feed Health lake report.
+        # never touches the archive; this cadence fully owns compaction on the
+        # per-partition schedule and reports the lake in Feed Health.
         retention = maybe_run_retention()
         if not retention.get("skipped"):
             log.info("retention_autopilot_complete", result=retention)
+        # Lake-vs-SQL parity CI: compare the DuckDB lake read path against the
+        # live SQL path on the daily cadence and page a mismatch via ntfy.
+        parity = maybe_run_parity()
+        if not parity.get("skipped"):
+            log.info("parity_check_complete", result=parity)
         time.sleep(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
 
 

@@ -119,6 +119,7 @@ def main() -> None:
     from ingestion.service import backoff_sleep_seconds
     from ingestion.source_clients import ensure_background_probe
     from ingestion.worker import run_once
+    from ops.parity import maybe_run_parity
     from ops.retention import maybe_run_retention
     from storage.database import SessionLocal
 
@@ -131,7 +132,9 @@ def main() -> None:
         while not stop.is_set():
             iteration += 1
             try:
-                engine_state.mark_scanning(iteration=iteration, message=f"Scan iteration {iteration}")
+                engine_state.mark_scanning(
+                    iteration=iteration, message=f"Scan iteration {iteration}"
+                )
                 result = run_once()
                 engine_state.mark_scan_result(result)
                 log.info("engine_scan_complete", iteration=iteration, result=result)
@@ -159,6 +162,14 @@ def main() -> None:
                 log.exception("engine_retention_failed", iteration=iteration, error=str(exc))
                 engine_state.mark_error(f"retention: {exc}")
                 phase_error = True
+            # Lake-vs-SQL parity CI: daily comparison of the lake read path
+            # against the live SQL path, paging a mismatch via ntfy.
+            try:
+                parity = maybe_run_parity()
+                if not parity.get("skipped"):
+                    log.info("engine_parity_complete", result=parity)
+            except Exception as exc:  # noqa: BLE001 - parity failure must not kill the engine
+                log.exception("engine_parity_failed", iteration=iteration, error=str(exc))
             # Night Crawler pass: crawl all sources, feed data lake
             # Gated by interval — only runs every nightcrawler_interval_minutes
             try:
@@ -171,7 +182,11 @@ def main() -> None:
                             nc_result = run_nightcrawler_pipeline(session)
                             session.commit()
                         _last_nc_run_monotonic = now_mono
-                        log.info("engine_nightcrawler_complete", iteration=iteration, result=nc_result)
+                        log.info(
+                            "engine_nightcrawler_complete",
+                            iteration=iteration,
+                            result=nc_result,
+                        )
             except Exception as exc:  # noqa: BLE001
                 log.exception("engine_nightcrawler_failed", iteration=iteration, error=str(exc))
                 engine_state.mark_error(f"nightcrawler: {exc}")

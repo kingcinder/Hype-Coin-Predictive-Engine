@@ -7,6 +7,7 @@ from common.logging import get_logger
 from forecast.engine import maybe_run_forecast
 from ingestion.source_clients import ensure_background_probe
 from ingestion.worker import run_once
+from ops.parity import run_parity
 from ops.retention import run_retention
 
 log = get_logger(__name__)
@@ -20,6 +21,16 @@ def _retention_job() -> None:
         result = run_retention(session)
         session.commit()
     log.info("retention_autopilot_run", result=result)
+
+
+def _parity_job() -> None:
+    """Daily lake-vs-SQL parity comparison over the archived lake."""
+    from storage.database import SessionLocal
+
+    with SessionLocal() as session:
+        result = run_parity(session)
+        session.commit()
+    log.info("parity_check_run", result=result)
 
 
 def _forecast_job() -> None:
@@ -59,6 +70,19 @@ def main() -> None:
         log.info(
             "retention_autopilot_scheduled",
             cadence_hours=settings.retention_cadence_hours,
+        )
+    if settings.parity_enabled and settings.archive_enabled:
+        scheduler.add_job(
+            _parity_job,
+            "interval",
+            hours=settings.parity_frequency_hours,
+            id="lake_parity",
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info(
+            "parity_scheduled",
+            frequency_hours=settings.parity_frequency_hours,
         )
     log.info("scheduler_started", interval_seconds=settings.scan_interval_seconds)
     scheduler.start()

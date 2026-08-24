@@ -11,11 +11,12 @@ from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import floor_to_hour, utc_now
-from ingestion.data_quality import check_market_snapshots
-from ingestion.contract_analyzer import analyze_contract
-from ingestion.holder_tracker import get_solana_holders, get_evm_holders  # noqa: F401
 from fingerprint.engine import FingerprintEngine
 from forecast.engine import run_forecast_if_due
+from ingestion.birdeye_client import BirdeyeClient
+from ingestion.contract_analyzer import analyze_contract
+from ingestion.data_quality import check_market_snapshots
+from ingestion.holder_tracker import get_evm_holders, get_solana_holders  # noqa: F401
 from ingestion.normalizers import (
     NormalizedPair,
     extract_profile_links,
@@ -35,10 +36,8 @@ from ingestion.source_clients import (
     get_rpc_url,
     probe_rpc_endpoint,
 )
-from ingestion.birdeye_client import BirdeyeClient
 from mempool import run_mempool
 from narrative import run_narrative
-from ops.archive import run_archive
 from ops.notifier import notify_rpc_pool_event, run_notifier
 from pump_physics import run_lifecycle
 from radar.ignition import IgnitionRadar
@@ -199,7 +198,11 @@ class IngestionService:
             scores = score_current_assets(session, decision_ts=decision_ts)
             result["scores"] = len(scores)
             result["ntfy"] = run_notifier(session, decision_ts=decision_ts)
-            result["archive"] = run_archive(session, decision_ts=decision_ts)
+            # Compaction is owned by the retention autopilot on its cadence
+            # (RETENTION_CADENCE_HOURS), running on a per-partition schedule.
+            # The scan never touches the archive; it just reports the stage as
+            # skipped (partitions=0) so the ops console shows archive=0.
+            result["archive"] = {"skipped": True, "partitions": 0, "compacted": 0}
             # ── Phase 1: Data quality check ─────────────────────────────
             try:
                 quality = self._run_data_quality_check(session, decision_ts)
@@ -220,7 +223,8 @@ class IngestionService:
                 state="ok",
                 message=(
                     "scan, mempool, prelaunch, narrative, catalyst, radar, fingerprint, "
-                    "lifecycle, forecast, scoring, and archive completed"
+                    "lifecycle, forecast, and scoring completed; archive is owned by "
+                    "the retention autopilot"
                 ),
             )
             # Probe downed endpoints so the health rows reflect fresh state
@@ -313,7 +317,12 @@ class IngestionService:
         ).all()
         query = select(models.Asset).order_by(desc(models.Asset.created_at)).limit(10)
         if analyzed_ids:
-            query = select(models.Asset).where(models.Asset.id.notin_(analyzed_ids)).order_by(desc(models.Asset.created_at)).limit(10)
+            query = (
+                select(models.Asset)
+                .where(models.Asset.id.notin_(analyzed_ids))
+                .order_by(desc(models.Asset.created_at))
+                .limit(10)
+            )
         recent_assets = session.scalars(query).all()
         results: list[dict[str, Any]] = []
         for asset in recent_assets:
@@ -358,7 +367,11 @@ class IngestionService:
                     continue
                 upsert_asset(
                     session,
-                    chain_id=(solana_chain.id if (solana_chain := self._chain(session, "solana")) else 1),
+                    chain_id=(
+                        solana_chain.id
+                        if (solana_chain := self._chain(session, "solana"))
+                        else 1
+                    ),
                     address=address,
                     symbol=token.get("symbol") or "UNKNOWN",
                     name=token.get("name"),

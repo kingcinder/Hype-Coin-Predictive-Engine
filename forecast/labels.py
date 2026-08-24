@@ -202,7 +202,9 @@ def seed_labels_at_feature_timestamps(
     This is the critical bridge that unblocks ML training.
     """
     settings = get_settings()
-    decision_ts = ensure_utc(decision_ts or utc_now())
+    # Strip timezone for SQLite compatibility — SQLite stores naive datetimes
+    # and comparing aware vs naive silently returns no results from SQL queries.
+    decision_ts = ensure_utc(decision_ts or utc_now()).replace(tzinfo=None)
     forward_hours = settings.forecast_forward_hours
     ignition_threshold = settings.forecast_ignition_threshold
     collapse_threshold = settings.forecast_collapse_threshold
@@ -220,7 +222,9 @@ def seed_labels_at_feature_timestamps(
 
         for asset_id_raw, feature_ts in feature_rows:
             asset_id = int(asset_id_raw)
-            feature_ts = ensure_utc(feature_ts)
+            # Strip timezone info for SQLite compatibility — SQLite stores naive
+            # datetimes and comparing aware vs naive silently returns no results.
+            feature_ts = ensure_utc(feature_ts).replace(tzinfo=None)
             # Skip if forward window hasn't elapsed yet
             if feature_ts + window > decision_ts:
                 continue

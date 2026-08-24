@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("setup", "test", "smoke", "migrate", "seed", "worker", "api", "ui", "bootstrap-local", "archive", "backtest", "forecast-ab", "refresh-rpc-pools")]
+    [ValidateSet("setup", "test", "smoke", "migrate", "seed", "worker", "api", "ui", "bootstrap-local", "archive", "retention", "parity", "backtest", "forecast-ab", "refresh-rpc-pools")]
     [string]$Command = "test"
 )
 
@@ -42,8 +42,17 @@ switch ($Command) {
     "archive" {
         python -m ops.archive --once
     }
+    "retention" {
+        python -m ops.retention --once
+    }
+    "parity" {
+        python -m ops.parity --once
+    }
     "backtest" {
-        python -m backtest.runner --start "2026-05-01T00:00:00Z" --forward-hours 24
+        $featureSource = $env:FEATURE_SOURCE
+        $args = @("--start", "2026-05-01T00:00:00Z", "--forward-hours", "24")
+        if ($featureSource) { $args += @("--feature-source", $featureSource) }
+        python -m backtest.runner @args
     }
     "forecast-ab" {
         python -m forecast.experiment

@@ -22,6 +22,7 @@ class BacktestConfig:
     forward_hours: int = 24
     min_forward_return_pct: float = 20.0
     collapse_return_pct: float = -70.0
+    feature_source: str = "sql"  # "sql" (live tables) or "lake" (archived lake replay)
 
 
 def point_in_time_market_rows(
@@ -129,6 +130,7 @@ class BacktestRunner:
                 "forward_hours": config.forward_hours,
                 "min_forward_return_pct": config.min_forward_return_pct,
                 "collapse_return_pct": config.collapse_return_pct,
+                "feature_source": config.feature_source,
             },
             git_sha=_git_sha(),
             model_version=self.settings.model_version,
@@ -157,7 +159,12 @@ class BacktestRunner:
             ]
             if not asset_ids:
                 continue
-            self.scoring.score_assets(session, decision_ts=decision_ts, asset_ids=asset_ids)
+            self.scoring.score_assets(
+                session,
+                decision_ts=decision_ts,
+                asset_ids=asset_ids,
+                feature_source=config.feature_source,
+            )
             session.flush()
             candidates = session.scalars(
                 select(models.Score)
@@ -252,6 +259,7 @@ def run_backtest(
     end: datetime | None = None,
     top_k: int = 10,
     forward_hours: int = 24,
+    feature_source: str = "sql",
 ) -> models.BacktestRun:
     runner = BacktestRunner()
     return runner.run(
@@ -261,6 +269,7 @@ def run_backtest(
             end=end or utc_now(),
             top_k=top_k,
             forward_hours=forward_hours,
+            feature_source=feature_source,
         ),
     )
 
@@ -273,6 +282,12 @@ def main() -> None:
     parser.add_argument("--end", help="ISO datetime (default: now)")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--forward-hours", type=int, default=24)
+    parser.add_argument(
+        "--feature-source",
+        choices=["sql", "lake"],
+        default="sql",
+        help="feature read path: 'sql' (live tables) or 'lake' (archived lake replay)",
+    )
     args = parser.parse_args()
 
     from storage.database import SessionLocal
@@ -288,6 +303,7 @@ def main() -> None:
             end=end,
             top_k=args.top_k,
             forward_hours=args.forward_hours,
+            feature_source=args.feature_source,
         )
         session.commit()
         metrics = {

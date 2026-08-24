@@ -81,7 +81,7 @@ Venue-source health must mean normalized rows were written, not only that an HTT
 
 ## Live Ops Console Proof
 
-- The worker must persist a `ScanResult` row at the end of each successful scan, including pipeline stage counts (profiles, pairs, mempool, lp_removals, prelaunch, narrative, catalysts, ignitions, fingerprints, lifecycle, forecasts, scores, archive, ntfy_sent, rpc_pool_notifications, rpc_pool_snapshots), scan duration, and state.
+- The worker must persist a `ScanResult` row at the end of each successful scan, including pipeline stage counts (profiles, pairs, mempool, lp_removals, prelaunch, narrative, catalysts, ignitions, fingerprints, lifecycle, forecasts, scores, archive, ntfy_sent, rpc_pool_notifications, rpc_pool_snapshots), scan duration, and state. The scan must report `archive=0` (stage skipped): the worker never compacts — the retention autopilot owns the archive.
 - A failed scan must persist a `ScanResult` row with `state=red` and the error message.
 - `GET /ops/console` must return the latest scan result, notifier health, and recently pushed alerts with timestamps.
 - The **Live Ops Console** UI view must render pipeline stage counts, notifier health status, and a table of recent pushed alerts.
@@ -144,6 +144,8 @@ Venue-source health must mean normalized rows were written, not only that an HTT
 
 ## Push Notifier Proof
 
+- Operators must be able to **ACK open alerts**: `POST /alerts/{id}/ack` must set `state=acked` with `acked_at` and an optional `ack_quality` (`useful`/`noise`), be idempotent on re-ack (updating the rating), reject invalid quality (422), and 404 on a missing alert. An ACKed alert must leave the notifier's open set — `NTFY` flushes must not push it (repeat-push suppression) — and, because alert creation dedupes on event ref regardless of state, later scans must not re-create it.
+- `GET /alerts/quality` must return the **signal-quality ledger**: total ACKed, useful/noise/unrated counts, the useful rate, and the most recently ACKed alerts with their ratings, so the operator can see which alert types earn their keep.
 - With `NTFY_ENABLED` and `NTFY_TOPIC` set, each new open alert of a configured type (`NTFY_ALERT_TYPES_CSV`) within the `NTFY_BACKLOG_HOURS` window must POST to ntfy.sh exactly once and be marked `notified_at`.
 - The lifecycle state machine must create one idempotent `lifecycle_transition` alert (ref `lifecycle:{event_id}`) the moment an asset reaches a terminal danger phase — COLLAPSE, RUGGED, or DEAD — and never for non-terminal phases (IGNITION etc.) or SURVIVOR. The notifier must push it at priority 5 with the `collision` tag, exactly once.
 - A second flush must not re-push already-notified alerts.
@@ -212,6 +214,13 @@ Idempotency: re-running `--once` must not grow the lake (manifests are keyed by
   the Parquet lake totals (`partitions`, `archived_rows`, `byte_size`),
   `compacted`/`pruned` counts, and `growth_bytes`/`growth_pct` vs the previous
   pass (first pass reports the whole lake as growth, `growth_pct` NULL).
+- Compaction must run on a **per-partition schedule**: each pass computes the
+  `(source_id, year, month)` partitions whose unarchived evidence is older
+  than `ARCHIVE_COMPACT_AFTER_HOURS` and compacts exactly those; a pass with
+  nothing due does zero compaction work (`compacted=0`, `partitions=0`) while
+  pruning still runs. The retention autopilot — not the ingestion worker — is
+  the sole owner of compaction: a scan must report `archive=0` (skipped) and
+  write no Parquet files, so the cadence fully owns the archive.
 - Each pass must record `component:lake` health: `ok` with the growth in the
   message (`partitions=.. rows=.. bytes=.. growth_bytes=.. growth_pct=..%`),
   `red` with the error when compaction fails (and no `RetentionRun` is
@@ -219,12 +228,37 @@ Idempotency: re-running `--once` must not grow the lake (manifests are keyed by
 - `python -m ops.retention --check-due` must exit 0 when the cadence
   (`RETENTION_CADENCE_HOURS`) since the last pass has elapsed, 1 otherwise;
   a disabled autopilot is never due, and no recorded pass is due.
+- The worker must run a **pre-scan lake freshness check** using the same gate
+  as `--check-due`: when a pass has been recorded but the cadence since it has
+  elapsed, it must record `component:lake` health as `yellow` (`lake stale:`
+  with the hours since the last pass and the cadence) so **Feed Health** flags
+  the stale lake before the scan runs. Fresh lakes, lakes with no pass yet,
+  and disabled autopilots record nothing.
+- The pass must evaluate the **retention budget**: projecting the lake growth
+  (same linear fit as `GET /retention/growth`) against
+  `ARCHIVE_LAKE_MAX_BYTES`, a projected fill within
+  `RETENTION_BUDGET_ALERT_DAYS` (default 14) must record
+  `component:lake_budget` health (`yellow`, or `red` at/over capacity) and
+  push one ntfy warning (`Lake Budget Warning`, priority 4; `Lake Full`,
+  priority 5, when at/over capacity) with the days-to-full, fill percentage,
+  growth rate, and cap. Repeated passes must refresh the health row but not
+  re-push within `RETENTION_BUDGET_ALERT_COOLDOWN_HOURS` (default 24); a
+  horizon beyond the alert window, or no usable growth trend, records
+  nothing.
 - The scheduler must drive the pass on the cadence: the APScheduler entrypoint
   (`python -m ingestion.scheduler`) registers a `retention_autopilot` job, and
   the worker loop (`python -m ingestion.worker --loop`) checks `retention_due`
   after each scan. Standalone boxes use the OS scheduler:
   `deploy/systemd/serpent-retention.timer` + `.service` (Linux) or
-  `scripts/install_retention_task.ps1` (Windows Task Scheduler).
+  `scripts/install_retention_task.ps1` (Windows Task Scheduler), or run one
+  pass by hand with `make retention` (`python -m ops.retention --once`).
+- `GET /retention/growth` must return the retention-pass history plus a
+  projected disk-full horizon: a linear regression of `byte_size` over elapsed
+  time extrapolated to `ARCHIVE_LAKE_MAX_BYTES` (default 100 GiB). With fewer
+  than two passes or a flat/shrinking trend the projection is `null`; the
+  response also carries the current fill percentage (`pct_full`). The
+  **Archive & Retention** view renders the trendline chart with the projected
+  extension and capacity cap.
 
 ### 4.4 Full-rig parity (MinIO backend)
 
@@ -236,6 +270,13 @@ python -m ops.archive --query "SELECT partition_year, count(*) AS n FROM evidenc
 ```
 
 Inspect `GET /archive/manifests` (API) or the **Archive & Retention** UI view.
+
+The S3 backend must also be covered **without a live MinIO container** via
+moto (`tests/test_archive_s3.py`): `object_exists` (missing vs present),
+`list_objects` (prefix narrowing, parquet-only, missing prefix), `download_to`
+materialization, `make_store` backend selection, and the full
+compaction→`query_archive` DuckDB path (partitioned Parquet written to the
+mock bucket, then queried back with `SELECT ... FROM evidence`).
 
 ### 4.5 Zero-cost audit
 
@@ -338,13 +379,74 @@ The stack must not require any paid key or subscription:
   uses.
 - The parity test (`tests/test_lake_features.py`) must seed identical
   observations into the SQL tables AND the lake, then assert every
-  lake-covered feature (`LAKE_FEATURE_NAMES`, the 11 market/liquidity names)
-  matches between `FeatureFactory.build_for_asset` (SQL) and
+  lake-covered feature (`LAKE_FEATURE_NAMES`, the 11 market/liquidity names
+  plus the 4 on-chain holder/contract-flag names) matches between
+  `FeatureFactory.build_for_asset` (SQL) and
   `LakeFeatureFactory.build_for_asset` (DuckDB) — values *and* missing flags.
-- An empty lake must report the block as honest `missing`, never fabricated
-  zeros; evidence for other base addresses must be ignored.
+- The lake path must reconstruct the on-chain holder features
+  (`holder_count`, `holder_growth`, `top_holder_concentration`) from the
+  archived `chain_rpc` holder-snapshot evidence (`solana_rpc` payloads with
+  `mint`/`supply`/`largest_accounts`), deduping per `(hour, wallet)` exactly
+  like `insert_holder_once`, with the same latest-snapshot count, top-10
+  concentration, and one-hour-ago growth delta the SQL path computes.
+- `suspicious_contract_flags` must reconstruct as the count of evidence-backed
+  `low_liquidity` contract flags — GeckoTerminal pool scans whose
+  `reserve_in_usd` fell below `min_discovery_liquidity_usd` — and, like the
+  SQL path, report `0.0` (never missing) when no flags exist.
+- An empty lake must report the market block as honest `missing`, never
+  fabricated zeros; evidence for other base addresses must be ignored.
+- `build_and_persist_features(..., feature_source="lake")` must replay the
+  lake-covered block entirely from the archived Parquet (no live
+  market/liquidity tables touched) and persist `Feature` rows through the same
+  `upsert_feature` as the SQL path; `"sql"` (default) keeps the live-table
+  behavior, and any other value must raise `ValueError`. `ScoringEngine` and
+  `BacktestConfig`/`run_backtest`/`python -m backtest.runner --feature-source
+  lake` must thread the switch through, and the run's `config_json` must
+  record which source produced its features.
 - Lake timestamps must be written as naive UTC (`TIMESTAMP`, not `TIMESTAMP
   WITH TIME ZONE`) so DuckDB truncation/comparison needs no optional `pytz`.
+- Reconstructions must be cached at the class level on `LakeFeatureFactory`
+  keyed by `(store, asset address, hour)` (a bounded LRU shared across
+  factory instances), so repeated backtest steps over the same window never
+  re-download the Parquet or re-run DuckDB for an already-served `(asset,
+  hour)` bucket. The cache is exact for hour-boundary decisions (the
+  backtest contract) and bypassed for sub-hour decision times; a
+  `clear_cache()` classmethod drops it (e.g. after new evidence is compacted
+  into the lake).
+
+## Lake-vs-SQL Parity CI Proof
+
+- `python -m ops.parity --once` must run the same comparison as the parity
+  test against the *production* lake: for every asset (or the first
+  `PARITY_MAX_ASSETS`), build the lake-covered features through both
+  `FeatureFactory.build_for_asset` (live SQL tables) and
+  `LakeFeatureFactory.build_for_asset` (DuckDB over the archived Parquet) at
+  a floored-hour decision time, and report any divergence among
+  `LAKE_FEATURE_NAMES` (value beyond `PARITY_TOLERANCE` or a missing-flag
+  split) as a mismatch.
+- The comparison decision time must be clamped so every piece of evidence at
+  that time is provably archived: at least `PARITY_COMPARE_HOURS_AGO` in the
+  past AND older than `ARCHIVE_COMPACT_AFTER_HOURS` +
+  `RETENTION_CADENCE_HOURS`, floored to the hour (the lake cache's exactness
+  contract).
+- Each run must record `component:parity` health: `ok` with zero mismatches,
+  `red` (or `yellow` below the threshold) with mismatches, carrying the
+  count, compared assets, and decision time in the message.
+- A mismatch at/above `PARITY_ALERT_THRESHOLD` must page via ntfy
+  (`Serpent Circle - Lake Parity Mismatch`, priority 4) with the first few
+  `SYMBOL [feature]: sql=... lake=...` divergences, at most once per
+  `PARITY_ALERT_COOLDOWN_HOURS` (the last red health row is the cooldown
+  marker, evaluated *before* this run's row is written).
+- The job must run on the daily cadence: `ingestion/scheduler.py` registers
+  it on `PARITY_FREQUENCY_HOURS` (docker profile) and the zero-container
+  worker loop runs the cadence-gated `maybe_run_parity()` after each scan
+  (the last `component:parity` row is the run marker, so the first run is
+  due and subsequent runs wait out the frequency). `make parity` / `parity`
+  in the dev scripts run one pass by hand; `--strict` exits non-zero on a
+  mismatch for CI integration.
+- A failed run must never kill the caller: it records `component:parity`
+  health as `red` and returns `{"error": ...}`, and a single asset's
+  comparison failure counts as an error instead of aborting the pass.
 
 ## Zero-Container Profile Proof
 

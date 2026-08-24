@@ -127,7 +127,8 @@ Register HTTP endpoints to receive real-time alerts:
 - `GET /tokens/{id}` — Token detail with features and explanation
 - `GET /tokens/{id}/similar` — Historical similar setups
 - `GET /alerts` — Recent alerts
-- `GET /risk/{id}` — Risk assessment with reasons
+- `POST /alerts/{id}/ack` — ACK an alert (suppresses repeat pushes; optional `useful`/`noise` rating)
+- `GET /alerts/quality` — Signal-quality ledger of operator ACK feedback
 
 ### Engine Control
 - `GET /engine/status` — Live engine runtime status
@@ -170,6 +171,7 @@ Register HTTP endpoints to receive real-time alerts:
 - `GET /features/velocity` — Narrative velocity features
 - `GET /archive/manifests` — Archive manifests
 - `GET /retention/runs` — Retention history
+- `GET /retention/growth` — Lake-growth trendline + projected disk-full horizon
 - `GET /backtest/results` — Backtest results
 - `GET /ops/console` — Live ops console
 
@@ -225,6 +227,8 @@ Key environment variables (set in `.env`):
 | `DATA_LAKE_ENABLED` | True | Enable Data Lake management |
 | `WEBHOOK_ENABLED` | True | Enable webhook dispatch |
 | `FORECAST_TRAIN_FREQUENCY_HOURS` | 24 | Hours between forecast retraining |
+| `PARITY_FREQUENCY_HOURS` | 24 | Hours between lake-vs-SQL parity checks (`make parity`) |
+| `PARITY_COMPARE_HOURS_AGO` | 96 | Decision-time horizon for the parity comparison (clamped to the archive window) |
 | `UI_REFRESH_SECONDS` | 30 | GUI auto-refresh interval |
 
 ## License

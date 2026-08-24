@@ -47,10 +47,14 @@ class ScoringEngine:
         *,
         decision_ts: datetime | None = None,
         asset_ids: list[int] | None = None,
+        feature_source: str = "sql",
     ) -> list[models.Score]:
         decision_ts = decision_ts or utc_now()
         feature_map = build_and_persist_features(
-            session, decision_ts=decision_ts, asset_ids=asset_ids
+            session,
+            decision_ts=decision_ts,
+            asset_ids=asset_ids,
+            feature_source=feature_source,
         )
         scores: list[models.Score] = []
         for asset_id, features in feature_map.items():

@@ -72,6 +72,43 @@ class AlertRow(BaseModel):
     alert_type: str
     state: str
     message: str
+    notified_at: datetime | None
+    acked_at: datetime | None
+    ack_quality: str | None
+
+
+class AlertAckRequest(BaseModel):
+    """Operator acknowledgement of an open alert.
+
+    ``quality`` feeds the signal-quality ledger: ``"useful"`` when the alert
+    led to a good call, ``"noise"" when it did not, or ``None`` for a plain
+    ack.
+    """
+
+    quality: str | None = None
+
+
+class AlertQualityRow(BaseModel):
+    id: int
+    asset_id: int
+    symbol: str | None
+    alert_type: str
+    state: str
+    message: str
+    created_at: datetime
+    acked_at: datetime | None
+    ack_quality: str | None
+
+
+class AlertQualityLedger(BaseModel):
+    """Operator signal-quality ledger: how often acked alerts were useful."""
+
+    total_acked: int
+    useful: int
+    noise: int
+    unrated: int
+    useful_rate: float | None
+    recent: list[AlertQualityRow]
 
 
 class RiskResponse(BaseModel):
@@ -229,6 +266,17 @@ class RetentionRunRow(BaseModel):
     growth_bytes: int
     growth_pct: float | None
     duration_sec: float | None
+
+
+class RetentionGrowthRow(BaseModel):
+    """Retention-pass history plus a projected disk-full horizon."""
+
+    runs: list[RetentionRunRow]
+    max_bytes: int
+    growth_rate_bytes_per_hour: float
+    projected_full_at: datetime | None
+    days_to_full: float | None
+    pct_full: float
 
 
 class RpcPoolProbeRow(BaseModel):

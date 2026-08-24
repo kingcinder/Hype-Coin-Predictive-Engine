@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from api.main import app
+from common.config import get_settings
 from fingerprint.engine import FingerprintEngine
 from pump_physics import run_lifecycle
 from radar.ignition import IgnitionRadar
@@ -388,3 +389,102 @@ def test_ops_console_api(session) -> None:
         assert data["recent_alerts"][0]["alert_type"] == "ignition_detected"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_alert_ack_path_and_quality_ledger(session) -> None:
+    """ACKing an open alert suppresses repeat pushes and feeds the
+    signal-quality ledger of operator feedback."""
+    asset = seed_market_asset(session)
+    alert = models.Alert(
+        asset_id=asset.id,
+        alert_type="ignition_detected",
+        threshold_version="test-v1",
+        state="open",
+        message="Test ignition alert",
+    )
+    session.add(alert)
+    session.commit()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        # ACK with a quality rating.
+        response = client.post(f"/alerts/{alert.id}/ack", json={"quality": "useful"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "acked"
+        assert body["ack_quality"] == "useful"
+        assert body["acked_at"] is not None
+        # Re-acking updates the rating.
+        response = client.post(f"/alerts/{alert.id}/ack", json={"quality": "noise"})
+        assert response.status_code == 200
+        assert response.json()["ack_quality"] == "noise"
+        # Invalid quality and missing alerts are rejected.
+        assert (
+            client.post(f"/alerts/{alert.id}/ack", json={"quality": "meh"}).status_code
+            == 422
+        )
+        assert client.post("/alerts/999999/ack", json={}).status_code == 404
+        # The ledger reflects operator feedback.
+        ledger = client.get("/alerts/quality").json()
+        assert ledger["total_acked"] == 1
+        assert ledger["noise"] == 1
+        assert ledger["useful"] == 0
+        assert ledger["useful_rate"] == 0.0
+        assert ledger["recent"][0]["ack_quality"] == "noise"
+        # The alerts list exposes the ack state.
+        rows = client.get("/alerts").json()
+        assert rows[0]["acked_at"] is not None
+        assert rows[0]["ack_quality"] == "noise"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_retention_growth_api_projects_disk_full_horizon(session, monkeypatch) -> None:
+    decision_ts = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for index, (days, size) in enumerate(
+        [(0, 1_000), (1, 2_000), (2, 4_000)]
+    ):
+        session.add(
+            models.RetentionRun(
+                ts=decision_ts + timedelta(days=days),
+                partitions=index + 1,
+                archived_rows=index + 1,
+                byte_size=size,
+                compacted=1,
+                pruned=0,
+                growth_bytes=0,
+                growth_pct=None,
+                duration_sec=1.0,
+            )
+        )
+    session.commit()
+
+    # Tight capacity cap so the growth rate produces a finite horizon.
+    monkeypatch.setenv("ARCHIVE_LAKE_MAX_BYTES", "10000")
+    get_settings.cache_clear()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        response = client.get("/retention/growth")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["runs"]) == 3
+        assert data["max_bytes"] == 10_000
+        assert data["growth_rate_bytes_per_hour"] > 0
+        assert data["projected_full_at"] is not None
+        assert data["days_to_full"] > 0
+        assert data["pct_full"] > 0
+        # Retention history is returned newest-first like /retention/runs.
+        assert data["runs"][0]["byte_size"] == 4_000
+        assert data["runs"][-1]["byte_size"] == 1_000
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()

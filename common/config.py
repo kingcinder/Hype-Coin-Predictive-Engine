@@ -162,10 +162,34 @@ class Settings(BaseSettings):
     archive_retention_days: int = 90
     archive_batch_size: int = 5_000
     archive_prefix: str = "evidence"
+    # assumed capacity cap for the lake (bytes); used by the Archive & Retention
+    # view to project a disk-full horizon from recent growth. Tune to the real
+    # volume for the local disk or MinIO bucket.
+    archive_lake_max_bytes: int = 100 * 1024**3  # 100 GiB
 
     # retention autopilot: scheduled compaction + pruning + lake-growth report
     retention_autopilot_enabled: bool = True
     retention_cadence_hours: float = 24.0
+    # retention budget alert: warn via ntfy when the projected lake growth
+    # would fill ARCHIVE_LAKE_MAX_BYTES within this many days, then re-warn
+    # at most once per cooldown window.
+    retention_budget_alert_days: float = 14.0
+    retention_budget_alert_cooldown_hours: float = 24.0
+
+    # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
+    # against the live SQL path over the archived evidence, paging a mismatch
+    # via ntfy. PARITY_COMPARE_HOURS_AGO is the decision-time horizon for the
+    # comparison and must exceed ARCHIVE_COMPACT_AFTER_HOURS +
+    # RETENTION_CADENCE_HOURS so every piece of evidence at the decision time
+    # is provably inside the archived lake (the module clamps it upward
+    # automatically).
+    parity_enabled: bool = True
+    parity_frequency_hours: float = 24.0
+    parity_compare_hours_ago: float = 96.0
+    parity_tolerance: float = 1e-3
+    parity_max_assets: int = 0  # 0 = compare every asset
+    parity_alert_threshold: int = 1  # page when mismatches >= this
+    parity_alert_cooldown_hours: float = 24.0
 
     # catalyst timetable
     catalyst_alert_hours: float = 72.0

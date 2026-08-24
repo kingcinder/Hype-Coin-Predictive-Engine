@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import polars as pl
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, extract, or_, select
 from sqlalchemy.orm import Session
 
 from common.config import Settings, get_settings
@@ -136,6 +136,37 @@ def _partition_key(source_name: str, year: int, month: int) -> str:
     return f"source={source_name}/year={year:04d}/month={month:02d}"
 
 
+def due_partitions(
+    session: Session,
+    decision_ts: datetime | None = None,
+    settings: Settings | None = None,
+) -> list[tuple[int, int, int]]:
+    """Partitions ``(source_id, year, month)`` due for compaction.
+
+    A partition is due when it holds unarchived raw evidence whose
+    ``observed_at`` has aged past ``ARCHIVE_COMPACT_AFTER_HOURS``. This is the
+    per-partition compaction schedule: the retention autopilot computes it on
+    each cadence pass and compacts exactly these partitions — a pass with no
+    due partitions does zero compaction work.
+    """
+    settings = settings or get_settings()
+    decision_ts = ensure_utc(decision_ts or utc_now())
+    cutoff = decision_ts - timedelta(hours=settings.archive_compact_after_hours)
+    rows = session.execute(
+        select(
+            models.RawEvidenceItem.source_id,
+            extract("year", models.RawEvidenceItem.observed_at),
+            extract("month", models.RawEvidenceItem.observed_at),
+        )
+        .where(
+            models.RawEvidenceItem.observed_at < cutoff,
+            models.RawEvidenceItem.archived_at.is_(None),
+        )
+        .distinct()
+    ).all()
+    return [(int(r[0]), int(r[1]), int(r[2])) for r in rows]
+
+
 def _evidence_frame(rows: list[models.RawEvidenceItem]) -> pl.DataFrame:
     # Timestamps are written as naive UTC: they are UTC instants, and a plain
     # TIMESTAMP column lets DuckDB truncate/compare without the optional pytz
@@ -183,9 +214,32 @@ class RawEvidenceCompactor:
         self.settings = settings or get_settings()
         self.store = store or make_store(self.settings)
 
-    def compact(self, session: Session, decision_ts: datetime | None = None) -> dict[str, Any]:
+    def compact(
+        self,
+        session: Session,
+        decision_ts: datetime | None = None,
+        *,
+        partition_filter: set[tuple[int, int, int]] | None = None,
+    ) -> dict[str, Any]:
+        """Compact raw evidence older than the cutoff into due partitions.
+
+        ``partition_filter`` restricts compaction to the given ``(source_id,
+        year, month)`` partitions — the per-partition schedule computed by
+        :func:`due_partitions`. An empty filter skips the batch entirely but
+        still prunes expired rows.
+        """
         decision_ts = ensure_utc(decision_ts or utc_now())
         cutoff = decision_ts - timedelta(hours=self.settings.archive_compact_after_hours)
+        if partition_filter is not None and not partition_filter:
+            # Nothing due on the per-partition schedule: no compaction work.
+            pruned = self._prune(session, decision_ts)
+            return {
+                "compacted": 0,
+                "partitions": 0,
+                "pruned": pruned,
+                "cutoff": cutoff,
+                "due_partitions": 0,
+            }
         rows = session.scalars(
             select(models.RawEvidenceItem)
             .where(
@@ -197,7 +251,13 @@ class RawEvidenceCompactor:
         ).all()
         if not rows:
             pruned = self._prune(session, decision_ts)
-            return {"compacted": 0, "partitions": 0, "pruned": pruned, "cutoff": cutoff}
+            return {
+                "compacted": 0,
+                "partitions": 0,
+                "pruned": pruned,
+                "cutoff": cutoff,
+                "due_partitions": 0,
+            }
 
         source_names = {
             source.id: source.name
@@ -207,15 +267,18 @@ class RawEvidenceCompactor:
                 )
             )
         }
-        groups: dict[tuple[str, int, int], list[models.RawEvidenceItem]] = {}
+        groups: dict[tuple[int, int, int], list[models.RawEvidenceItem]] = {}
         for row in rows:
             observed = ensure_utc(row.observed_at)
-            key = (source_names.get(row.source_id, "unknown"), observed.year, observed.month)
+            key = (row.source_id, observed.year, observed.month)
+            if partition_filter is not None and key not in partition_filter:
+                continue
             groups.setdefault(key, []).append(row)
 
         partitions = 0
         compacted = 0
-        for (source_name, year, month), group in groups.items():
+        for (source_id, year, month), group in groups.items():
+            source_name = source_names.get(source_id, "unknown")
             object_key = (
                 f"{self.settings.archive_prefix}/{_partition_key(source_name, year, month)}"
                 f"/part-0.parquet"
@@ -266,6 +329,7 @@ class RawEvidenceCompactor:
             "partitions": partitions,
             "pruned": pruned,
             "cutoff": cutoff,
+            "due_partitions": len(groups),
         }
 
     def _read_partition(self, object_key: str) -> pl.DataFrame:
@@ -355,13 +419,21 @@ def run_archive(
     *,
     decision_ts: datetime | None = None,
     settings: Settings | None = None,
+    partition_filter: set[tuple[int, int, int]] | None = None,
 ) -> dict[str, Any]:
+    """Compact due partitions (per-partition schedule) and record archive health.
+
+    ``partition_filter`` is the per-partition schedule; when omitted the pass
+    compacts whatever is older than the cutoff (backward-compatible fallback
+    for ``python -m ops.archive --once``)."""
     settings = settings or get_settings()
     if not settings.archive_enabled:
         return {"skipped": True}
     decision_ts = ensure_utc(decision_ts or utc_now())
     try:
-        result = RawEvidenceCompactor(settings=settings).compact(session, decision_ts)
+        result = RawEvidenceCompactor(settings=settings).compact(
+            session, decision_ts, partition_filter=partition_filter
+        )
         record_health(
             session,
             component="archive",

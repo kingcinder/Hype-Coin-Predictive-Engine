@@ -840,9 +840,36 @@ class FeatureFactory:
         return velocity, acceleration
 
 def build_and_persist_features(
-    session: Session, *, decision_ts: datetime | None = None, asset_ids: list[int] | None = None
+    session: Session,
+    *,
+    decision_ts: datetime | None = None,
+    asset_ids: list[int] | None = None,
+    feature_source: str = "sql",
 ) -> dict[int, dict[str, FeatureValue]]:
-    factory = FeatureFactory()
-    return factory.persist_for_assets(
-        session, decision_ts=decision_ts or utc_now(), asset_ids=asset_ids
+    """Build and persist features for the given assets at a decision time.
+
+    ``feature_source`` selects the read path:
+
+    - ``"sql"`` (default): read the live normalized tables (market/liquidity
+      snapshots, holders, contract flags, narrative, lifecycle, ...) via
+      ``FeatureFactory`` — the hot-DB path.
+    - ``"lake"``: replay the lake-covered block (market/liquidity series,
+      on-chain holder features, and the contract-flag count) entirely from
+      the archived Parquet lake via ``LakeFeatureFactory`` (DuckDB) and
+      persist it with the same ``upsert_feature`` — no live market,
+      liquidity, holder, or contract-flag tables are touched. Backtests use
+      this to replay features from the archived evidence without depending
+      on hot-DB state.
+    """
+    if feature_source not in ("sql", "lake"):
+        raise ValueError(f"feature_source must be 'sql' or 'lake', got {feature_source!r}")
+    decision_ts = ensure_utc(decision_ts or utc_now())
+    if feature_source == "lake":
+        from features.lake import LakeFeatureFactory
+
+        return LakeFeatureFactory().persist_for_assets(
+            session, decision_ts=decision_ts, asset_ids=asset_ids
+        )
+    return FeatureFactory().persist_for_assets(
+        session, decision_ts=decision_ts, asset_ids=asset_ids
     )

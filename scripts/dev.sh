@@ -49,11 +49,13 @@ DATABASE:
   bootstrap-local Bootstrap local SQLite environment
   archive         Run evidence archival
   archive-query   Query the Parquet lake (arg: SQL query)
+  retention       Run one retention-autopilot pass (compact + prune + report)
+  parity          Run one lake-vs-SQL parity check (daily CI job)
   lifecycle-backtest Run lifecycle backtest (requires START, FORWARD_HOURS)
 
 OTHER:
   refresh-rpc     Refresh RPC endpoint pools
-  backtest        Run backtest (requires START, FORWARD_HOURS)
+  backtest        Run backtest (requires START, FORWARD_HOURS; optional FEATURE_SOURCE=sql|lake)
   forecast-ab     Run forecast A/B experiment
   help            Show this help message
 
@@ -223,6 +225,18 @@ cmd_archive() {
     echo "✓ Archival complete"
 }
 
+cmd_retention() {
+    echo "Running one retention-autopilot pass..."
+    python -m ops.retention --once
+    echo "✓ Retention pass complete"
+}
+
+cmd_parity() {
+    echo "Running lake-vs-SQL parity check..."
+    python -m ops.parity --once
+    echo "✓ Parity check complete"
+}
+
 cmd_archive_query() {
     local sql="${1:-${SQL:-}}"
     if [[ -z "$sql" ]]; then
@@ -257,7 +271,12 @@ cmd_backtest() {
         echo "Usage: START=2026-05-01T00:00:00Z FORWARD_HOURS=24 ./scripts/dev.sh backtest"
         exit 1
     fi
-    python -m backtest.runner --start "$START" --forward-hours "$FORWARD_HOURS"
+    local feature_source="${FEATURE_SOURCE:-}"
+    if [[ -n "$feature_source" ]]; then
+        python -m backtest.runner --start "$START" --forward-hours "$FORWARD_HOURS" --feature-source "$feature_source"
+    else
+        python -m backtest.runner --start "$START" --forward-hours "$FORWARD_HOURS"
+    fi
 }
 
 cmd_forecast_ab() {
@@ -303,6 +322,8 @@ case "$COMMAND" in
     bootstrap-local)    cmd_bootstrap_local ;;
     archive)            cmd_archive ;;
     archive-query)      cmd_archive_query ;;
+    retention)          cmd_retention ;;
+    parity)             cmd_parity ;;
     
     # Other
     refresh-rpc)        cmd_refresh_rpc ;;

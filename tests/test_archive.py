@@ -8,6 +8,7 @@ from common.config import Settings
 from ops.archive import (
     LocalArchiveStore,
     RawEvidenceCompactor,
+    due_partitions,
     query_archive,
     run_archive,
 )
@@ -224,6 +225,76 @@ def test_query_archive_empty_lake_returns_empty(session, tmp_path) -> None:
     settings = _settings(tmp_path)
     store = LocalArchiveStore(tmp_path)
     assert query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings) == []
+
+
+def test_due_partitions_reports_only_aged_partitions(session, tmp_path) -> None:
+    """The per-partition schedule: only partitions whose unarchived evidence
+    has aged past ARCHIVE_COMPACT_AFTER_HOURS are due."""
+    _, source, _ = _seed_evidence(session, days_ago=77, count=1)  # April: due
+    _seed_evidence(session, days_ago=11, count=2, batch="b")  # June: due
+    _seed_evidence(session, days_ago=1, count=1, batch="c")  # June, fresh: NOT due
+
+    settings = _settings(tmp_path)
+    due = due_partitions(session, DECISION_TS, settings)
+
+    assert (source.id, 2026, 4) in due
+    assert (source.id, 2026, 6) in due
+    assert len(due) == 2
+
+
+def test_compact_partition_filter_compacts_only_due_partitions(
+    session, tmp_path
+) -> None:
+    """Passing the per-partition schedule restricts compaction to exactly the
+    due partitions; other aged partitions stay unarchived for a later pass."""
+    _, source, april_rows = _seed_evidence(session, days_ago=77, count=1)
+    _, _, june_rows = _seed_evidence(session, days_ago=11, count=1, batch="b")
+
+    settings = _settings(tmp_path)
+    compactor = RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings)
+    result = compactor.compact(
+        session, DECISION_TS, partition_filter={(source.id, 2026, 6)}
+    )
+
+    assert result["compacted"] == 1
+    assert result["partitions"] == 1
+    assert result["due_partitions"] == 1
+    session.expire_all()
+    # June evidence (11 days old, inside the retention window) was compacted.
+    assert (
+        session.get(models.RawEvidenceItem, june_rows[0].id).archived_at is not None
+    )
+    # April evidence is due but was not in the filter: left for a later pass.
+    april = session.get(models.RawEvidenceItem, april_rows[0].id)
+    assert april is not None
+    assert april.archived_at is None
+    manifests = session.scalars(select(models.ArchiveManifest)).all()
+    assert len(manifests) == 1
+    assert manifests[0].partition_month == 6
+
+
+def test_compact_empty_filter_skips_work_but_prunes(session, tmp_path) -> None:
+    """A pass with no due partitions does zero compaction work, but pruning
+    still runs so expired rows do not accumulate in the hot DB."""
+    _, _, rows = _seed_evidence(session, days_ago=11, count=2)  # archived, inside 30d window
+    settings = _settings(tmp_path)
+    compactor = RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings)
+
+    first = compactor.compact(session, DECISION_TS)
+    assert first["compacted"] == 2
+    assert first["pruned"] == 0  # 11 days old: inside the retention window
+
+    # 25 days later: nothing is due for compaction, but the archived rows have
+    # aged past the 30-day retention window -> pruning removes them.
+    later = DECISION_TS + timedelta(days=25)
+    result = compactor.compact(session, later, partition_filter=set())
+    assert result["compacted"] == 0
+    assert result["partitions"] == 0
+    assert result["due_partitions"] == 0
+    assert result["pruned"] == 2
+    session.expire_all()
+    for row in rows:
+        assert session.get(models.RawEvidenceItem, row.id) is None
 
 
 def test_run_archive_disabled_skips(session, tmp_path) -> None:

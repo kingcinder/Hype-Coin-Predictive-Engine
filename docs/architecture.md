@@ -12,7 +12,7 @@ The MVP is a modular monorepo with replaceable subsystems and a single Python ru
 - `fingerprint` owns wallet syndicate learning (co-occurrence clusters) and per-asset recidivism assessments.
 - `pump_physics` owns the hype-lifecycle state machine: deterministic phase detection (SEEDING → IGNITION → PARABOLIC → SATURATION → COLLAPSE, exits DEAD/RUGGED/SURVIVOR) from persisted point-in-time evidence, idempotent `lifecycle_events` transitions, and the `lifecycle_phase` feature that feeds risk scoring.
 - `forecast` owns point-in-time label generation, purged train/test gradient boosting with isotonic calibration, hand-built discrete hazard models for time-to-peak and time-to-collapse, and drift metrics.
-- `ops` owns the ntfy.sh push notifier (ignition/withdrawal/recidivism/lifecycle-terminal phone alerts — `lifecycle_transition` fires the moment a token reaches COLLAPSE/RUGGED/DEAD — idempotent via `alerts.notified_at`) and the Parquet archive: raw evidence is compacted into `source/year/month` partitioned Parquet over MinIO or local disk, marked `archived_at`, pruned past `ARCHIVE_RETENTION_DAYS`, and queried through DuckDB (`python -m ops.archive --query`).
+- `ops` owns the ntfy.sh push notifier (ignition/withdrawal/recidivism/lifecycle-terminal phone alerts — `lifecycle_transition` fires the moment a token reaches COLLAPSE/RUGGED/DEAD — idempotent via `alerts.notified_at` — plus operational RPC-pool and lake-budget warnings) and the Parquet archive: raw evidence is compacted into `source/year/month` partitioned Parquet over MinIO or local disk, marked `archived_at`, pruned past `ARCHIVE_RETENTION_DAYS`, and queried through DuckDB (`python -m ops.archive --query`).
 - `env=local-single` is the zero-container profile: SQLite instead of Postgres, in-process scheduling instead of Redis, and the local-disk archive backend instead of MinIO. `scripts/bootstrap_local.py` bootstraps it with no containers.
 - `storage` owns schema, migrations, sessions, seed data, and point-in-time persistence contracts.
 - `features` owns feature production from persisted evidence only.
@@ -37,7 +37,7 @@ The MVP is a modular monorepo with replaceable subsystems and a single Python ru
 11. Pump physics advances each asset's lifecycle state machine and persists idempotent transition events.
 12. Scoring writes ten separated scores plus explanation records.
 13. API/UI present ranks, changes, risks, evidence, ignition events, lifecycle phases, forecasts, and feed health.
-14. Archive compacts raw evidence older than `ARCHIVE_COMPACT_AFTER_HOURS` into partitioned Parquet (MinIO or local disk), marks rows archived, and prunes unreferenced rows past the retention window; the lake is queryable with DuckDB.
+14. Retention autopilot compacts raw evidence older than `ARCHIVE_COMPACT_AFTER_HOURS` into partitioned Parquet (MinIO or local disk) on a per-partition schedule owned by its cadence (`RETENTION_CADENCE_HOURS`) — the ingestion worker never touches the archive. Each pass marks rows archived and prunes unreferenced rows past the retention window; the lake is queryable with DuckDB.
 15. Backtest replays historical decision times with the same point-in-time rule and records `git_sha` plus lead-time / false-alarm metrics.
 
 ## Truth Rules

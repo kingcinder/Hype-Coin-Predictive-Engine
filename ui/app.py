@@ -47,7 +47,8 @@ def _sse_bridge_js(api_base: str) -> str:
         }};
 
         // Named events also carry the full state snapshot
-        ['init','scanning','scan_progress','forecasting','retention','completed','error','bootstrapping'].forEach(function(evt) {{
+        ['init','scanning','scan_progress','forecasting','retention','completed',
+         'error','bootstrapping'].forEach(function(evt) {{
           es.addEventListener(evt, function(e) {{
             try {{
               const data = JSON.parse(e.data);
@@ -266,7 +267,64 @@ def alerts_view() -> None:
     if not data:
         st.info("No alerts have fired yet.")
         return
-    st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+
+    open_alerts = [alert for alert in data if alert.get("state") == "open"]
+    st.subheader("Open Alerts")
+    if not open_alerts:
+        st.success("No open alerts. ACKed alerts stop repeat push notifications.")
+    for alert in open_alerts:
+        with st.container(border=True):
+            cols = st.columns([1, 2, 2, 1, 1])
+            cols[0].markdown(f"**{alert.get('symbol') or '?'}**")
+            cols[1].markdown(alert.get("alert_type", "").replace("_", " ").title())
+            cols[2].caption(alert.get("created_at", ""))
+            if cols[3].button(
+                "✓ Useful",
+                key=f"ack_useful_{alert['id']}",
+                use_container_width=True,
+            ):
+                api_post(f"/alerts/{alert['id']}/ack", json={"quality": "useful"})
+                st.rerun()
+            if cols[4].button(
+                "✗ Noise",
+                key=f"ack_noise_{alert['id']}",
+                use_container_width=True,
+            ):
+                api_post(f"/alerts/{alert['id']}/ack", json={"quality": "noise"})
+                st.rerun()
+            st.caption(alert.get("message", ""))
+
+    st.subheader("All Alerts")
+    st.dataframe(
+        pd.DataFrame(data)[
+            ["created_at", "alert_type", "symbol", "state", "ack_quality", "message"]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("Signal Quality Ledger")
+    ledger = api_get("/alerts/quality")
+    if not ledger:
+        st.info("No alerts ACKed yet — rate open alerts above to build the ledger.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric("ACKed", ledger["total_acked"])
+    m2.metric("Useful", ledger["useful"])
+    m3.metric(
+        "Useful rate",
+        f"{ledger['useful_rate']:.0%}"
+        if ledger.get("useful_rate") is not None
+        else "—",
+    )
+    if ledger.get("recent"):
+        st.dataframe(
+            pd.DataFrame(ledger["recent"])[
+                ["acked_at", "alert_type", "symbol", "ack_quality", "message"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def live_ops_console() -> None:
@@ -695,6 +753,47 @@ def backtest_results() -> None:
             st.info("This run has no metrics yet.")
 
 
+def _lake_growth_frame(
+    runs: list[dict[str, Any]], growth: dict[str, Any]
+) -> pd.DataFrame:
+    """DataFrame for the lake-growth trendline: observed points, the linear
+    extrapolation to the projected full timestamp, and the capacity cap line."""
+    rows = sorted(runs, key=lambda r: r["ts"])
+    observed = pd.DataFrame(
+        {
+            "ts": pd.to_datetime([r["ts"] for r in rows]),
+            "byte_size": [float(r["byte_size"]) for r in rows],
+        }
+    )
+    projected_full = growth.get("projected_full_at")
+    if not projected_full:
+        frame = observed.set_index("ts")
+        frame["capacity"] = float(growth.get("max_bytes", 0))
+        return frame
+    horizon = pd.to_datetime(projected_full)
+    last_ts = observed["ts"].iloc[-1]
+    if horizon <= last_ts:
+        return observed.set_index("ts")
+    step = max((horizon - last_ts) / 24, pd.Timedelta(hours=1))
+    steps = int((horizon - last_ts) / step) + 1
+    proj_ts = [last_ts + index * step for index in range(1, steps)]
+    rate = float(growth.get("growth_rate_bytes_per_hour", 0.0))
+    last_bytes = float(observed["byte_size"].iloc[-1])
+    proj = pd.DataFrame(
+        {
+            "ts": proj_ts,
+            "byte_size": [
+                last_bytes
+                + rate * (ts - last_ts).total_seconds() / 3600.0
+                for ts in proj_ts
+            ],
+        }
+    )
+    frame = pd.concat([observed, proj], ignore_index=True).set_index("ts")
+    frame["capacity"] = float(growth.get("max_bytes", 0))
+    return frame
+
+
 def archive_retention() -> None:
     st.header("Archive & Retention")
     st.caption(
@@ -702,18 +801,52 @@ def archive_retention() -> None:
         "ARCHIVE_COMPACT_AFTER_HOURS and pruned from the hot DB after "
         "ARCHIVE_RETENTION_DAYS. The retention autopilot runs this on a cadence "
         "(RETENTION_CADENCE_HOURS) and reports lake growth in Feed Health as the "
-        "`lake` component. Zero-container profile keeps the lake on local disk; "
-        "the docker profile uses MinIO. Query the lake with `python -m ops.archive "
-        "--query \"SELECT ...\"`."
+        "`lake` component — a lake whose cadence has elapsed shows `lake` health "
+        "as yellow, and a projected disk-full horizon within "
+        "RETENTION_BUDGET_ALERT_DAYS fires a `lake_budget` ntfy warning. Run one "
+        "pass by hand with `make retention`. Zero-container profile keeps the "
+        "lake on local disk; the docker profile uses MinIO. Query the lake with "
+        "`python -m ops.archive --query \"SELECT ...\"`."
     )
-    runs = api_get("/retention/runs", params={"limit": 30})
-    if runs:
+    growth = api_get("/retention/growth", params={"limit": 30})
+    if growth and growth.get("runs"):
+        runs = growth["runs"]
         latest = runs[0]
         st.metric("Lake bytes", f"{int(latest['byte_size']):,}")
         st.metric("Growth since last pass", f"{int(latest['growth_bytes']):,} B")
         st.metric(
             "Growth %",
             f"{latest['growth_pct']:.2f}%" if latest["growth_pct"] is not None else "—",
+        )
+        projected_full = growth.get("projected_full_at")
+        st.metric(
+            "Disk-full horizon",
+            projected_full[:10] if projected_full else "—",
+            help=(
+                f"Capacity cap {int(growth['max_bytes']):,} B at "
+                f"{float(growth['growth_rate_bytes_per_hour']):,.0f} B/h growth "
+                "(ARCHIVE_LAKE_MAX_BYTES)"
+            ),
+        )
+        st.metric(
+            "Days to full",
+            f"{float(growth['days_to_full']):.1f}"
+            if growth.get("days_to_full") is not None
+            else "—",
+            delta=None,
+            help=(
+                f"Lake is {float(growth['pct_full']):.1f}% full; horizon projected "
+                "from the linear trend of recent retention passes"
+            ),
+        )
+        st.subheader("Lake growth trend")
+        st.line_chart(
+            _lake_growth_frame(runs, growth),
+            use_container_width=True,
+        )
+        st.caption(
+            "Lake bytes per retention pass, extended by the linear projection to "
+            "the capacity cap (ARCHIVE_LAKE_MAX_BYTES)."
         )
         st.subheader("Retention passes")
         st.dataframe(
@@ -735,8 +868,9 @@ def archive_retention() -> None:
     data = api_get("/archive/manifests", params={"limit": 200})
     if not data:
         st.info(
-            "No archive manifests yet. Run ingestion so raw evidence accumulates, then "
-            "`python -m ops.archive --once` (or let the worker run it each scan)."
+        "No archive manifests yet. Run ingestion so raw evidence accumulates, then "
+        "`python -m ops.archive --once` (or let the retention autopilot compact "
+        "on its cadence — the worker never touches the archive)."
         )
         return
     df = pd.DataFrame(data)
@@ -1075,7 +1209,9 @@ def data_lake_dashboard() -> None:
         cols[2].metric("Progress", f"{progress.get('progress_pct', 0):.0f}%")
         cols[3].metric(
             "Ready to Train",
-            "✅ Yes" if progress.get("ready_to_train") else f"❌ Short {progress.get('shortfall', 0)}",
+            "✅ Yes"
+            if progress.get("ready_to_train")
+            else f"❌ Short {progress.get('shortfall', 0)}",
         )
         label_cols = st.columns(5)
         label_cols[0].metric("Ignition +", progress.get("ignition_positive", 0))
@@ -1087,7 +1223,10 @@ def data_lake_dashboard() -> None:
         # Progress bar
         st.progress(
             min(1.0, progress.get("progress_pct", 0) / 100.0),
-            text=f"{progress.get('total_labels', 0)} / {progress.get('min_samples_required', 30)} labels",
+            text=(
+                f"{progress.get('total_labels', 0)} / "
+                f"{progress.get('min_samples_required', 30)} labels"
+            ),
         )
 
         if st.button("⚡ Densify Labels Now", use_container_width=False):
@@ -1118,7 +1257,14 @@ def data_lake_dashboard() -> None:
                 st.markdown("**Top Signals**")
                 signal_df = pd.DataFrame(top_signals)
                 st.dataframe(
-                    signal_df[["source_table", "signal_score", "novelty_score", "magnitude_score", "actionable", "reasons"]],
+                    signal_df[[
+                        "source_table",
+                        "signal_score",
+                        "novelty_score",
+                        "magnitude_score",
+                        "actionable",
+                        "reasons",
+                    ]],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -1129,7 +1275,9 @@ def data_lake_dashboard() -> None:
 
     # Trigger data lake pass
     st.subheader("Data Lake Pass")
-    st.caption("Run a full data lake pass: signal scoring + label densification + webhook dispatch.")
+    st.caption(
+        "Run a full data lake pass: signal scoring + label densification + webhook dispatch."
+    )
     if st.button("🚀 Run Data Lake Pass", type="primary", use_container_width=False):
         result = api_post("/engine/data-lake")
         if result:
@@ -1157,7 +1305,13 @@ def webhook_manager() -> None:
         with col2:
             webhook_events = st.multiselect(
                 "Event Types",
-                ["ignition_detected", "liquidity_withdrawal_warning", "syndicate_recidivism", "lifecycle_transition", "high_signal_scan"],
+                [
+                    "ignition_detected",
+                    "liquidity_withdrawal_warning",
+                    "syndicate_recidivism",
+                    "lifecycle_transition",
+                    "high_signal_scan",
+                ],
                 default=["ignition_detected", "lifecycle_transition"],
             )
 
@@ -1165,7 +1319,10 @@ def webhook_manager() -> None:
         if st.form_submit_button("Register Webhook"):
             if webhook_url and webhook_name:
                 events_str = ",".join(webhook_events)
-                result = api_get(f"/webhooks/register/custom?webhook_url={webhook_url}&webhook_name={webhook_name}&webhook_events={events_str}")
+                result = api_get(
+                    f"/webhooks/register/custom?webhook_url={webhook_url}"
+                    f"&webhook_name={webhook_name}&webhook_events={events_str}"
+                )
                 if result and result.get("status") == "registered":
                     st.success(f"✅ Webhook registered: {result.get('name')}")
                     st.rerun()
@@ -1181,7 +1338,10 @@ def webhook_manager() -> None:
     webhooks = api_get("/webhooks")
     if webhooks:
         for wh in webhooks:
-            with st.expander(f"{wh.get('name', 'unnamed')} — {'✅ enabled' if wh.get('enabled') else '❌ disabled'}"):
+            with st.expander(
+                f"{wh.get('name', 'unnamed')} — "
+                f"{'✅ enabled' if wh.get('enabled') else '❌ disabled'}"
+            ):
                 st.write(f"**URL:** {wh.get('url', '')}")
                 st.write(f"**Events:** {', '.join(wh.get('event_types', []))}")
                 st.write(f"**Cooldown:** {wh.get('cooldown_seconds', 300)}s")
@@ -1202,7 +1362,14 @@ def webhook_manager() -> None:
     if dispatches:
         df = pd.DataFrame(dispatches)
         st.dataframe(
-            df[["dispatched_at", "event_type", "success", "status_code", "duration_ms", "error_message"]],
+            df[[
+                "dispatched_at",
+                "event_type",
+                "success",
+                "status_code",
+                "duration_ms",
+                "error_message",
+            ]],
             use_container_width=True,
             hide_index=True,
         )
@@ -1229,7 +1396,9 @@ def confidence_dashboard() -> None:
         st.subheader("ML Model Readiness")
         ready = progress.get("ready_to_train", False)
         if ready:
-            st.success(f"✅ Model ready to train — {progress.get('total_labels', 0)} labels available")
+            st.success(
+                f"✅ Model ready to train — {progress.get('total_labels', 0)} labels available"
+            )
         else:
             st.warning(
                 f"⚠️ Need {progress.get('shortfall', 0)} more labels to train "
@@ -1275,7 +1444,10 @@ def confidence_dashboard() -> None:
             if features:
                 st.markdown(f"**Top Feature Values for {first.get('symbol', 'UNKNOWN')}**")
                 feat_df = pd.DataFrame(
-                    [{"feature": k.replace("_", " ").title(), "value": v} for k, v in features.items()]
+                    [
+                        {"feature": k.replace("_", " ").title(), "value": v}
+                        for k, v in features.items()
+                    ]
                 ).sort_values("value", ascending=False)
                 st.bar_chart(feat_df.set_index("feature"), use_container_width=True)
     else:

@@ -425,6 +425,8 @@ class Alert(Base):
     state: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ack_quality: Mapped[str | None] = mapped_column(String(32))
 
 
 class NotificationDigest(Base):

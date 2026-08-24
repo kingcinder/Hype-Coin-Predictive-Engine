@@ -1,5 +1,5 @@
 .PHONY: setup up down migrate seed worker api ui engine test lint format smoke \
-	bootstrap-local local-worker local-api local-ui archive archive-query backtest refresh-rpc-pools forecast-ab
+	bootstrap-local local-worker local-api local-ui archive archive-query retention parity backtest refresh-rpc-pools forecast-ab
 
 setup:
 	python -m pip install --upgrade pip
@@ -50,11 +50,20 @@ archive:
 archive-query:
 	python -m ops.archive --query "$(SQL)"
 
+# Run one retention-autopilot pass (compaction + pruning + lake-growth report).
+retention:
+	python -m ops.retention --once
+
+# Run one lake-vs-SQL parity check over the archived lake (daily CI job).
+parity:
+	python -m ops.parity --once
+
 refresh-rpc-pools:
 	python scripts/refresh_rpc_pools.py
 
 backtest:
-	python -m backtest.runner --start "$(START)" --forward-hours "$(FORWARD_HOURS)"
+	python -m backtest.runner --start "$(START)" --forward-hours "$(FORWARD_HOURS)" \
+		$(if $(FEATURE_SOURCE),--feature-source "$(FEATURE_SOURCE)",)
 
 forecast-ab:
 	python -m forecast.experiment $(if $(DECISION_TS),--decision-ts "$(DECISION_TS)",)

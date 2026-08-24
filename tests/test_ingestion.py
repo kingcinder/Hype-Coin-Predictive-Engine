@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 import ingestion.service as ingestion_service
 from ingestion.service import IngestionService
+from ops.archive import LocalArchiveStore
 from storage import models
 from tests.conftest import seed_market_asset, seed_reference
 
@@ -127,3 +128,85 @@ def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(
     assert health is not None
     assert health.state == "ok"
     assert "2 holder rows across 1 assets" in (health.message or "")
+
+
+class _FakeStage:
+    """Network-free stand-ins for the scan pipeline stages."""
+
+    def scan(self, session, decision_ts=None):
+        return {}
+
+    def learn(self, session):
+        return {}
+
+    def assess(self, session):
+        return []
+
+
+def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
+    """The ingestion worker must not compact: it reports the archive stage as
+    skipped (archive=0 in scan results) and writes no parquet files — the
+    retention autopilot owns compaction on its cadence."""
+    seed_reference(session)
+    service = IngestionService()
+
+    monkeypatch.setattr(service, "_ingest_dexscreener_profiles", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_dexscreener_boosts", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_geckoterminal_new_pools", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_birdeye_solana", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_solana_holder_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_run_data_quality_check", lambda session, decision_ts: {})
+    monkeypatch.setattr(service, "_run_contract_analysis", lambda session, decision_ts: {})
+    monkeypatch.setattr(ingestion_service, "run_mempool", lambda session, decision_ts=None: {})
+    monkeypatch.setattr(
+        ingestion_service, "run_narrative", lambda session, decision_ts=None: {}
+    )
+    monkeypatch.setattr(
+        ingestion_service, "extract_catalysts", lambda session, decision_ts=None: 0
+    )
+    monkeypatch.setattr(
+        ingestion_service,
+        "alert_upcoming_catalysts",
+        lambda session, decision_ts=None: 0,
+    )
+    monkeypatch.setattr(
+        ingestion_service,
+        "run_lifecycle",
+        lambda session, decision_ts=None: {"events": 0, "assets": 0},
+    )
+    monkeypatch.setattr(
+        ingestion_service,
+        "run_forecast_if_due",
+        lambda session, decision_ts=None: {"forecasts": 0},
+    )
+    monkeypatch.setattr(
+        ingestion_service,
+        "score_current_assets",
+        lambda session, decision_ts=None, asset_ids=None: [],
+    )
+    monkeypatch.setattr(
+        ingestion_service, "run_notifier", lambda session, decision_ts=None: {"sent": 0}
+    )
+    monkeypatch.setattr(ingestion_service, "LiquidityRemovalWatcher", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "PrelaunchQueue", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "IgnitionRadar", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "FingerprintEngine", _FakeStage)
+
+    result = service.run_once(session)
+
+    assert result["archive"] == {"skipped": True, "partitions": 0, "compacted": 0}
+    assert LocalArchiveStore(tmp_path).list_objects("evidence") == []
+    scan = session.scalar(
+        select(models.ScanResult).order_by(models.ScanResult.ts.desc()).limit(1)
+    )
+    assert scan is not None
+    assert scan.state == "ok"
+    assert scan.archive == 0
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "worker")
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    assert health is not None
+    assert "retention autopilot" in (health.message or "")

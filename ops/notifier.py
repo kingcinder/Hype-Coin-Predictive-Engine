@@ -7,7 +7,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import Settings, get_settings
 from common.enums import AlertState
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
@@ -280,6 +280,101 @@ def notify_rpc_pool_event(event: RpcPoolAlert) -> bool:
         return NtfyNotifier().send_rpc_pool_event(event)
     except Exception as exc:  # noqa: BLE001 - pool health must not depend on ntfy.
         log.warning("ntfy_rpc_pool_push_failed", chain=event.chain_slug, error=str(exc))
+        return False
+
+
+def notify_lake_budget(
+    days_to_full: float,
+    pct_full: float,
+    growth_rate_bytes_per_hour: float,
+    max_bytes: int,
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    """Push a retention budget warning when projected lake growth would fill
+    the archive capacity within the configured horizon.
+
+    Returns False when ntfy is disabled or the push fails, so callers can
+    retry on the next retention pass (the budget health row is still recorded
+    either way). A lake at/over capacity escalates to an urgent push.
+    """
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    urgent = days_to_full <= 0
+    if urgent:
+        message = (
+            f"Lake is at/over the assumed capacity cap ({pct_full:.1f}% full, "
+            f"cap {max_bytes:,} B) — prune or move the lake now; compaction "
+            "cannot keep up with growth."
+        )
+        title = "Serpent Circle - Lake Full"
+    else:
+        message = (
+            f"Lake projected to fill in {days_to_full:.1f} days "
+            f"({pct_full:.1f}% full, {growth_rate_bytes_per_hour:,.0f} B/h growth, "
+            f"cap {max_bytes:,} B) — prune or move the lake before it is full."
+        )
+        title = "Serpent Circle - Lake Budget Warning"
+    try:
+        notifier._post(
+            message,
+            {
+                "Title": title,
+                "Priority": "5" if urgent else "4",
+                "Tags": "rotating_light" if urgent else "thermometer",
+                "Click": f"{notifier.settings.api_base_url}/retention/growth",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - budget health must not depend on ntfy.
+        log.warning("ntfy_lake_budget_push_failed", error=str(exc))
+        return False
+
+
+def notify_parity_mismatch(
+    mismatch_count: int,
+    compared_assets: int,
+    decision_ts: datetime,
+    examples: list[str],
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    """Page a lake-vs-SQL parity mismatch via ntfy.
+
+    Returns False when ntfy is disabled or the push fails, so the next daily
+    run retries. ``examples`` are short ``SYMBOL [feature]: sql=... lake=...``
+    strings for the first few divergences, so the operator can act without
+    opening the DB.
+    """
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    lines = [
+        "Lake-vs-SQL parity check failed: the DuckDB lake read path diverges",
+        f"from the live SQL path at decision {decision_ts.isoformat()}.",
+        f"{mismatch_count} mismatches across {compared_assets} compared assets.",
+    ]
+    if examples:
+        lines.append("\nFirst mismatches:")
+        lines.extend(f"- {example}" for example in examples)
+    try:
+        notifier._post(
+            "\n".join(lines),
+            {
+                "Title": "Serpent Circle - Lake Parity Mismatch",
+                "Priority": "4",
+                "Tags": "warning",
+                "Click": f"{notifier.settings.api_base_url}/health",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - parity health must not depend on ntfy.
+        log.warning("ntfy_parity_push_failed", error=str(exc))
         return False
 
 
