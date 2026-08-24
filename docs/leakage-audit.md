@@ -6,7 +6,7 @@ time, or do any labels leak into feature rows? Inspected `features/factory.py`,
 forecast training path in `forecast/engine.py`, following up on the dense-label
 interpolation pattern that the real-only metrics work already surface._
 
-Audit date / engine: `master`.
+Audit date / engine: `main`.
 
 ## Methodology
 
