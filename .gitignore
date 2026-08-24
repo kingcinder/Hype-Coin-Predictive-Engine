@@ -13,6 +13,8 @@ htmlcov/
 *.pyd
 *.sqlite
 *.db
+*.db-wal
+*.db-shm
 *.duckdb
 *.egg-info/
 data/
