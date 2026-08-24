@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
-import httpx
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+from ui.api_client import API_BASE_URL, api_get, api_post  # noqa: F401
+
 try:
     NARRATIVE_DEV_ACTIVITY_REFRESH_SECONDS = max(
         5, int(os.getenv("NARRATIVE_DEV_ACTIVITY_REFRESH_SECONDS", "30"))
@@ -76,28 +75,6 @@ def _sse_bridge_js(api_base: str) -> str:
     }})();
     </script>
     """
-
-
-def api_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(f"{API_BASE_URL}{path}", params=params)
-            response.raise_for_status()
-            return response.json()
-    except Exception as exc:  # noqa: BLE001 - visible operator state.
-        st.error(f"API request failed: {path}: {exc}")
-        return None
-
-
-def api_post(path: str, *, json: dict[str, Any] | None = None) -> Any:
-    try:
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(f"{API_BASE_URL}{path}", json=json)
-            response.raise_for_status()
-            return response.json()
-    except Exception as exc:  # noqa: BLE001 - visible operator state.
-        st.error(f"API request failed: {path}: {exc}")
-        return None
 
 
 def score_frame(path: str, *, include_black: bool = False, limit: int = 25) -> pd.DataFrame:
@@ -1080,6 +1057,244 @@ def engine_control() -> None:
 
 
 
+def data_lake_dashboard() -> None:
+    """Data Lake dashboard: signal scoring, label progress, archive stats."""
+    st.header("Data Lake Dashboard")
+    st.caption(
+        "Signal scoring sieves actionable data from noise. Label densification "
+        "accelerates forecast training. Archive compacts raw evidence into Parquet."
+    )
+
+    # Label generation progress
+    st.subheader("Label Generation Progress")
+    progress = api_get("/data/labels/progress")
+    if progress:
+        cols = st.columns(4)
+        cols[0].metric("Total Labels", progress.get("total_labels", 0))
+        cols[1].metric("Required", progress.get("min_samples_required", 30))
+        cols[2].metric("Progress", f"{progress.get('progress_pct', 0):.0f}%")
+        cols[3].metric(
+            "Ready to Train",
+            "✅ Yes" if progress.get("ready_to_train") else f"❌ Short {progress.get('shortfall', 0)}",
+        )
+        label_cols = st.columns(5)
+        label_cols[0].metric("Ignition +", progress.get("ignition_positive", 0))
+        label_cols[1].metric("Ignition -", progress.get("ignition_negative", 0))
+        label_cols[2].metric("Collapse +", progress.get("collapse_positive", 0))
+        label_cols[3].metric("Collapse -", progress.get("collapse_negative", 0))
+        label_cols[4].metric("Assets Labeled", progress.get("unique_assets_labeled", 0))
+
+        # Progress bar
+        st.progress(
+            min(1.0, progress.get("progress_pct", 0) / 100.0),
+            text=f"{progress.get('total_labels', 0)} / {progress.get('min_samples_required', 30)} labels",
+        )
+
+        if st.button("⚡ Densify Labels Now", use_container_width=False):
+            with st.spinner("Densifying labels from market snapshots..."):
+                result = api_post("/data/densify-labels")
+            if result:
+                st.success(f"Generated labels: {result}")
+                st.rerun()
+    else:
+        st.info("Label progress data unavailable.")
+
+    st.divider()
+
+    # Signal scoring
+    st.subheader("Signal Scoring")
+    if st.button("📊 Score Recent Signals", use_container_width=False):
+        with st.spinner("Scoring recent data points..."):
+            signal_data = api_post("/data/signal/score")
+        if signal_data:
+            sig_cols = st.columns(4)
+            sig_cols[0].metric("Total Scored", signal_data.get("total_scored", 0))
+            sig_cols[1].metric("Actionable", signal_data.get("actionable_count", 0))
+            sig_cols[2].metric("Noise", signal_data.get("noise_count", 0))
+            sig_cols[3].metric("Avg Signal", f"{signal_data.get('avg_signal', 0):.3f}")
+
+            top_signals = signal_data.get("top_signals") or []
+            if top_signals:
+                st.markdown("**Top Signals**")
+                signal_df = pd.DataFrame(top_signals)
+                st.dataframe(
+                    signal_df[["source_table", "signal_score", "novelty_score", "magnitude_score", "actionable", "reasons"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+    else:
+        st.info("Click 'Score Recent Signals' to analyze recent data for signal strength.")
+
+    st.divider()
+
+    # Trigger data lake pass
+    st.subheader("Data Lake Pass")
+    st.caption("Run a full data lake pass: signal scoring + label densification + webhook dispatch.")
+    if st.button("🚀 Run Data Lake Pass", type="primary", use_container_width=False):
+        result = api_post("/engine/data-lake")
+        if result:
+            if result.get("status") == "accepted":
+                st.success(f"✅ {result.get('message', 'Data lake pass started')}")
+            else:
+                st.warning(f"⚠️ {result.get('message', 'Rejected')}")
+
+
+def webhook_manager() -> None:
+    """Webhook Manager: register, list, delete webhooks and view dispatch history."""
+    st.header("Webhook Manager")
+    st.caption(
+        "Register HTTP endpoints to receive real-time alerts when high-signal events "
+        "are detected. Supports custom HTTP POST, Telegram bots, and Discord webhooks."
+    )
+
+    # Register new webhook
+    st.subheader("Register Webhook")
+    with st.form("register_webhook"):
+        col1, col2 = st.columns(2)
+        with col1:
+            webhook_url = st.text_input("Webhook URL", placeholder="https://hooks.example.com/alerts")
+            webhook_name = st.text_input("Name", placeholder="my-alerts")
+        with col2:
+            webhook_events = st.multiselect(
+                "Event Types",
+                ["ignition_detected", "liquidity_withdrawal_warning", "syndicate_recidivism", "lifecycle_transition", "high_signal_scan"],
+                default=["ignition_detected", "lifecycle_transition"],
+            )
+
+
+        if st.form_submit_button("Register Webhook"):
+            if webhook_url and webhook_name:
+                events_str = ",".join(webhook_events)
+                result = api_get(f"/webhooks/register/custom?webhook_url={webhook_url}&webhook_name={webhook_name}&webhook_events={events_str}")
+                if result and result.get("status") == "registered":
+                    st.success(f"✅ Webhook registered: {result.get('name')}")
+                    st.rerun()
+                else:
+                    st.error("Failed to register webhook")
+            else:
+                st.warning("URL and Name are required")
+
+    st.divider()
+
+    # List existing webhooks
+    st.subheader("Registered Webhooks")
+    webhooks = api_get("/webhooks")
+    if webhooks:
+        for wh in webhooks:
+            with st.expander(f"{wh.get('name', 'unnamed')} — {'✅ enabled' if wh.get('enabled') else '❌ disabled'}"):
+                st.write(f"**URL:** {wh.get('url', '')}")
+                st.write(f"**Events:** {', '.join(wh.get('event_types', []))}")
+                st.write(f"**Cooldown:** {wh.get('cooldown_seconds', 300)}s")
+                st.write(f"**Last dispatched:** {wh.get('last_dispatched_at', 'never')}")
+                if st.button(f"Delete webhook {wh.get('id')}", key=f"del_{wh.get('id')}"):
+                    result = api_post(f"/webhooks/{wh.get('id')}/delete")
+                    if result and result.get("status") == "deleted":
+                        st.success(f"✅ Webhook {wh.get('id')} deleted")
+                    st.rerun()
+    else:
+        st.info("No webhooks registered yet. Register one above.")
+
+    st.divider()
+
+    # Dispatch history
+    st.subheader("Dispatch History")
+    dispatches = api_get("/webhooks/dispatches?limit=30")
+    if dispatches:
+        df = pd.DataFrame(dispatches)
+        st.dataframe(
+            df[["dispatched_at", "event_type", "success", "status_code", "duration_ms", "error_message"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No dispatches yet.")
+
+
+def confidence_dashboard() -> None:
+    """Confidence Dashboard: scoring formula breakdown, feature importance, scan history."""
+    st.header("Confidence Dashboard")
+    st.caption(
+        "Understand WHY tokens are ranked the way they are. Scoring formula breakdown, "
+        "feature importance for top-ranked tokens, and scan history over time."
+    )
+
+    data = api_get("/data/confidence")
+    if not data:
+        st.info("Confidence dashboard data unavailable. Run ingestion first.")
+        return
+
+    # Label progress
+    progress = data.get("label_progress", {})
+    if progress:
+        st.subheader("ML Model Readiness")
+        ready = progress.get("ready_to_train", False)
+        if ready:
+            st.success(f"✅ Model ready to train — {progress.get('total_labels', 0)} labels available")
+        else:
+            st.warning(
+                f"⚠️ Need {progress.get('shortfall', 0)} more labels to train "
+                f"({progress.get('total_labels', 0)}/{progress.get('min_samples_required', 30)})"
+            )
+        st.progress(
+            min(1.0, progress.get("progress_pct", 0) / 100.0),
+            text=f"{progress.get('progress_pct', 0):.0f}% complete",
+        )
+
+    st.divider()
+
+    # Scoring breakdown
+    st.subheader("Scoring Formula Breakdown")
+    breakdown = data.get("scoring_breakdown") or []
+    if breakdown:
+        rows = []
+        for item in breakdown:
+            row = {
+                "Symbol": item.get("symbol"),
+                "Chain": item.get("chain"),
+                "Hype": item.get("hype"),
+                "Ethos": item.get("ethos"),
+                "Risk": item.get("risk"),
+                "Liquidity": item.get("liquidity_access"),
+                "Confidence": item.get("confidence"),
+                "Priority": item.get("research_priority"),
+                "Band": item.get("risk_band"),
+            }
+            # Add top feature values
+            features = item.get("feature_importance", {})
+            for fname, fval in features.items():
+                short = fname.replace("_", " ").title()[:20]
+                row[short] = fval
+            rows.append(row)
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Feature importance chart for first token
+        if breakdown:
+            first = breakdown[0]
+            features = first.get("feature_importance", {})
+            if features:
+                st.markdown(f"**Top Feature Values for {first.get('symbol', 'UNKNOWN')}**")
+                feat_df = pd.DataFrame(
+                    [{"feature": k.replace("_", " ").title(), "value": v} for k, v in features.items()]
+                ).sort_values("value", ascending=False)
+                st.bar_chart(feat_df.set_index("feature"), use_container_width=True)
+    else:
+        st.info("No scoring data available yet.")
+
+    st.divider()
+
+    # Scan history
+    st.subheader("Scan History")
+    scan_history = data.get("scan_history") or []
+    if scan_history:
+        df = pd.DataFrame(scan_history)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if "duration_sec" in df.columns and df["duration_sec"].notna().any():
+            st.line_chart(df.set_index("ts")[["duration_sec"]], use_container_width=True)
+    else:
+        st.info("No scan history yet.")
+
+
 def command_center() -> None:
     """Compact live overview: engine status, top scores, forecasts, lifecycle, alerts."""
     st.header("Command Center")
@@ -1096,7 +1311,7 @@ def command_center() -> None:
     forecasts = api_get("/forecasts", params={"limit": 100}) or []
     lifecycle = api_get("/lifecycle/current", params={"limit": 100}) or []
     pool = api_get("/rpc/pool") or []
-    alerts = api_get("/alerts", params={"limit": 200}) or []
+
 
     last_scan = (ops or {}).get("last_scan")
     pool_state = max((chain.get("state") for chain in pool), default="—")
@@ -1302,6 +1517,9 @@ def main() -> None:
         [
             "Command Center",
             "Engine Control",
+            "Data Lake",
+            "Confidence Dashboard",
+            "Webhook Manager",
             "Top Hype Tokens",
             "Top Research Candidates",
             "Risk Console",
@@ -1323,6 +1541,7 @@ def main() -> None:
             "Feed Health",
             "Live Ops Console",
             "Alerts",
+            "Night Crawlers",
         ],
     )
 
@@ -1332,6 +1551,15 @@ def main() -> None:
         narrative_dev_activity()
     elif view == "Engine Control":
         engine_control()
+    elif view == "Night Crawlers":
+        from ui.nightcrawler_view import nightcrawler_view
+        nightcrawler_view()
+    elif view == "Data Lake":
+        data_lake_dashboard()
+    elif view == "Confidence Dashboard":
+        confidence_dashboard()
+    elif view == "Webhook Manager":
+        webhook_manager()
     else:
         render_active_view(view)
 

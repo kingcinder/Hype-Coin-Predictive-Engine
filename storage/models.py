@@ -739,3 +739,42 @@ class BacktestResult(Base):
     metric_value: Mapped[float] = mapped_column(Float, nullable=False)
     chain_slug: Mapped[str | None] = mapped_column(String(32))
     details_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class WebhookConfig(Base, TimestampMixin):
+    """Registered webhook endpoint for real-time alerts."""
+
+    __tablename__ = "webhook_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    secret: Mapped[str | None] = mapped_column(String(256))
+    event_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    chain_filter: Mapped[str | None] = mapped_column(String(32))
+    min_signal_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WebhookDispatch(Base):
+    """Record of a single webhook dispatch attempt."""
+
+    __tablename__ = "webhook_dispatches"
+    __table_args__ = (
+        Index("ix_webhook_dispatches_config_ts", "webhook_config_id", "dispatched_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    webhook_config_id: Mapped[int] = mapped_column(
+        ForeignKey("webhook_configs.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    dispatched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    duration_ms: Mapped[float | None] = mapped_column(Float)

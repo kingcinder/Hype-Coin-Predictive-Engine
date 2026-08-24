@@ -120,11 +120,13 @@ def main() -> None:
     from ingestion.source_clients import ensure_background_probe
     from ingestion.worker import run_once
     from ops.retention import maybe_run_retention
+    from storage.database import SessionLocal
 
     engine_state.started_at = time.monotonic()
     engine_state.scan_interval_seconds = settings.scan_interval_seconds
     ensure_background_probe()
     iteration = 0
+    _last_nc_run_monotonic: float = 0.0  # monotonic timestamp of last NC run
     try:
         while not stop.is_set():
             iteration += 1
@@ -138,6 +140,7 @@ def main() -> None:
                 engine_state.mark_error(str(exc))
                 stop.wait(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
                 continue
+            phase_error = False
             try:
                 engine_state.mark_forecasting()
                 forecast = maybe_run_forecast()
@@ -146,6 +149,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001 - forecast failure must not kill the engine
                 log.exception("engine_forecast_failed", iteration=iteration, error=str(exc))
                 engine_state.mark_error(f"forecast: {exc}")
+                phase_error = True
             try:
                 engine_state.mark_retention()
                 retention = maybe_run_retention()
@@ -154,10 +158,47 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001 - retention failure must not kill the engine
                 log.exception("engine_retention_failed", iteration=iteration, error=str(exc))
                 engine_state.mark_error(f"retention: {exc}")
-            engine_state.mark_completed()
+                phase_error = True
+            # Night Crawler pass: crawl all sources, feed data lake
+            # Gated by interval — only runs every nightcrawler_interval_minutes
+            try:
+                if settings.nightcrawler_enabled and not stop.is_set():
+                    nc_interval_sec = settings.nightcrawler_interval_minutes * 60
+                    now_mono = time.monotonic()
+                    if (now_mono - _last_nc_run_monotonic) >= nc_interval_sec:
+                        from crawlers.pipeline import run_nightcrawler_pipeline
+                        with SessionLocal() as session:
+                            nc_result = run_nightcrawler_pipeline(session)
+                            session.commit()
+                        _last_nc_run_monotonic = now_mono
+                        log.info("engine_nightcrawler_complete", iteration=iteration, result=nc_result)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("engine_nightcrawler_failed", iteration=iteration, error=str(exc))
+                engine_state.mark_error(f"nightcrawler: {exc}")
+                phase_error = True
+            # Data lake pass: signal scoring + label densification + webhooks
+            try:
+                if settings.data_lake_enabled:
+                    from data_lake.manager import run_data_lake_pass
+                    with SessionLocal() as session:
+                        dl_result = run_data_lake_pass(session)
+                        session.commit()
+                    log.info("engine_data_lake_complete", iteration=iteration, result=dl_result)
+            except Exception as exc:  # noqa: BLE001 - data lake failure must not kill the engine
+                log.exception("engine_data_lake_failed", iteration=iteration, error=str(exc))
+                engine_state.mark_error(f"data_lake: {exc}")
+                phase_error = True
+            if not phase_error:
+                engine_state.mark_completed()
             stop.wait(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
     finally:
         log.info("engine_shutting_down")
+        # Clean up Night Crawler HTTP clients
+        try:
+            from crawlers.orchestrator import close_nightcrawler_orchestrator
+            close_nightcrawler_orchestrator()
+        except Exception:
+            pass
         if ui.poll() is None:
             ui.terminate()
             try:

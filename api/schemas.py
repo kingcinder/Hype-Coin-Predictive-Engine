@@ -344,3 +344,86 @@ class SeedResponse(BaseModel):
 class TriggerResponse(BaseModel):
     status: str
     message: str
+
+
+class SignalScoreRow(BaseModel):
+    source_table: str
+    record_id: int
+    signal_score: float
+    novelty_score: float
+    corroboration_score: float
+    temporal_score: float
+    magnitude_score: float
+    reasons: list[str]
+    actionable: bool
+
+
+class SignalBatchResultRow(BaseModel):
+    total_scored: int
+    actionable_count: int
+    noise_count: int
+    avg_signal: float
+    top_signals: list[SignalScoreRow]
+    timestamp: str
+
+
+class LabelProgressRow(BaseModel):
+    total_labels: int
+    ignition_positive: int
+    ignition_negative: int
+    collapse_positive: int
+    collapse_negative: int
+    min_samples_required: int
+    progress_pct: float
+    ready_to_train: bool
+    unique_assets_labeled: int
+    assets_with_snapshots: int
+    shortfall: int
+
+
+class DataLakePassResult(BaseModel):
+    signal: dict[str, Any]
+    labels: dict[str, Any]
+    webhooks: dict[str, Any]
+    progress: dict[str, Any]
+
+
+class ConfidenceDashboardResponse(BaseModel):
+    label_progress: LabelProgressRow
+    scoring_breakdown: list[dict[str, Any]]
+    scan_history: list[dict[str, Any]]
+
+
+class WebhookConfigRow(BaseModel):
+    id: int
+    url: str
+    name: str
+    event_types: list[str]
+    enabled: bool
+    cooldown_seconds: int
+    chain_filter: str | None
+    min_signal_score: float
+    last_dispatched_at: datetime | None
+    created_at: datetime
+
+
+class WebhookRegisterRequest(BaseModel):
+    url: str
+    name: str
+    event_types: list[str] | None = None
+    secret: str | None = None
+    enabled: bool = True
+    cooldown_seconds: int = 300
+    chain_filter: str | None = None
+    min_signal_score: float = 0.0
+
+
+class WebhookDispatchRow(BaseModel):
+    id: int
+    webhook_config_id: int
+    event_type: str
+    dispatched_at: datetime
+    success: bool
+    status_code: int | None
+    error_message: str | None
+    duration_ms: float | None

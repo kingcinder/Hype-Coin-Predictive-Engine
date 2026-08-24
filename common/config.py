@@ -170,6 +170,25 @@ class Settings(BaseSettings):
     # catalyst timetable
     catalyst_alert_hours: float = 72.0
 
+    # data lake manager: signal scoring, label densification, webhook dispatch
+    data_lake_enabled: bool = True
+    data_lake_signal_batch_size: int = 500
+    data_lake_dense_label_forward_hours: int = 24
+    webhook_enabled: bool = True
+    webhook_default_cooldown_seconds: int = 300
+    webhook_http_timeout_seconds: float = 10.0
+
+    # night crawlers: expanded data sources for the engine
+    nightcrawler_enabled: bool = True
+    nightcrawler_interval_minutes: int = 30
+    nightcrawler_coingecko_enabled: bool = True
+    nightcrawler_pumpfun_enabled: bool = True
+    nightcrawler_defillama_enabled: bool = True
+    nightcrawler_whale_enabled: bool = True
+    nightcrawler_explorer_enabled: bool = True
+    nightcrawler_nitter_enabled: bool = True
+    nightcrawler_presale_enabled: bool = True
+
     # forecast layer
     forecast_enabled: bool = True
     forecast_forward_hours: int = 24

@@ -205,6 +205,16 @@ class ForecastEngine:
         if not self.settings.forecast_enabled:
             return {"status": "disabled"}
         label_counts = LabelEngine().generate(session, decision_ts=decision_ts)
+        # Also generate dense labels from interpolated market snapshots to
+        # accelerate training data accumulation (unblocks the ML model faster).
+        try:
+            from data_lake.labels import generate_dense_labels
+            dense_counts = generate_dense_labels(session, decision_ts=decision_ts)
+            label_counts["dense_ignition"] = dense_counts.get("ignition", 0)
+            label_counts["dense_collapse"] = dense_counts.get("collapse", 0)
+            label_counts["total_decision_points"] = dense_counts.get("total_decision_points", 0)
+        except Exception:  # noqa: BLE001 - dense labels are additive, never block training.
+            pass
         samples = self._collect_samples(session, decision_ts)
         if len(samples) < self.settings.forecast_min_samples:
             record_health(

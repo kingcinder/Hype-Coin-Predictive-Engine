@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Annotated
-
 import asyncio
 import json
 import time
+from collections import defaultdict
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -960,6 +959,7 @@ def engine_seed() -> SeedResponse:
 def engine_trigger_scan() -> TriggerResponse:
     """Trigger a manual ingestion scan. Runs in a background thread."""
     import threading
+
     from engine.state import ScanPhase
 
     current = engine_state.scan.phase
@@ -1076,7 +1076,7 @@ def engine_sse_stream():
                     event_type = event.get("type", "update")
                     event_data = {k: v for k, v in event.items() if k != "type"}
                     yield f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Send a keepalive comment every 30s to prevent proxy timeouts
                     yield f": keepalive {time.time():.0f}\n\n"
         except asyncio.CancelledError:
@@ -1093,3 +1093,216 @@ def engine_sse_stream():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── Data Lake Endpoints ─────────────────────────────────────────────────────
+
+
+@app.get("/data/labels/progress")
+def data_labels_progress(session: DbSession) -> dict:
+    """Label generation progress toward the training threshold."""
+    from data_lake.labels import label_generation_progress
+    return label_generation_progress(session)
+
+
+@app.post("/data/signal/score")
+def data_signal_score(session: DbSession) -> dict:
+    """Score a batch of recent data points for signal strength."""
+    from data_lake.signal import score_batch
+    result = score_batch(session)
+    return {
+        "total_scored": result.total_scored,
+        "actionable_count": result.actionable_count,
+        "noise_count": result.noise_count,
+        "avg_signal": result.avg_signal,
+        "top_signals": [
+            {
+                "source_table": s.source_table,
+                "record_id": s.record_id,
+                "signal_score": s.signal_score,
+                "novelty_score": s.novelty_score,
+                "corroboration_score": s.corroboration_score,
+                "temporal_score": s.temporal_score,
+                "magnitude_score": s.magnitude_score,
+                "reasons": s.reasons[:3],
+                "actionable": s.actionable,
+            }
+            for s in result.top_signals[:20]
+        ],
+    }
+
+
+@app.post("/data/densify-labels")
+def data_densify_labels(session: DbSession) -> dict:
+    """Densify forecast labels from existing market snapshots."""
+    from data_lake.labels import generate_dense_labels
+    counts = generate_dense_labels(session)
+    return counts
+
+
+@app.get("/data/confidence", response_model=dict)
+def data_confidence(session: DbSession) -> dict:
+    """Confidence dashboard data: label progress, scoring breakdown, scan history."""
+    from data_lake.manager import get_confidence_dashboard_data
+    return get_confidence_dashboard_data(session)
+
+
+@app.get("/webhooks", response_model=list[dict])
+def webhook_list(session: DbSession) -> list[dict]:
+    """List all registered webhooks."""
+    from data_lake.webhooks import list_webhooks
+    webhooks = list_webhooks(session)
+    return [
+        {
+            "id": w.id,
+            "url": w.url,
+            "name": w.name,
+            "event_types": w.event_types,
+            "enabled": w.enabled,
+            "cooldown_seconds": w.cooldown_seconds,
+            "chain_filter": w.chain_filter,
+            "min_signal_score": w.min_signal_score,
+            "last_dispatched_at": w.last_dispatched_at,
+            "created_at": w.created_at,
+        }
+        for w in webhooks
+    ]
+
+
+@app.post("/webhooks/register", response_model=dict)
+def webhook_register(
+    session: DbSession,
+    webhook_url: str = "http://localhost:8080/webhook",
+    webhook_name: str = "custom",
+    webhook_events: str = "ignition_detected,lifecycle_transition,high_signal_scan",
+    webhook_secret: str | None = None,
+) -> dict:
+    """Register a new webhook. Parameters passed via query strings for GUI compatibility."""
+    from data_lake.webhooks import register_webhook
+    event_types = [e.strip() for e in webhook_events.split(",") if e.strip()]
+    webhook = register_webhook(
+        session,
+        url=webhook_url,
+        name=webhook_name,
+        event_types=event_types,
+        secret=webhook_secret,
+    )
+    return {
+        "id": webhook.id,
+        "url": webhook.url,
+        "name": webhook.name,
+        "event_types": webhook.event_types,
+        "status": "registered",
+    }
+
+
+@app.post("/webhooks/{webhook_id}/delete", response_model=dict)
+def webhook_delete(webhook_id: int, session: DbSession) -> dict:
+    """Delete a webhook by ID. Uses POST for GUI compatibility (Streamlit api_post helper)."""
+    from data_lake.webhooks import delete_webhook
+    deleted = delete_webhook(session, webhook_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"webhook {webhook_id} not found")
+    return {"status": "deleted", "webhook_id": webhook_id}
+
+
+@app.get("/webhooks/dispatches")
+def webhook_dispatches(
+    session: DbSession,
+    limit: int = 50,
+    webhook_id: int | None = None,
+) -> list[dict]:
+    """Get recent webhook dispatch history."""
+    from data_lake.webhooks import webhook_dispatch_history
+    dispatches = webhook_dispatch_history(session, webhook_id=webhook_id, limit=limit)
+    return [
+        {
+            "id": d.id,
+            "webhook_config_id": d.webhook_config_id,
+            "event_type": d.event_type,
+            "dispatched_at": d.dispatched_at,
+            "success": d.success,
+            "status_code": d.status_code,
+            "error_message": d.error_message,
+            "duration_ms": d.duration_ms,
+        }
+        for d in dispatches
+    ]
+
+
+@app.get("/nightcrawlers/status")
+def nightcrawler_status() -> dict:
+    """Status of all Night Crawler crawlers."""
+    from crawlers.orchestrator import get_nightcrawler_orchestrator
+    return get_nightcrawler_orchestrator().get_status()
+
+
+@app.get("/nightcrawlers/heuristics")
+def nightcrawler_heuristics() -> dict:
+    """Heuristics engine state: source reliability and learned patterns."""
+    from crawlers.orchestrator import get_nightcrawler_orchestrator
+    return get_nightcrawler_orchestrator().heuristics.summarize()
+
+
+@app.post("/engine/nightcrawlers", response_model=TriggerResponse)
+def engine_trigger_nightcrawlers() -> TriggerResponse:
+    """Trigger a Night Crawler pass: crawl all sources, score signals, feed data lake."""
+    import threading
+
+    from engine.state import ScanPhase
+
+    current = engine_state.scan.phase
+    if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
+        return TriggerResponse(
+            status="rejected",
+            message=f"Engine busy (phase={current.value})",
+        )
+
+    def _run() -> None:
+        try:
+            engine_state.mark_scanning(message="Night Crawler pipeline")
+            from crawlers.pipeline import run_nightcrawler_pipeline
+            from storage.database import SessionLocal
+            with SessionLocal() as session:
+                result = run_nightcrawler_pipeline(session, force=True)
+                session.commit()
+            engine_state.mark_completed()
+            log.info("api_nightcrawler_complete", result=result)
+        except Exception as exc:  # noqa: BLE001
+            engine_state.mark_error(str(exc))
+            log.exception("api_nightcrawler_failed", error=str(exc))
+
+    threading.Thread(target=_run, name="api-nightcrawler", daemon=True).start()
+    return TriggerResponse(status="accepted", message="Night Crawler pipeline started")
+
+
+@app.post("/engine/data-lake", response_model=TriggerResponse)
+def engine_trigger_data_lake() -> TriggerResponse:
+    """Trigger a data lake pass: signal scoring + label densification + webhooks."""
+    import threading
+
+    from engine.state import ScanPhase
+
+    current = engine_state.scan.phase
+    if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
+        return TriggerResponse(
+            status="rejected",
+            message=f"Engine busy (phase={current.value})",
+        )
+
+    def _run() -> None:
+        try:
+            engine_state.mark_scanning(message="Data lake pass")
+            from data_lake.manager import run_data_lake_pass
+            from storage.database import SessionLocal
+            with SessionLocal() as session:
+                result = run_data_lake_pass(session)
+                session.commit()
+            engine_state.mark_completed()
+            log.info("api_data_lake_complete", result=result)
+        except Exception as exc:  # noqa: BLE001
+            engine_state.mark_error(str(exc))
+            log.exception("api_data_lake_failed", error=str(exc))
+
+    threading.Thread(target=_run, name="api-data-lake", daemon=True).start()
+    return TriggerResponse(status="accepted", message="Data lake pass started")
