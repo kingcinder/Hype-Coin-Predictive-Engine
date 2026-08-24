@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.config import get_settings
 from common.logging import get_logger
 from common.time import utc_now
 from data_lake.labels import generate_dense_labels, label_generation_progress
@@ -258,4 +259,42 @@ def get_confidence_dashboard_data(
         "label_progress": progress,
         "scoring_breakdown": scoring_breakdown,
         "scan_history": scan_chart,
+        "forecast_metrics": _latest_forecast_metrics(session),
+    }
+
+
+_FORECAST_METRIC_NAMES = (
+    "forecast.precision_at_10",
+    "forecast.calibration_error",
+    "forecast.precision_at_10_real",
+    "forecast.calibration_error_real",
+    "forecast.real_test_samples",
+    "forecast.test_samples",
+)
+
+
+def _latest_forecast_metrics(session: Session) -> dict[str, float | None]:
+    """Latest persisted forecast training metrics (blended + real-only) from
+    the most recent completed forecast run, for the Confidence Dashboard."""
+    run = session.scalar(
+        select(models.BacktestRun)
+        .where(
+            models.BacktestRun.model_version == get_settings().forecast_model_version,
+            models.BacktestRun.status == "completed",
+        )
+        .order_by(models.BacktestRun.started_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return {}
+    rows = session.execute(
+        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value)
+        .where(
+            models.BacktestResult.run_id == run.id,
+            models.BacktestResult.metric_name.in_(_FORECAST_METRIC_NAMES),
+        )
+    ).all()
+    return {
+        str(name).split(".", 1)[1]: float(value)
+        for name, value in rows
     }

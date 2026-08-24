@@ -1409,6 +1409,53 @@ def confidence_dashboard() -> None:
             text=f"{progress.get('progress_pct', 0):.0f}% complete",
         )
 
+    # Forecast test metrics: blended (all test samples) vs real-only (test
+    # samples whose labels were observed at real snapshots, excluding the
+    # interpolated dense-labels source). Dense labels still train the model.
+    forecast_metrics = data.get("forecast_metrics") or {}
+    if forecast_metrics:
+        st.subheader("Forecast Test Metrics")
+        st.caption(
+            "Test-set precision@10 / calibration error — blended (all test "
+            "samples, including interpolated dense labels) vs real-only "
+            "(observed labels only). Dense labels still train the model."
+        )
+        blended_precision = forecast_metrics.get("precision_at_10")
+        blended_cal = forecast_metrics.get("calibration_error")
+        real_precision = forecast_metrics.get("precision_at_10_real")
+        real_cal = forecast_metrics.get("calibration_error_real")
+        real_samples = forecast_metrics.get("real_test_samples")
+        m_cols = st.columns(2)
+        m_cols[0].metric(
+            "Blended precision@10",
+            f"{blended_precision:.3f}" if blended_precision is not None else "—",
+            help="All test samples, including interpolated dense labels.",
+        )
+        m_cols[0].metric(
+            "Blended calibration error",
+            f"{blended_cal:.3f}" if blended_cal is not None else "—",
+        )
+        if real_samples:
+            m_cols[1].metric(
+                "Real-only precision@10",
+                f"{real_precision:.3f}" if real_precision is not None else "—",
+                help=(
+                    "Test samples with observed labels only "
+                    f"({int(real_samples)} samples)."
+                ),
+            )
+            m_cols[1].metric(
+                "Real-only calibration error",
+                f"{real_cal:.3f}" if real_cal is not None else "—",
+            )
+        else:
+            m_cols[1].metric(
+                "Real-only precision@10",
+                "n/a",
+                help="No observed-label test samples in the latest run.",
+            )
+            m_cols[1].metric("Real-only calibration error", "n/a")
+
     st.divider()
 
     # Scoring breakdown

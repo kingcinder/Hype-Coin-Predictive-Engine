@@ -164,7 +164,12 @@ def generate_dense_labels(
             peak_pct = max(future_prices) / entry_price - 1.0
             trough_pct = min(future_prices) / entry_price - 1.0
 
-            # Generate ignition label
+            # Generate ignition label. The source marker ("dense-labels:"
+            # + version) is the training/test-distinction key: the forecast
+            # engine reports blended vs real-only TEST metrics by filtering on
+            # it. Dense labels are linearly interpolated between observed
+            # snapshots but must stay in TRAINING — they are never dropped;
+            # only the real-only test readout excludes them.
             ignition_value = "1" if peak_pct >= ignition_threshold else "0"
             _upsert_label(
                 session,

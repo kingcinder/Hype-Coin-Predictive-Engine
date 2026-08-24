@@ -73,6 +73,13 @@ def _phase_slug(phase_value: float | None) -> str:
     return _PHASE_SLUGS.get(rank, "terminal")
 
 
+def _is_dense_label_source(label_source: str) -> bool:
+    """True when a sample's labels came from ``generate_dense_labels`` —
+    linearly interpolated between observed market snapshots — rather than
+    observed at a real snapshot time."""
+    return label_source.startswith("dense-labels:")
+
+
 def _git_sha() -> str | None:
     try:
         return subprocess.check_output(
@@ -167,6 +174,12 @@ class Sample:
     features: dict[str, float]
     y_ignition: int
     y_collapse: int
+    # Where the labels at this (asset, ts) came from: "forecast:{version}"
+    # (observed at real market snapshot times), "feature-aligned:{version}"
+    # (real prices aligned to feature timestamps), or "dense-labels:{version}"
+    # (linearly interpolated between snapshots). Used to report TEST metrics on
+    # real-only samples; dense labels stay in TRAINING either way.
+    label_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -199,6 +212,9 @@ class ForecastEngine:
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        # Test-set metrics from the most recent _train call (blended + the
+        # real-only readout), surfaced in run()'s response.
+        self._last_metrics: dict[str, float] = {}
 
     def run(self, session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:
         decision_ts = ensure_utc(decision_ts or utc_now())
@@ -262,6 +278,7 @@ class ForecastEngine:
             "samples": len(samples),
             "forecasts": len(predicted),
             "labels": label_counts,
+            "metrics": dict(self._last_metrics),
         }
 
     # ------------------------------------------------------------------ dataset
@@ -269,14 +286,16 @@ class ForecastEngine:
     def _collect_samples(self, session: Session, decision_ts: datetime) -> list[Sample]:
         forward = timedelta(hours=self.settings.forecast_forward_hours)
         targets: dict[tuple[int, datetime], dict[str, int]] = defaultdict(dict)
+        sources: dict[tuple[int, datetime], str] = {}
         for label in session.scalars(
             select(models.Label).where(models.Label.observed_at <= decision_ts)
         ).all():
             if label.label_type not in (LABEL_IGNITION, LABEL_COLLAPSE):
                 continue
-            targets[(label.asset_id, ensure_utc(label.ts))][label.label_type] = (
-                1 if label.label_value == "1" else 0
-            )
+            key = (label.asset_id, ensure_utc(label.ts))
+            targets[key][label.label_type] = 1 if label.label_value == "1" else 0
+            if label.label_source:
+                sources[key] = label.label_source
         samples: list[Sample] = []
         for (asset_id, ts), values in targets.items():
             if ts + forward > decision_ts:
@@ -293,6 +312,7 @@ class ForecastEngine:
                     features=features,
                     y_ignition=values[LABEL_IGNITION],
                     y_collapse=values[LABEL_COLLAPSE],
+                    label_source=sources.get((asset_id, ts), ""),
                 )
             )
         return samples
@@ -354,9 +374,28 @@ class ForecastEngine:
         peak_hazard = self._fit_peak_hazard(session, samples)
         hazards_by_phase = self._fit_phase_hazards(session, samples)
         peak_hazards_by_phase = self._fit_phase_peak_hazards(session, samples)
+        # Real-only readout: the same precision/calibration computed on TEST
+        # samples whose labels were observed at real market snapshots (the
+        # dense-labels source is the interpolated one). Dense labels stay in
+        # TRAINING — this is purely a test-set quality check, so interpolated
+        # samples can't mask whether the model works on observed outcomes.
+        real_idx = [
+            index
+            for index, sample in enumerate(test)
+            if not _is_dense_label_source(sample.label_source)
+        ]
+        real_probs = calibrated_collapse[real_idx]
+        real_labels = test_collapse[real_idx]
         metrics = {
             "precision_at_10": self._precision_at_k(calibrated_collapse, test_collapse, 10),
             "calibration_error": self._calibration_error(calibrated_collapse, test_collapse),
+            "precision_at_10_real": (
+                self._precision_at_k(real_probs, real_labels, 10) if real_idx else 0.0
+            ),
+            "calibration_error_real": (
+                self._calibration_error(real_probs, real_labels) if real_idx else 1.0
+            ),
+            "real_test_samples": float(len(real_idx)),
             "collapse_rate_test": float(test_collapse.mean()) if len(test_collapse) else 0.0,
             "median_lead_time_hours": self._median_lead_time(
                 session, samples=test, probs=calibrated_collapse, labels=test_collapse
@@ -390,6 +429,7 @@ class ForecastEngine:
             "drift": 1.0,
             "severe_drift": 2.0,
         }[drift["status"]]
+        self._last_metrics = dict(metrics)
         self._persist_metrics(session, samples=samples, decision_ts=decision_ts, metrics=metrics)
         return ForecastModel(
             ignition=ignition_model,
