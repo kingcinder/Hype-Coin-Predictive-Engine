@@ -8,6 +8,23 @@
 .\scripts\dev.ps1 smoke
 ```
 
+## Production deployment checks
+
+On Linux, install with `sudo REPO_URL=<git-url> bash deploy/install.sh`.
+Review `/opt/serpent/.env` before restarting the API, worker, and UI. Verify:
+
+```bash
+systemctl is-enabled serpent-api serpent-worker serpent-ui serpent-retention.timer
+systemctl --no-pager status serpent-api serpent-worker serpent-ui serpent-retention.timer
+curl -fsS http://127.0.0.1:8000/health
+journalctl -u serpent-worker --since today --no-pager
+```
+
+Updates use `sudo bash /opt/serpent/deploy/update.sh`; it requires a clean,
+fast-forwardable checkout, applies migrations before restarting services, and
+leaves the database and archive in place. `deploy/uninstall.sh` removes units
+and services but retains data unless `REMOVE_DATA=true` is explicitly set.
+
 ## Docker Checks
 
 ```powershell

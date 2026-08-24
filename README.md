@@ -197,6 +197,41 @@ Register HTTP endpoints to receive real-time alerts:
 | **Feed Health** | RPC pool status and component health |
 | **Backtest & Drift** | Historical backtest results |
 
+## Production installation (systemd/Linux)
+
+The supported production deployment is a dedicated `serpent` system user with a
+Python virtualenv and four systemd units (API, worker, UI, and retention timer).
+Do not run the application as root. On a host with Git and Python 3.12:
+
+```bash
+sudo REPO_URL=https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git \
+  bash deploy/install.sh
+sudoedit /opt/serpent/.env
+sudo systemctl restart serpent-api serpent-worker serpent-ui
+```
+
+For an existing installation, update only by fast-forwarding the canonical
+`main` branch, applying migrations, and restarting services:
+
+```bash
+sudo bash /opt/serpent/deploy/update.sh
+```
+
+To remove services while retaining the database and Parquet lake:
+
+```bash
+sudo bash /opt/serpent/deploy/uninstall.sh
+```
+
+To remove application data too, explicitly opt in:
+
+```bash
+sudo REMOVE_DATA=true bash /opt/serpent/deploy/uninstall.sh
+```
+
+Check deployment health with `systemctl status serpent-api serpent-worker
+serpent-ui serpent-retention.timer` and `journalctl -u serpent-worker -f`.
+
 ## Development
 
 ```bash
