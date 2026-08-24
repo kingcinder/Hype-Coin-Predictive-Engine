@@ -1,0 +1,21 @@
+# Serpent Circle — retention autopilot timer.
+#
+# Fires serpent-retention.service daily (matching RETENTION_CADENCE_HOURS=24).
+# If you change RETENTION_CADENCE_HOURS in .env, adjust OnCalendar here to
+# match. Persistent=true catches up after the machine was off.
+#
+# Other cadences:
+#   every 6 hours:  OnCalendar=*-*-* 00/6:00:00
+#   weekly:         OnCalendar=weekly
+
+[Unit]
+Description=Daily Serpent Circle retention autopilot pass
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+Unit=serpent-retention.service
+
+[Install]
+WantedBy=timers.target

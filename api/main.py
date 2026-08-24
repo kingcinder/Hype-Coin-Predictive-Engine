@@ -1,0 +1,1095 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import Annotated
+
+import asyncio
+import json
+import time
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy import desc, func, select, text
+from sqlalchemy.orm import Session
+
+from api.analytics import similar_setups
+from api.schemas import (
+    AlertRow,
+    ArchiveManifestRow,
+    BacktestResultRow,
+    CatalystRow,
+    EngineScanProgressRow,
+    EngineStatusResponse,
+    FeatureRow,
+    FingerprintRow,
+    ForecastRow,
+    HealthComponent,
+    HealthResponse,
+    IgnitionEventRow,
+    LifecycleEventRow,
+    LifecycleTransitionAlertRow,
+    NarrativeClusterRow,
+    NotifierHealthRow,
+    OpsConsoleResponse,
+    PrelaunchRow,
+    RetentionRunRow,
+    RiskResponse,
+    RpcPoolChainRow,
+    RpcPoolEndpointRow,
+    RpcPoolProbeRow,
+    ScanResultRow,
+    SeedResponse,
+    SimilarSetupRow,
+    TokenDetail,
+    TokenScoreRow,
+    TriggerResponse,
+    VelocityFeatureRow,
+)
+from common.logging import get_logger
+from engine.state import engine_state, sse_broker
+from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
+from risk_engine.rules import assess_risk
+from storage import models
+from storage.database import get_session
+from storage.repository import latest_health, latest_scan_result, latest_scores
+
+log = get_logger(__name__)
+
+app = FastAPI(
+    title="Serpent Circle Hype-Coin Predictive Engine",
+    version="0.1.0",
+    description="Research-only crypto intelligence API with separated hype and risk scores.",
+)
+
+DbSession = Annotated[Session, Depends(get_session)]
+
+
+def _score_row(session: Session, score: models.Score) -> TokenScoreRow:
+    asset = session.get(models.Asset, score.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return TokenScoreRow(
+        asset_id=score.asset_id,
+        chain=chain.slug if chain else "unknown",
+        address=asset.address if asset else "",
+        symbol=asset.symbol if asset else "UNKNOWN",
+        name=asset.name if asset else None,
+        decision_ts=score.decision_ts,
+        hype=score.hype,
+        ethos=score.ethos,
+        risk=score.risk,
+        liquidity_access=score.liquidity_access,
+        manipulation=score.manipulation,
+        confidence=score.confidence,
+        uncertainty=score.uncertainty,
+        catalyst=score.catalyst,
+        exit_risk=score.exit_risk,
+        research_priority=score.research_priority,
+        risk_band=score.risk_band,
+    )
+
+
+@app.get("/health", response_model=HealthResponse)
+def health(session: DbSession) -> HealthResponse:
+    database = "ok"
+    try:
+        session.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("health_database_failed", error=str(exc))
+        database = f"error: {exc}"
+    components = [
+        HealthComponent(
+            component=row.component,
+            state=row.state,
+            ts=row.ts,
+            message=row.message,
+            freshness_sec=row.freshness_sec,
+            lag_sec=row.lag_sec,
+            error_count=row.error_count,
+        )
+        for row in latest_health(session)
+    ]
+    status = (
+        "ok"
+        if database == "ok" and all(c.state in {"ok", "yellow"} for c in components)
+        else "degraded"
+    )
+    return HealthResponse(status=status, database=database, components=components)
+
+
+@app.get("/tokens/hot", response_model=list[TokenScoreRow])
+def tokens_hot(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    include_black: bool = False,
+) -> list[TokenScoreRow]:
+    rows = latest_scores(session, limit=limit, include_black=include_black, order_by="hype")
+    return [_score_row(session, row) for row in rows]
+
+
+@app.get("/scores/top", response_model=list[TokenScoreRow])
+def scores_top(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 25,
+    include_black: bool = False,
+) -> list[TokenScoreRow]:
+    rows = latest_scores(
+        session, limit=limit, include_black=include_black, order_by="research_priority"
+    )
+    return [_score_row(session, row) for row in rows]
+
+
+@app.get("/tokens/{asset_id}", response_model=TokenDetail)
+def token_detail(asset_id: int, session: DbSession) -> TokenDetail:
+    asset = session.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {asset_id}")
+    chain = session.get(models.Chain, asset.chain_id)
+    score = session.scalar(
+        select(models.Score)
+        .where(models.Score.asset_id == asset_id)
+        .order_by(desc(models.Score.decision_ts))
+        .limit(1)
+    )
+    features: list[FeatureRow] = []
+    explanation = None
+    if score:
+        features = [
+            FeatureRow(
+                name=row.feature_name,
+                value=row.feature_value,
+                missing=row.missing_flag,
+                freshness_score=row.freshness_score,
+                source_count=row.source_count,
+            )
+            for row in session.scalars(
+                select(models.Feature)
+                .where(
+                    models.Feature.asset_id == asset_id,
+                    models.Feature.decision_ts == score.decision_ts,
+                )
+                .order_by(models.Feature.feature_name)
+            )
+        ]
+        exp = session.scalar(
+            select(models.ScoreExplanation).where(models.ScoreExplanation.score_id == score.id)
+        )
+        if exp:
+            explanation = {
+                "drivers": exp.drivers,
+                "risk_reasons": exp.risk_reasons,
+                "missing_features": exp.missing_features,
+                "changed_features": exp.changed_features,
+            }
+    return TokenDetail(
+        asset_id=asset.id,
+        chain=chain.slug if chain else "unknown",
+        address=asset.address,
+        symbol=asset.symbol,
+        name=asset.name,
+        status=asset.status,
+        website_url=asset.website_url,
+        github_url=asset.github_url,
+        latest_score=_score_row(session, score) if score else None,
+        features=features,
+        explanation=explanation,
+    )
+
+
+@app.get("/alerts", response_model=list[AlertRow])
+def alerts(session: DbSession, limit: Annotated[int, Query(ge=1, le=200)] = 50) -> list[AlertRow]:
+    rows = session.scalars(
+        select(models.Alert).order_by(desc(models.Alert.created_at)).limit(limit)
+    ).all()
+    out: list[AlertRow] = []
+    for row in rows:
+        asset = session.get(models.Asset, row.asset_id)
+        out.append(
+            AlertRow(
+                id=row.id,
+                asset_id=row.asset_id,
+                symbol=asset.symbol if asset else None,
+                created_at=row.created_at,
+                alert_type=row.alert_type,
+                state=row.state,
+                message=row.message,
+            )
+        )
+    return out
+
+
+@app.get("/risk/{asset_id}", response_model=RiskResponse)
+def risk(asset_id: int, session: DbSession) -> RiskResponse:
+    asset = session.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {asset_id}")
+    latest_ts = session.scalar(
+        select(func.max(models.Feature.decision_ts)).where(models.Feature.asset_id == asset_id)
+    )
+    if not latest_ts:
+        return RiskResponse(
+            asset_id=asset_id,
+            risk_band="YELLOW",
+            risk_score=25,
+            reasons=["No feature snapshot exists yet; risk is unknown, not safe."],
+            hard_reject=False,
+        )
+    features = {
+        row.feature_name: row.feature_value
+        for row in session.scalars(
+            select(models.Feature).where(
+                models.Feature.asset_id == asset_id,
+                models.Feature.decision_ts == latest_ts,
+            )
+        )
+    }
+    assessment = assess_risk(features)
+    return RiskResponse(
+        asset_id=asset_id,
+        risk_band=assessment.band.value,
+        risk_score=assessment.score,
+        reasons=assessment.reasons,
+        hard_reject=assessment.hard_reject,
+    )
+
+
+@app.get("/tokens/{asset_id}/similar", response_model=list[SimilarSetupRow])
+def token_similar_setups(
+    asset_id: int,
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+    min_features: Annotated[int, Query(ge=1, le=20)] = 6,
+) -> list[SimilarSetupRow]:
+    asset = session.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {asset_id}")
+    latest_ts = session.scalar(
+        select(func.max(models.Feature.decision_ts)).where(models.Feature.asset_id == asset_id)
+    )
+    if latest_ts is None:
+        return []
+    rows = similar_setups(
+        session,
+        asset_id=asset_id,
+        decision_ts=latest_ts,
+        limit=limit,
+        min_features=min_features,
+    )
+    out: list[SimilarSetupRow] = []
+    for row in rows:
+        candidate = session.get(models.Asset, row.asset_id)
+        chain = session.get(models.Chain, candidate.chain_id) if candidate else None
+        out.append(
+            SimilarSetupRow(
+                asset_id=row.asset_id,
+                chain=chain.slug if chain else "unknown",
+                address=candidate.address if candidate else "",
+                symbol=candidate.symbol if candidate else "UNKNOWN",
+                name=candidate.name if candidate else None,
+                decision_ts=row.decision_ts,
+                similarity_score=row.similarity_score,
+                distance=row.distance,
+                features_compared=row.features_compared,
+                hype=row.score.hype if row.score else None,
+                risk_band=row.score.risk_band if row.score else None,
+                research_priority=row.score.research_priority if row.score else None,
+            )
+        )
+    return out
+
+
+def _ignition_event_row(session: Session, row: models.IgnitionEvent) -> IgnitionEventRow:
+    asset = session.get(models.Asset, row.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return IgnitionEventRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        chain=chain.slug if chain else "unknown",
+        event_type=row.event_type,
+        ts=row.ts,
+        observed_at=row.observed_at,
+        confidence=row.confidence,
+        details=row.details,
+    )
+
+
+def _fingerprint_row(session: Session, row: models.FingerprintAssessment) -> FingerprintRow:
+    asset = session.get(models.Asset, row.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return FingerprintRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        chain=chain.slug if chain else "unknown",
+        decision_ts=row.decision_ts,
+        recidivism_score=row.recidivism_score,
+        matched_cluster_count=row.matched_cluster_count,
+        matched_wallet_count=row.matched_wallet_count,
+        matched_roles=row.matched_roles,
+        matched_clusters=row.matched_clusters,
+    )
+
+
+@app.get("/radar/ignitions", response_model=list[IgnitionEventRow])
+def radar_ignitions(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    event_type: str | None = None,
+) -> list[IgnitionEventRow]:
+    stmt = select(models.IgnitionEvent).order_by(desc(models.IgnitionEvent.ts)).limit(limit)
+    if event_type:
+        stmt = stmt.where(models.IgnitionEvent.event_type == event_type)
+    rows = session.scalars(stmt).all()
+    return [_ignition_event_row(session, row) for row in rows]
+
+
+@app.get("/fingerprint/top", response_model=list[FingerprintRow])
+def fingerprint_top(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[FingerprintRow]:
+    latest_ts = session.scalar(select(func.max(models.FingerprintAssessment.decision_ts)))
+    if latest_ts is None:
+        return []
+    rows = session.scalars(
+        select(models.FingerprintAssessment)
+        .where(models.FingerprintAssessment.decision_ts == latest_ts)
+        .order_by(desc(models.FingerprintAssessment.recidivism_score))
+        .limit(limit)
+    ).all()
+    return [_fingerprint_row(session, row) for row in rows]
+
+
+@app.get("/fingerprint/{asset_id}", response_model=FingerprintRow)
+def fingerprint_detail(asset_id: int, session: DbSession) -> FingerprintRow:
+    row = session.scalar(
+        select(models.FingerprintAssessment)
+        .where(models.FingerprintAssessment.asset_id == asset_id)
+        .order_by(desc(models.FingerprintAssessment.decision_ts))
+        .limit(1)
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"no fingerprint for asset {asset_id}")
+    return _fingerprint_row(session, row)
+
+
+def _prelaunch_row(session: Session, row: models.PrelaunchCandidate) -> PrelaunchRow:
+    asset = session.get(models.Asset, row.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return PrelaunchRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        chain=chain.slug if chain else "unknown",
+        decision_ts=row.decision_ts,
+        priority_score=row.priority_score,
+        drivers=row.drivers,
+    )
+
+
+def _forecast_row(session: Session, row: models.Forecast) -> ForecastRow:
+    asset = session.get(models.Asset, row.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return ForecastRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        chain=chain.slug if chain else "unknown",
+        decision_ts=row.decision_ts,
+        p_ignition_24h=row.p_ignition_24h,
+        p_collapse_24h=row.p_collapse_24h,
+        expected_hours_to_peak=row.expected_hours_to_peak,
+        expected_hours_to_collapse=row.expected_hours_to_collapse,
+        calibration_bucket=row.calibration_bucket,
+        calibrated=row.calibrated,
+        model_version=row.model_version,
+        details=row.details,
+    )
+
+
+@app.get("/radar/prelaunch", response_model=list[PrelaunchRow])
+def radar_prelaunch(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[PrelaunchRow]:
+    latest_ts = session.scalar(select(func.max(models.PrelaunchCandidate.decision_ts)))
+    if latest_ts is None:
+        return []
+    rows = session.scalars(
+        select(models.PrelaunchCandidate)
+        .where(models.PrelaunchCandidate.decision_ts == latest_ts)
+        .order_by(desc(models.PrelaunchCandidate.priority_score))
+        .limit(limit)
+    ).all()
+    return [_prelaunch_row(session, row) for row in rows]
+
+
+@app.get("/forecasts", response_model=list[ForecastRow])
+def forecasts(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ForecastRow]:
+    latest_ts = session.scalar(select(func.max(models.Forecast.decision_ts)))
+    if latest_ts is None:
+        return []
+    rows = session.scalars(
+        select(models.Forecast)
+        .where(models.Forecast.decision_ts == latest_ts)
+        .order_by(desc(models.Forecast.p_collapse_24h))
+        .limit(limit)
+    ).all()
+    return [_forecast_row(session, row) for row in rows]
+
+
+@app.get("/narrative/clusters", response_model=list[NarrativeClusterRow])
+def narrative_clusters(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[NarrativeClusterRow]:
+    rows = session.scalars(
+        select(models.NarrativeCluster)
+        .order_by(desc(models.NarrativeCluster.last_seen_at))
+        .limit(limit)
+    ).all()
+    return [
+        NarrativeClusterRow(
+            id=row.id,
+            cluster_key=row.cluster_key,
+            seed_topic=row.seed_topic,
+            mention_count=row.mention_count,
+            first_seen_at=row.first_seen_at,
+            last_seen_at=row.last_seen_at,
+        )
+        for row in rows
+    ]
+
+
+@app.get("/catalysts", response_model=list[CatalystRow])
+def catalysts(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[CatalystRow]:
+    rows = session.scalars(
+        select(models.Catalyst)
+        .order_by(desc(models.Catalyst.scheduled_at))
+        .limit(limit)
+    ).all()
+    output: list[CatalystRow] = []
+    for row in rows:
+        asset = session.get(models.Asset, row.asset_id)
+        output.append(
+            CatalystRow(
+                id=row.id,
+                asset_id=row.asset_id,
+                symbol=asset.symbol if asset else None,
+                catalyst_type=row.catalyst_type,
+                scheduled_at=row.scheduled_at,
+                published_at=row.published_at,
+                confidence=row.confidence,
+            )
+        )
+    return output
+
+
+def _lifecycle_event_row(
+    session: Session, row: models.LifecycleEvent
+) -> LifecycleEventRow:
+    asset = session.get(models.Asset, row.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return LifecycleEventRow(
+        id=row.id,
+        asset_id=row.asset_id,
+        symbol=asset.symbol if asset else None,
+        chain=chain.slug if chain else "unknown",
+        phase=row.phase,
+        event_type=row.event_type,
+        ts=row.ts,
+        observed_at=row.observed_at,
+        confidence=row.confidence,
+        details=row.details,
+    )
+
+
+@app.get("/lifecycle/events", response_model=list[LifecycleEventRow])
+def lifecycle_events(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    phase: str | None = None,
+) -> list[LifecycleEventRow]:
+    stmt = select(models.LifecycleEvent).order_by(desc(models.LifecycleEvent.ts)).limit(limit)
+    if phase:
+        stmt = stmt.where(models.LifecycleEvent.phase == phase)
+    rows = session.scalars(stmt).all()
+    return [_lifecycle_event_row(session, row) for row in rows]
+
+
+@app.get("/lifecycle/current", response_model=list[LifecycleEventRow])
+def lifecycle_current(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[LifecycleEventRow]:
+    sub = (
+        select(
+            models.LifecycleEvent.asset_id,
+            func.max(models.LifecycleEvent.ts).label("max_ts"),
+        )
+        .group_by(models.LifecycleEvent.asset_id)
+        .subquery()
+    )
+    rows = session.scalars(
+        select(models.LifecycleEvent)
+        .join(
+            sub,
+            (models.LifecycleEvent.asset_id == sub.c.asset_id)
+            & (models.LifecycleEvent.ts == sub.c.max_ts),
+        )
+        .order_by(desc(models.LifecycleEvent.ts))
+        .limit(limit)
+    ).all()
+    return [_lifecycle_event_row(session, row) for row in rows]
+
+
+@app.get("/lifecycle/alerts", response_model=list[LifecycleTransitionAlertRow])
+def lifecycle_transition_alerts(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[LifecycleTransitionAlertRow]:
+    """Terminal lifecycle alerts with the transition evidence inline."""
+    alerts = session.scalars(
+        select(models.Alert)
+        .where(models.Alert.alert_type == "lifecycle_transition")
+        .order_by(desc(models.Alert.created_at))
+        .limit(limit)
+    ).all()
+    output: list[LifecycleTransitionAlertRow] = []
+    terminal_phases = {"collapse", "rugged", "dead"}
+    for alert in alerts:
+        ref = alert.score_snapshot_ref or ""
+        prefix = "lifecycle:"
+        if not ref.startswith(prefix):
+            continue
+        try:
+            event_id = int(ref.removeprefix(prefix))
+        except ValueError:
+            continue
+        event = session.get(models.LifecycleEvent, event_id)
+        if event is None or event.phase not in terminal_phases:
+            continue
+        asset = session.get(models.Asset, alert.asset_id)
+        chain = session.get(models.Chain, asset.chain_id) if asset else None
+        output.append(
+            LifecycleTransitionAlertRow(
+                id=alert.id,
+                asset_id=alert.asset_id,
+                symbol=asset.symbol if asset else None,
+                chain=chain.slug if chain else "unknown",
+                phase=event.phase,
+                event_id=event.id,
+                event_ts=event.ts,
+                confidence=event.confidence,
+                created_at=alert.created_at,
+                state=alert.state,
+                message=alert.message,
+                evidence=event.details or {},
+            )
+        )
+    return output
+
+
+@app.get("/archive/manifests", response_model=list[ArchiveManifestRow])
+def archive_manifests(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ArchiveManifestRow]:
+    rows = session.scalars(
+        select(models.ArchiveManifest)
+        .order_by(desc(models.ArchiveManifest.created_at))
+        .limit(limit)
+    ).all()
+    sources = {
+        source.id: source.name
+        for source in session.scalars(
+            select(models.Source).where(
+                models.Source.id.in_({row.source_id for row in rows})
+            )
+        )
+    }
+    return [
+        ArchiveManifestRow(
+            id=row.id,
+            object_key=row.object_key,
+            source_name=sources.get(row.source_id, "unknown"),
+            partition_year=row.partition_year,
+            partition_month=row.partition_month,
+            row_count=row.row_count,
+            byte_size=row.byte_size,
+            first_observed_at=row.first_observed_at,
+            last_observed_at=row.last_observed_at,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@app.get("/retention/runs", response_model=list[RetentionRunRow])
+def retention_runs(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 30,
+) -> list[RetentionRunRow]:
+    """Retention-autopilot history: lake totals + growth per pass. The latest
+    pass's growth is also visible in Feed Health as the ``lake`` component."""
+    rows = session.scalars(
+        select(models.RetentionRun).order_by(desc(models.RetentionRun.ts)).limit(limit)
+    ).all()
+    return [
+        RetentionRunRow(
+            id=row.id,
+            ts=row.ts,
+            partitions=row.partitions,
+            archived_rows=row.archived_rows,
+            byte_size=row.byte_size,
+            compacted=row.compacted,
+            pruned=row.pruned,
+            growth_bytes=row.growth_bytes,
+            growth_pct=row.growth_pct,
+            duration_sec=row.duration_sec,
+        )
+        for row in rows
+    ]
+
+
+@app.get("/rpc/pool", response_model=list[RpcPoolChainRow])
+def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
+    """Per-chain RPC pool state, preferring the worker's persisted snapshots.
+
+    The worker and API commonly run in separate processes. The API therefore
+    reads the latest endpoint snapshot from the database and only falls back to
+    its local in-memory pool before the first worker scan.
+    """
+    latest = (
+        select(
+            models.RpcPoolSnapshot.chain_slug,
+            models.RpcPoolSnapshot.url,
+            func.max(models.RpcPoolSnapshot.ts).label("max_ts"),
+        )
+        .group_by(models.RpcPoolSnapshot.chain_slug, models.RpcPoolSnapshot.url)
+        .subquery()
+    )
+    persisted = session.scalars(
+        select(models.RpcPoolSnapshot).join(
+            latest,
+            (models.RpcPoolSnapshot.chain_slug == latest.c.chain_slug)
+            & (models.RpcPoolSnapshot.url == latest.c.url)
+            & (models.RpcPoolSnapshot.ts == latest.c.max_ts),
+        )
+    ).all()
+    persisted_by_chain: dict[str, list[models.RpcPoolSnapshot]] = defaultdict(list)
+    for row in persisted:
+        persisted_by_chain[row.chain_slug].append(row)
+
+    output: list[RpcPoolChainRow] = []
+    for chain_slug in POOL_CHAINS:
+        rows = persisted_by_chain.get(chain_slug)
+        if rows:
+            down_count = sum(row.down for row in rows)
+            degraded_count = sum(not row.down and row.health < HEALTH_START for row in rows)
+            endpoints = [
+                RpcPoolEndpointRow(
+                    url=row.url,
+                    health=row.health,
+                    consecutive_failures=row.consecutive_failures,
+                    down=row.down,
+                    last_probe_at=row.last_probe_at,
+                    last_probe_ok=row.last_probe_ok,
+                    probe_count=row.probe_count,
+                    probe_successes=row.probe_successes,
+                    probe_failures=row.probe_failures,
+                    probe_history=[
+                        RpcPoolProbeRow(ts=probe["ts"], ok=bool(probe["ok"]))
+                        for probe in (row.probe_history or [])
+                        if isinstance(probe, dict) and probe.get("ts") is not None
+                    ],
+                )
+                for row in rows
+            ]
+        else:
+            states = get_rpc_pool(chain_slug).snapshot()
+            down_count = sum(state.down for state in states)
+            degraded_count = sum(
+                not state.down and state.health < HEALTH_START for state in states
+            )
+            endpoints = [
+                RpcPoolEndpointRow(
+                    url=state.url,
+                    health=state.health,
+                    consecutive_failures=state.consecutive_failures,
+                    down=state.down,
+                    last_probe_at=state.last_probe_at,
+                    last_probe_ok=state.last_probe_ok,
+                    probe_count=state.probe_count,
+                    probe_successes=state.probe_successes,
+                    probe_failures=state.probe_failures,
+                    probe_history=[
+                        RpcPoolProbeRow(ts=probe.ts, ok=probe.ok)
+                        for probe in state.probe_history
+                    ],
+                )
+                for state in states
+            ]
+        state = "red" if down_count else ("yellow" if degraded_count else "ok")
+        output.append(
+            RpcPoolChainRow(
+                chain=chain_slug,
+                state=state,
+                down_count=down_count,
+                degraded_count=degraded_count,
+                endpoints=endpoints,
+            )
+        )
+    return output
+
+
+VELOCITY_FEATURE_NAMES = ("kol_velocity", "github_star_velocity", "hf_download_velocity")
+
+
+@app.get("/features/velocity", response_model=list[VelocityFeatureRow])
+def features_velocity(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[VelocityFeatureRow]:
+    """Latest narrative dev-activity velocity features per asset."""
+    latest_ts = session.scalar(select(func.max(models.Feature.decision_ts)))
+    if latest_ts is None:
+        return []
+    rows = session.scalars(
+        select(models.Feature).where(
+            models.Feature.decision_ts == latest_ts,
+            models.Feature.feature_name.in_(VELOCITY_FEATURE_NAMES),
+        )
+    ).all()
+    by_asset: dict[int, dict[str, models.Feature]] = defaultdict(dict)
+    for row in rows:
+        by_asset[row.asset_id][row.feature_name] = row
+
+    def _value(features: dict[str, models.Feature], name: str) -> tuple[float | None, bool]:
+        row = features.get(name)
+        if row is None:
+            return None, True
+        return (None, True) if row.missing_flag else (row.feature_value, False)
+
+    output: list[VelocityFeatureRow] = []
+    for asset_id, features in by_asset.items():
+        asset = session.get(models.Asset, asset_id)
+        chain = session.get(models.Chain, asset.chain_id) if asset else None
+        kol, kol_missing = _value(features, "kol_velocity")
+        stars, stars_missing = _value(features, "github_star_velocity")
+        downloads, downloads_missing = _value(features, "hf_download_velocity")
+        output.append(
+            VelocityFeatureRow(
+                asset_id=asset_id,
+                symbol=asset.symbol if asset else "UNKNOWN",
+                chain=chain.slug if chain else "unknown",
+                decision_ts=latest_ts,
+                kol_velocity=kol,
+                kol_velocity_missing=kol_missing,
+                github_star_velocity=stars,
+                github_star_velocity_missing=stars_missing,
+                hf_download_velocity=downloads,
+                hf_download_velocity_missing=downloads_missing,
+            )
+        )
+    output.sort(
+        key=lambda row: (
+            row.github_star_velocity or 0.0,
+            row.hf_download_velocity or 0.0,
+            row.kol_velocity or 0.0,
+        ),
+        reverse=True,
+    )
+    return output[:limit]
+
+
+@app.get("/backtest/results", response_model=list[BacktestResultRow])
+def backtest_results(
+    session: DbSession, limit: Annotated[int, Query(ge=1, le=100)] = 20
+) -> list[BacktestResultRow]:
+    runs = session.scalars(
+        select(models.BacktestRun).order_by(desc(models.BacktestRun.started_at)).limit(limit)
+    ).all()
+    out: list[BacktestResultRow] = []
+    for run in runs:
+        metrics: dict[str, float] = defaultdict(float)
+        for result in session.scalars(
+            select(models.BacktestResult).where(models.BacktestResult.run_id == run.id)
+        ):
+            key = (
+                result.metric_name
+                if not result.chain_slug
+                else f"{result.chain_slug}.{result.metric_name}"
+            )
+            metrics[key] = result.metric_value
+        out.append(
+            BacktestResultRow(
+                run_id=run.id,
+                status=run.status,
+                started_at=run.started_at,
+                cutoff_start=run.cutoff_start,
+                cutoff_end=run.cutoff_end,
+                model_version=run.model_version,
+                metrics=dict(metrics),
+            )
+        )
+    return out
+
+
+@app.get("/ops/console", response_model=OpsConsoleResponse)
+def ops_console(session: DbSession) -> OpsConsoleResponse:
+    """Live ops console: last scan pipeline stage counts, notifier health, and recent alerts."""
+    scan = latest_scan_result(session)
+    scan_row = None
+    if scan:
+        scan_row = ScanResultRow(
+            id=scan.id,
+            ts=scan.ts,
+            duration_sec=scan.duration_sec,
+            pairs=scan.pairs,
+            profiles=scan.profiles,
+            scores=scan.scores,
+            ignition_events=scan.ignition_events,
+            fingerprints=scan.fingerprints,
+            forecasts=scan.forecasts,
+            lifecycle=scan.lifecycle,
+            narrative=scan.narrative,
+            mempool=scan.mempool,
+            lp_removals=scan.lp_removals,
+            prelaunch=scan.prelaunch,
+            catalysts=scan.catalysts,
+            archive=scan.archive,
+            ntfy_sent=scan.ntfy_sent,
+            rpc_pool_notifications=scan.rpc_pool_notifications,
+            rpc_pool_snapshots=scan.rpc_pool_snapshots,
+            state=scan.state,
+            error_message=scan.error_message,
+            details=scan.details,
+        )
+    notifier_health_row = None
+    notifier_components = latest_health(session, limit=50)
+    for component in notifier_components:
+        if component.component == "notifier":
+            notifier_health_row = NotifierHealthRow(
+                component=component.component,
+                state=component.state,
+                ts=component.ts,
+                message=component.message,
+                error_count=component.error_count,
+            )
+            break
+    alert_rows = session.scalars(
+        select(models.Alert)
+        .where(models.Alert.notified_at.isnot(None))
+        .order_by(desc(models.Alert.notified_at))
+        .limit(20)
+    ).all()
+    recent_alerts: list[AlertRow] = []
+    for row in alert_rows:
+        asset = session.get(models.Asset, row.asset_id)
+        recent_alerts.append(
+            AlertRow(
+                id=row.id,
+                asset_id=row.asset_id,
+                symbol=asset.symbol if asset else None,
+                created_at=row.created_at,
+                alert_type=row.alert_type,
+                state=row.state,
+                message=row.message,
+            )
+        )
+    return OpsConsoleResponse(
+        last_scan=scan_row,
+        notifier_health=notifier_health_row,
+        recent_alerts=recent_alerts,
+    )
+
+
+# ── Engine Control Endpoints ────────────────────────────────────────────────
+
+
+@app.get("/engine/status", response_model=EngineStatusResponse)
+def engine_status() -> EngineStatusResponse:
+    """Live engine runtime status: uptime, scan phase, progress counters."""
+    snap = engine_state.snapshot()
+    scan_snap = snap["scan"]
+    return EngineStatusResponse(
+        status=snap["status"],
+        uptime_sec=snap["uptime_sec"],
+        total_iterations=snap["total_iterations"],
+        scan_interval_seconds=snap["scan_interval_seconds"],
+        scan=EngineScanProgressRow(
+            phase=scan_snap["phase"],
+            phase_message=scan_snap["phase_message"],
+            duration_sec=scan_snap["duration_sec"],
+            iteration=scan_snap["iteration"],
+            pairs=scan_snap["pairs"],
+            scores=scan_snap["scores"],
+            forecasts=scan_snap["forecasts"],
+            lifecycle=scan_snap["lifecycle"],
+            narrative=scan_snap["narrative"],
+            catalysts=scan_snap["catalysts"],
+            ignition_events=scan_snap["ignition_events"],
+            fingerprints=scan_snap["fingerprints"],
+            archive=scan_snap["archive"],
+            ntfy_sent=scan_snap["ntfy_sent"],
+            rpc_pool_snapshots=scan_snap["rpc_pool_snapshots"],
+            error_message=scan_snap["error_message"],
+        ),
+    )
+
+
+@app.post("/engine/seed", response_model=SeedResponse)
+def engine_seed() -> SeedResponse:
+    """Seed fixture data into the database for first-run experience."""
+    from storage.seed import seed_reference_data
+    seed_reference_data()
+    return SeedResponse(
+        status="ok",
+        message="Seeded reference data (chains, sources, venues)",
+    )
+
+
+@app.post("/engine/scan", response_model=TriggerResponse)
+def engine_trigger_scan() -> TriggerResponse:
+    """Trigger a manual ingestion scan. Runs in a background thread."""
+    import threading
+    from engine.state import ScanPhase
+
+    current = engine_state.scan.phase
+    if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
+        return TriggerResponse(
+            status="rejected",
+            message=f"Scan already in progress (phase={current.value})",
+        )
+
+    def _run() -> None:
+        try:
+            engine_state.mark_scanning(iteration=None, message="Manual scan triggered from API")
+            from ingestion.worker import run_once
+            result = run_once()
+            engine_state.mark_scan_result(result)
+            engine_state.mark_completed()
+            log.info("api_manual_scan_complete", result=result)
+        except Exception as exc:  # noqa: BLE001
+            engine_state.mark_error(str(exc))
+            log.exception("api_manual_scan_failed", error=str(exc))
+
+    threading.Thread(target=_run, name="api-manual-scan", daemon=True).start()
+    return TriggerResponse(
+        status="accepted",
+        message="Manual scan started",
+    )
+
+
+@app.post("/engine/forecast", response_model=TriggerResponse)
+def engine_trigger_forecast() -> TriggerResponse:
+    """Trigger forecast model training."""
+    import threading
+
+    from engine.state import ScanPhase
+    current = engine_state.scan.phase
+    if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
+        return TriggerResponse(
+            status="rejected",
+            message=f"Engine busy (phase={current.value})",
+        )
+
+    def _run() -> None:
+        try:
+            engine_state.mark_forecasting()
+            from forecast.engine import maybe_run_forecast
+            result = maybe_run_forecast()
+            engine_state.mark_completed()
+            log.info("api_manual_forecast_complete", result=result)
+        except Exception as exc:  # noqa: BLE001
+            engine_state.mark_error(str(exc))
+            log.exception("api_manual_forecast_failed", error=str(exc))
+
+    threading.Thread(target=_run, name="api-manual-forecast", daemon=True).start()
+    return TriggerResponse(status="accepted", message="Forecast training started")
+
+
+@app.post("/engine/retention", response_model=TriggerResponse)
+def engine_trigger_retention() -> TriggerResponse:
+    """Trigger retention autopilot pass."""
+    import threading
+
+    from engine.state import ScanPhase
+    current = engine_state.scan.phase
+    if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
+        return TriggerResponse(
+            status="rejected",
+            message=f"Engine busy (phase={current.value})",
+        )
+
+    def _run() -> None:
+        try:
+            engine_state.mark_retention()
+            from ops.retention import maybe_run_retention
+            result = maybe_run_retention()
+            engine_state.mark_completed()
+            log.info("api_manual_retention_complete", result=result)
+        except Exception as exc:  # noqa: BLE001
+            engine_state.mark_error(str(exc))
+            log.exception("api_manual_retention_failed", error=str(exc))
+
+    threading.Thread(target=_run, name="api-manual-retention", daemon=True).start()
+    return TriggerResponse(status="accepted", message="Retention pass started")
+
+
+# ── SSE Stream ──────────────────────────────────────────────────────────────
+
+
+@app.get("/engine/stream")
+def engine_sse_stream():
+    """Server-Sent Events stream for real-time engine phase updates.
+
+    Clients receive a full state snapshot on connect, then incremental
+    ``event: <phase>`` messages whenever the engine transitions.
+    
+    Event format::
+
+        event: scanning
+        data: {"type":"scanning","status":"running",...}
+
+        event: completed
+        data: {"type":"completed","status":"running",...}
+    """
+    async def event_generator():
+        # Send initial state snapshot immediately
+        initial = engine_state.snapshot()
+        yield f"event: init\ndata: {json.dumps(initial)}\n\n"
+
+        # Subscribe to future updates
+        queue = sse_broker.connect()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    event_type = event.get("type", "update")
+                    event_data = {k: v for k, v in event.items() if k != "type"}
+                    yield f"event: {event_type}\ndata: {json.dumps(event_data)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send a keepalive comment every 30s to prevent proxy timeouts
+                    yield f": keepalive {time.time():.0f}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            sse_broker.disconnect(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

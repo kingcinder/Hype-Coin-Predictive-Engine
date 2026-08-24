@@ -1,0 +1,34 @@
+# Serpent Circle — retention autopilot service unit.
+#
+# Runs one retention pass (Parquet compaction + pruning + lake-growth report
+# into Feed Health). The timer (serpent-retention.timer) fires it on the
+# configured cadence; this unit never runs on its own.
+#
+# Adjust the paths to your checkout and venv:
+#   WorkingDirectory=/opt/serpent
+#   ExecStart=/opt/serpent/.venv/bin/python -m ops.retention --once
+#
+# Install:
+#   sudo cp deploy/systemd/serpent-retention.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now serpent-retention.timer
+
+[Unit]
+Description=Serpent Circle retention autopilot (compaction + pruning + lake growth)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/serpent
+ExecStart=/opt/serpent/.venv/bin/python -m ops.retention --once
+# Read the project .env the same way the worker does.
+EnvironmentFile=-/opt/serpent/.env
+User=serpent
+Group=serpent
+# Failure exits nonzero so systemd can alert, but the module records
+# component:lake health as red regardless.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

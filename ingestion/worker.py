@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import argparse
+import time
+
+from common.config import get_settings
+from common.logging import get_logger
+from forecast.engine import maybe_run_forecast
+from ingestion.service import IngestionService, backoff_sleep_seconds
+from ingestion.source_clients import ensure_background_probe
+from ops.retention import maybe_run_retention
+from storage.database import SessionLocal
+
+log = get_logger(__name__)
+
+
+def run_once() -> dict[str, object]:
+    service = IngestionService()
+    with SessionLocal() as session:
+        return service.run_once(session)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Serpent Circle ingestion worker")
+    parser.add_argument("--once", action="store_true", help="run one scan and exit")
+    parser.add_argument("--loop", action="store_true", help="run forever")
+    args = parser.parse_args()
+    settings = get_settings()
+
+    if args.once or not args.loop:
+        result = run_once()
+        log.info("worker_once_complete", result=result)
+        return
+
+    ensure_background_probe()
+    iteration = 0
+    while True:
+        iteration += 1
+        result = run_once()
+        log.info("worker_loop_complete", result=result)
+        # The scan performs the initial/due pass before scoring; this second
+        # cadence gate also lets a long-running worker retrain independently of
+        # scan implementation details.
+        forecast = maybe_run_forecast()
+        if forecast.get("status") != "skipped":
+            log.info("forecast_training_complete", result=forecast)
+        # Retention autopilot: run the compaction + pruning + lake-growth pass
+        # when the configured cadence has elapsed since the last pass. The scan
+        # itself still compacts incrementally; this is the cadence-gated pass
+        # with the Feed Health lake report.
+        retention = maybe_run_retention()
+        if not retention.get("skipped"):
+            log.info("retention_autopilot_complete", result=retention)
+        time.sleep(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
+
+
+if __name__ == "__main__":
+    main()
