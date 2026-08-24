@@ -17,7 +17,7 @@ from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from features.definitions import FEATURE_NAMES
 from forecast.hazard import DiscreteHazardModel, HazardFit
-from forecast.labels import LABEL_COLLAPSE, LABEL_IGNITION, LabelEngine
+from forecast.labels import LABEL_COLLAPSE, LABEL_IGNITION, LabelEngine, seed_labels_at_feature_timestamps
 from ingestion.rpc_pool import get_rpc_pool
 from storage import models
 from storage.repository import record_health, upsert_forecast
@@ -205,6 +205,16 @@ class ForecastEngine:
         if not self.settings.forecast_enabled:
             return {"status": "disabled"}
         label_counts = LabelEngine().generate(session, decision_ts=decision_ts)
+        # Bootstrap labels at feature timestamps to bridge the gap between
+        # when features are generated and when labels exist.  This is the
+        # critical fix that unblocks ML training.
+        try:
+            bootstrap = seed_labels_at_feature_timestamps(session, decision_ts=decision_ts)
+            label_counts["bootstrap_ignition"] = bootstrap.get("ignition", 0)
+            label_counts["bootstrap_collapse"] = bootstrap.get("collapse", 0)
+            label_counts["bootstrap_decision_points"] = bootstrap.get("decision_points", 0)
+        except Exception:  # noqa: BLE001 - bootstrap labels are additive, never block training.
+            pass
         # Also generate dense labels from interpolated market snapshots to
         # accelerate training data accumulation (unblocks the ML model faster).
         try:
