@@ -95,8 +95,12 @@ def check_market_snapshots(
                 report.issues.append(QualityIssue(
                     category="stale",
                     severity="warning",
-                    message=f"Price is {age.total_seconds() / 60:.0f}min old (threshold {STALE_PRICE_MINUTES}min)",
-                    details={"age_minutes": age.total_seconds() / 60, "pair_id": snap.get("pair_id")},
+                    message=f"Price is {age.total_seconds() / 60:.0f}min old "
+                    f"(threshold {STALE_PRICE_MINUTES}min)",
+                    details={
+                        "age_minutes": age.total_seconds() / 60,
+                        "pair_id": snap.get("pair_id"),
+                    },
                 ))
 
         # ── Anomalous price change ──────────────────────────────────

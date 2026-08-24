@@ -42,7 +42,8 @@ class CoinGeckoCrawler(BaseCrawler):
                 item = coin.get("item") or {}
                 items.append({
                     "title": item.get("name", ""),
-                    "text": f"{item.get('name', '')} {item.get('symbol', '')} trending on CoinGecko",
+                    "text": f"{item.get('name', '')} {item.get('symbol', '')} "
+                    f"trending on CoinGecko",
                     "url": f"https://www.coingecko.com/en/coins/{item.get('id', '')}",
                     "published": utc_now(),
                     "source_domain": "coingecko.com",
@@ -127,7 +128,8 @@ class CoinGeckoCrawler(BaseCrawler):
             for coin in gainers:
                 items.append({
                     "title": coin.get("name", ""),
-                    "text": f"{coin.get('name', '')} up {coin.get('price_change_percentage_24h', 0):.1f}% in 24h",
+                    "text": f"{coin.get('name', '')} up "
+                    f"{coin.get('price_change_percentage_24h', 0):.1f}% in 24h",
                     "url": f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
                     "published": utc_now(),
                     "source_domain": "coingecko.com",

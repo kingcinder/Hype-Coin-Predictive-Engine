@@ -160,7 +160,9 @@ class NightCrawlerOrchestrator:
         )
 
         return {
-            "crawlers_run": len([r for r in results.values() if isinstance(r, dict) and r.get("status") == "ok"]),
+            "crawlers_run": len(
+                [r for r in results.values() if isinstance(r, dict) and r.get("status") == "ok"]
+            ),
             "total_items": total_items,
             "duration_sec": round(duration, 2),
             "details": results,

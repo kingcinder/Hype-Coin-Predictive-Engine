@@ -10,7 +10,6 @@ from forecast.engine import (
     FORECAST_FEATURE_NAMES,
     ForecastEngine,
     Sample,
-    _is_dense_label_source,
     _widen_probability,
     forecast_due,
 )

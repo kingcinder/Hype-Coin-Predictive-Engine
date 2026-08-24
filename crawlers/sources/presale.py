@@ -74,7 +74,8 @@ class PresaleCrawler(BaseCrawler):
             for event in (data.get("data") or [])[:30]:
                 items.append({
                     "title": event.get("name", ""),
-                    "text": f"{event.get('name', '')} {event.get('type', '').upper()} on {event.get('platform', '')}",
+                    "text": f"{event.get('name', '')} {event.get('type', '').upper()} on "
+                    f"{event.get('platform', '')}",
                     "url": f"https://cryptorank.io/event/{event.get('slug', '')}",
                     "published": utc_now(),
                     "source_domain": "cryptorank.io",

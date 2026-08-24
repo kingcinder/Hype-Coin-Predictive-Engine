@@ -167,7 +167,9 @@ class HeuristicsEngine:
         return 1.0
 
     def get_source_reliability(self, source_name: str) -> SourceReliability:
-        return self._source_reliabilities.get(source_name, SourceReliability(source_name=source_name))
+        return self._source_reliabilities.get(
+            source_name, SourceReliability(source_name=source_name)
+        )
 
     def get_top_patterns(
         self, limit: int = 20

@@ -50,8 +50,10 @@ class ExplorerCrawler(BaseCrawler):
                 for contract in (data.get("result") or [])[:10]:
                     items.append({
                         "title": f"New contract: {contract.get('contractAddress', '')[:10]}...",
-                        "text": f"Contract deployed on {chain} by {contract.get('contractCreator', '')[:10]}...",
-                        "url": f"https://{chain}.etherscan.io/address/{contract.get('contractAddress', '')}",
+                        "text": f"Contract deployed on {chain} by "
+                        f"{contract.get('contractCreator', '')[:10]}...",
+                        "url": f"https://{chain}.etherscan.io/address/"
+                        f"{contract.get('contractAddress', '')}",
                         "published": utc_now(),
                         "source_domain": f"{chain}.etherscan.io",
                         "source_type": "on_chain",

@@ -7,6 +7,7 @@ block explorer APIs to detect smart money movements.
 from __future__ import annotations
 
 import time
+from datetime import UTC
 from typing import Any
 
 from common.logging import get_logger
@@ -259,7 +260,7 @@ def _extract_sol_transfer(tx: dict[str, Any], watch_account: str) -> float | Non
 
 def _unix_to_iso(ts: int) -> Any:
     """Convert unix timestamp to ISO format string."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     if ts <= 0:
         return utc_now()
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return datetime.fromtimestamp(ts, tz=UTC)

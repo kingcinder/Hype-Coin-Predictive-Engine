@@ -50,8 +50,11 @@ class DeFiLlamaCrawler(BaseCrawler):
                     continue  # Skip low-change protocols
                 items.append({
                     "title": proto.get("name", ""),
-                    "text": f"{proto.get('name', '')} TVL changed {change_1d:.1f}% in 24h",
-                    "url": proto.get("url", f"https://defillama.com/protocol/{proto.get('slug', '')}"),
+                    "text": f"{proto.get('name', '')} TVL changed "
+                    f"{change_1d:.1f}% in 24h",
+                    "url": proto.get(
+                        "url", f"https://defillama.com/protocol/{proto.get('slug', '')}"
+                    ),
                     "published": utc_now(),
                     "source_domain": "defillama.com",
                     "source_type": "defi_data",
@@ -78,7 +81,8 @@ class DeFiLlamaCrawler(BaseCrawler):
             for proto in (data if isinstance(data, list) else [])[:20]:
                 items.append({
                     "title": proto.get("name", ""),
-                    "text": f"{proto.get('name', '')} TVL gainer: {proto.get('change_1d', 0):.1f}% daily",
+                    "text": f"{proto.get('name', '')} TVL gainer: "
+                    f"{proto.get('change_1d', 0):.1f}% daily",
                     "url": f"https://defillama.com/protocol/{proto.get('slug', '')}",
                     "published": utc_now(),
                     "source_domain": "defillama.com",
@@ -110,7 +114,8 @@ class DeFiLlamaCrawler(BaseCrawler):
             for pool in high_yield:
                 items.append({
                     "title": pool.get("project", ""),
-                    "text": f"{pool.get('project', '')} {pool.get('symbol', '')} yields {float(pool.get('apy', 0)):.1f}% APY",
+                    "text": f"{pool.get('project', '')} {pool.get('symbol', '')} yields "
+                    f"{float(pool.get('apy', 0)):.1f}% APY",
                     "url": f"https://defillama.com/yields/pool/{pool.get('pool', '')}",
                     "published": utc_now(),
                     "source_domain": "defillama.com",

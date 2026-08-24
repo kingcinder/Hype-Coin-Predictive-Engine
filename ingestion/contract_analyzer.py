@@ -8,10 +8,9 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
-from common.logging import get_logger
 from common.http import HttpClient
+from common.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -48,11 +47,15 @@ def _get_rug_deployers() -> set[str]:
     global _known_rug_deployers
     if _known_rug_deployers is None:
         try:
-            from storage.database import SessionLocal
             from sqlalchemy import text
+
+            from storage.database import SessionLocal
             with SessionLocal() as session:
                 rows = session.execute(
-                    text("SELECT DISTINCT deployer_wallet FROM contracts WHERE deployer_wallet IS NOT NULL")
+                    text(
+                        "SELECT DISTINCT deployer_wallet FROM contracts "
+                        "WHERE deployer_wallet IS NOT NULL"
+                    )
                 ).fetchall()
                 _known_rug_deployers = {r[0].lower() for r in rows if r[0]}
         except Exception:  # noqa: BLE001

@@ -17,7 +17,12 @@ from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from features.definitions import FEATURE_NAMES
 from forecast.hazard import DiscreteHazardModel, HazardFit
-from forecast.labels import LABEL_COLLAPSE, LABEL_IGNITION, LabelEngine, seed_labels_at_feature_timestamps
+from forecast.labels import (
+    LABEL_COLLAPSE,
+    LABEL_IGNITION,
+    LabelEngine,
+    seed_labels_at_feature_timestamps,
+)
 from ingestion.rpc_pool import get_rpc_pool
 from storage import models
 from storage.repository import record_health, upsert_forecast

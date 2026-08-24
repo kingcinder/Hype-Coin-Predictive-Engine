@@ -13,7 +13,13 @@ log = get_logger(__name__)
 
 
 class HttpClient:
-    def __init__(self, *, base_url: str = "", timeout: float | None = None, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = "",
+        timeout: float | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         settings = get_settings()
         self.base_url = base_url
         merged_headers = {"User-Agent": "serpent-hype-coin-engine/0.1"}

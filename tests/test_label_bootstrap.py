@@ -6,10 +6,9 @@ ML training.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
-import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from forecast.labels import (
     LABEL_COLLAPSE,
@@ -18,11 +17,11 @@ from forecast.labels import (
 )
 from storage import models
 from storage.repository import (
+    insert_liquidity_snapshot_once,
     insert_market_snapshot_once,
     upsert_asset,
     upsert_feature,
     upsert_pool_and_pair,
-    insert_liquidity_snapshot_once,
 )
 from tests.conftest import seed_reference
 
@@ -119,7 +118,9 @@ def test_seed_labels_generates_labels_at_feature_timestamps(session) -> None:
         select(models.Label).where(models.Label.asset_id == asset.id)
     ).all()
     assert len(labels) >= 4  # 2 timestamps × 2 label types (ignition + collapse)
-    label_timestamps = {label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts for label in labels}
+    label_timestamps = {
+        label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts for label in labels
+    }
     assert T0 + timedelta(hours=11) in label_timestamps
     assert T0 + timedelta(hours=13) in label_timestamps
 
@@ -218,7 +219,7 @@ def test_seed_labels_classifies_correctly(session) -> None:
     flat_labels = session.scalars(
         select(models.Label).where(models.Label.asset_id == flat.id)
     ).all()
-    flat_by_type = {l.label_type: l.label_value for l in flat_labels}
+    flat_by_type = {row.label_type: row.label_value for row in flat_labels}
     assert flat_by_type.get(LABEL_IGNITION) == "0"
     assert flat_by_type.get(LABEL_COLLAPSE) == "0"
 
@@ -226,14 +227,14 @@ def test_seed_labels_classifies_correctly(session) -> None:
     crash_labels = session.scalars(
         select(models.Label).where(models.Label.asset_id == crash.id)
     ).all()
-    crash_by_type = {l.label_type: l.label_value for l in crash_labels}
+    crash_by_type = {row.label_type: row.label_value for row in crash_labels}
     assert crash_by_type.get(LABEL_COLLAPSE) == "1"
 
     # PUMP: ignition = 1 (rises from 1.0 to 2.0 = +100%)
     pump_labels = session.scalars(
         select(models.Label).where(models.Label.asset_id == pump.id)
     ).all()
-    pump_by_type = {l.label_type: l.label_value for l in pump_labels}
+    pump_by_type = {row.label_type: row.label_value for row in pump_labels}
     assert pump_by_type.get(LABEL_IGNITION) == "1"
 
 

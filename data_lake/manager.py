@@ -120,7 +120,7 @@ def _dispatch_high_signal_webhooks(
     decision_ts: datetime,
 ) -> list[Any]:
     """Dispatch webhooks for high-signal events detected in the batch."""
-    from data_lake.webhooks import should_dispatch, build_payload, dispatch_webhook, list_webhooks
+    from data_lake.webhooks import build_payload, dispatch_webhook, list_webhooks, should_dispatch
 
     webhooks = list_webhooks(session)
     results: list[Any] = []

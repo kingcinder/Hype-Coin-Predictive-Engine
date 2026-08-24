@@ -42,7 +42,8 @@ class PumpFunCrawler(BaseCrawler):
             for token in tokens[:50]:
                 items.append({
                     "title": token.get("name", ""),
-                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) launched on Pump.fun",
+                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
+                    f"launched on Pump.fun",
                     "url": f"https://pump.fun/coin/{token.get('mint', '')}",
                     "published": utc_now(),
                     "source_domain": "pump.fun",
@@ -76,7 +77,8 @@ class PumpFunCrawler(BaseCrawler):
             for token in tokens[:30]:
                 items.append({
                     "title": token.get("name", ""),
-                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) approaching graduation on Pump.fun",
+                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
+                    f"approaching graduation on Pump.fun",
                     "url": f"https://pump.fun/coin/{token.get('mint', '')}",
                     "published": utc_now(),
                     "source_domain": "pump.fun",

@@ -9,10 +9,10 @@ singleton is sufficient — no IPC is needed.
 from __future__ import annotations
 
 import asyncio
-import enum
 import threading
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from common.logging import get_logger
@@ -22,7 +22,8 @@ log = get_logger(__name__)
 
 # ── SSE event broadcaster ────────────────────────────────────────────────────
 # Each connected SSE client gets an asyncio.Queue.  The worker thread (which
-# calls the mark_* mutators) enqueues a snapshot via ``broadcast_event()``;\# the FastAPI SSE handler drains its queue into the HTTP response stream.
+# calls the mark_* mutators) enqueues a snapshot via ``broadcast_event()``;
+# the FastAPI SSE handler drains its queue into the HTTP response stream.
 
 class _SSEBroker:
     """Thread-safe broadcaster that bridges sync worker → async SSE endpoints."""
@@ -55,7 +56,7 @@ class _SSEBroker:
 sse_broker = _SSEBroker()
 
 
-class ScanPhase(str, enum.Enum):
+class ScanPhase(StrEnum):
     IDLE = "idle"
     BOOTSTRAPPING = "bootstrapping"
     SCANNING = "scanning"
@@ -114,7 +115,9 @@ class EngineState:
             )
         self._notify_sse("bootstrapping")
 
-    def mark_scanning(self, iteration: int | None = None, message: str = "Running ingestion scan") -> None:
+    def mark_scanning(
+        self, iteration: int | None = None, message: str = "Running ingestion scan"
+    ) -> None:
         with self._lock:
             if iteration is not None:
                 self.scan.iteration = iteration
@@ -186,7 +189,9 @@ class EngineState:
             self.scan.total_fingerprints = self._safe_int(result.get("fingerprints"))
             self.scan.total_archive = self._safe_int(result.get("archive"))
             ntfy = result.get("ntfy")
-            self.scan.total_ntfy = self._safe_int(ntfy.get("sent", 0)) if isinstance(ntfy, dict) else 0
+            self.scan.total_ntfy = (
+                self._safe_int(ntfy.get("sent", 0)) if isinstance(ntfy, dict) else 0
+            )
             self.scan.total_rpc_snapshots = self._safe_int(result.get("rpc_pool_snapshots"))
         self._notify_sse("scan_progress")
 

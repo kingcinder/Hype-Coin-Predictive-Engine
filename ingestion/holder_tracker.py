@@ -7,7 +7,6 @@ Computes holder_count and holder_growth from actual on-chain data:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from common.http import HttpClient
 from common.logging import get_logger
