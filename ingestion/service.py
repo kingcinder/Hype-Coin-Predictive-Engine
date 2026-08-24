@@ -141,6 +141,13 @@ class IngestionService:
         get_or_create_source(
             session, name="evm_rpc", source_type="chain_rpc", tier="chain", base_url=None
         )
+        get_or_create_source(
+            session,
+            name="birdeye",
+            source_type="market_data",
+            tier="venue",
+            base_url="https://public-api.birdeye.so",
+        )
         for name, source_type in [
             ("reddit_public", "social"),
             ("youtube_rss", "social"),
