@@ -13,13 +13,16 @@ log = get_logger(__name__)
 
 
 class HttpClient:
-    def __init__(self, *, base_url: str = "", timeout: float | None = None) -> None:
+    def __init__(self, *, base_url: str = "", timeout: float | None = None, headers: dict[str, str] | None = None) -> None:
         settings = get_settings()
         self.base_url = base_url
+        merged_headers = {"User-Agent": "serpent-hype-coin-engine/0.1"}
+        if headers:
+            merged_headers.update(headers)
         self._client = httpx.Client(
             base_url=base_url,
             timeout=timeout or settings.request_timeout_seconds,
-            headers={"User-Agent": "serpent-hype-coin-engine/0.1"},
+            headers=merged_headers,
             follow_redirects=True,
         )
         self._max_attempts = settings.max_request_retries

@@ -4,13 +4,16 @@ from functools import partial
 from time import sleep
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import floor_to_hour, utc_now
+from ingestion.data_quality import check_market_snapshots
+from ingestion.contract_analyzer import analyze_contract
+from ingestion.holder_tracker import get_solana_holders, get_evm_holders  # noqa: F401
 from fingerprint.engine import FingerprintEngine
 from forecast.engine import run_forecast_if_due
 from ingestion.normalizers import (
@@ -32,6 +35,7 @@ from ingestion.source_clients import (
     get_rpc_url,
     probe_rpc_endpoint,
 )
+from ingestion.birdeye_client import BirdeyeClient
 from mempool import run_mempool
 from narrative import run_narrative
 from ops.archive import run_archive
@@ -165,6 +169,7 @@ class IngestionService:
             result["profiles"] = self._ingest_dexscreener_profiles(session)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
+            result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
             result["lp_removals"] = LiquidityRemovalWatcher().scan(
@@ -188,6 +193,20 @@ class IngestionService:
             result["scores"] = len(scores)
             result["ntfy"] = run_notifier(session, decision_ts=decision_ts)
             result["archive"] = run_archive(session, decision_ts=decision_ts)
+            # ── Phase 1: Data quality check ─────────────────────────────
+            try:
+                quality = self._run_data_quality_check(session, decision_ts)
+                result["data_quality"] = quality
+            except Exception as qe:  # noqa: BLE001
+                log.debug("data_quality_check_failed", error=str(qe))
+                result["data_quality"] = {"error": str(qe)}
+            # ── Phase 1: Contract analysis for new assets ───────────────
+            try:
+                contract_result = self._run_contract_analysis(session, decision_ts)
+                result["contract_analysis"] = contract_result
+            except Exception as ce:  # noqa: BLE001
+                log.debug("contract_analysis_failed", error=str(ce))
+                result["contract_analysis"] = {"error": str(ce)}
             record_health(
                 session,
                 component="worker",
@@ -252,14 +271,117 @@ class IngestionService:
             log.exception("ingestion_scan_failed", error=str(exc))
         return result
 
+    def _run_data_quality_check(self, session: Session, decision_ts: Any) -> dict[str, Any]:
+        """Run data quality checks on the latest market snapshots."""
+        recent_snaps = session.scalars(
+            select(models.MarketSnapshot)
+            .order_by(desc(models.MarketSnapshot.observed_at))
+            .limit(200)
+        ).all()
+        snap_dicts: list[dict[str, Any]] = []
+        for s in recent_snaps:
+            snap_dicts.append({
+                "pair_id": s.pair_id,
+                "price_usd": s.price_usd,
+                "ts": s.ts,
+                "source_id": s.source_id,
+                "volume_usd": s.volume_usd,
+            })
+        report = check_market_snapshots(snap_dicts, decision_ts=decision_ts)
+        return {
+            "checked": report.checked,
+            "issues": len(report.issues),
+            "stale": report.stale_count,
+            "missing": report.missing_count,
+            "duplicate": report.duplicate_count,
+            "anomalous": report.anomalous_count,
+            "ok": report.ok,
+        }
+
+    def _run_contract_analysis(self, session: Session, decision_ts: Any) -> dict[str, Any]:
+        """Analyze contracts for recently discovered assets, skipping already-analyzed ones."""
+        # Find assets that don't yet have a contract_flag record
+        analyzed_ids = session.scalars(
+            select(models.ContractFlag.contract_id)
+        ).all()
+        query = select(models.Asset).order_by(desc(models.Asset.created_at)).limit(10)
+        if analyzed_ids:
+            query = select(models.Asset).where(models.Asset.id.notin_(analyzed_ids)).order_by(desc(models.Asset.created_at)).limit(10)
+        recent_assets = session.scalars(query).all()
+        results: list[dict[str, Any]] = []
+        for asset in recent_assets:
+            chain_obj = self._chain(session, asset.chain_id)
+            chain_name = chain_obj.slug if chain_obj else "solana"
+            analysis = analyze_contract(
+                asset.address,
+                chain=chain_name,
+            )
+            results.append({
+                "asset_id": asset.id,
+                "address": asset.address,
+                "suspicious_flags": analysis.suspicious_flags,
+                "is_honeypot": analysis.is_honeypot,
+                "has_mint": analysis.has_mint_function,
+                "ownership_renounced": analysis.ownership_renounced,
+                "reasons": analysis.reasons,
+            })
+        flagged = sum(1 for r in results if r["suspicious_flags"] > 0)
+        return {"analyzed": len(results), "flagged": flagged}
+
+    def _ingest_birdeye_solana(self, session: Session) -> int:
+        """Ingest new tokens from Birdeye API as a third Solana data source."""
+        if "solana" not in self.settings.target_chains:
+            return 0
+        get_or_create_source(
+            session, name="birdeye", source_type="market_data", tier="venue",
+            base_url=BirdeyeClient.BASE_URL,
+        )
+        source = self._source(session, "birdeye")
+        client = BirdeyeClient()
+        count = 0
+        try:
+            new_tokens = client.new_tokens(limit=20)
+            store_raw_evidence(
+                session, source=source,
+                payload={"birdeye_new_tokens": new_tokens}, observed_at=utc_now(),
+            )
+            for token in new_tokens:
+                address = token.get("address") or ""
+                if not address:
+                    continue
+                upsert_asset(
+                    session,
+                    chain_id=(solana_chain.id if (solana_chain := self._chain(session, "solana")) else 1),
+                    address=address,
+                    symbol=token.get("symbol") or "UNKNOWN",
+                    name=token.get("name"),
+                    first_seen_at=utc_now(),
+                )
+                count += 1
+            record_health(
+                session, component="source:birdeye", state="ok",
+                message=f"{count} new tokens",
+            )
+        except Exception as exc:  # noqa: BLE001
+            record_health(
+                session, component="source:birdeye", state="red",
+                message=str(exc), error_count=1,
+            )
+            log.warning("birdeye_ingestion_failed", error=str(exc))
+        finally:
+            client.close()
+        return count
+
     def _source(self, session: Session, name: str) -> models.Source:
         source = session.scalar(select(models.Source).where(models.Source.name == name))
         if not source:
             raise RuntimeError(f"source not seeded: {name}")
         return source
 
-    def _chain(self, session: Session, slug: str) -> models.Chain | None:
-        return session.scalar(select(models.Chain).where(models.Chain.slug == slug))
+    def _chain(self, session: Session, slug_or_id: str | int) -> models.Chain | None:
+        if isinstance(slug_or_id, int):
+            return session.get(models.Chain, slug_or_id)
+        return session.scalar(select(models.Chain).where(models.Chain.slug == slug_or_id))
 
     def _ingest_dexscreener_profiles(self, session: Session) -> int:
         source = self._source(session, "dexscreener")

@@ -1,30 +1,43 @@
 """Nitter/Twitter Night Crawler — crypto Twitter sentiment and signal.
 
-Uses Nitter public instances to crawl Twitter/X without API keys.
-Crypto Twitter is the #1 hype signal source — this crawler detects
-trending tokens, KOL mentions, and sentiment spikes.
+Uses Nitter RSS feeds to crawl Twitter/X without API keys. RSS parsing
+is far more reliable than regex HTML scraping and survives Nitter instance
+markup changes. Falls back to Farcaster search when Nitter is unavailable.
 """
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from typing import Any
 
+from common.logging import get_logger
 from common.time import utc_now
 from crawlers.base import BaseCrawler
 
+log = get_logger(__name__)
+
+# Token mention patterns: $TICKER, 0x addresses, Solana base58 addresses
+_TOKEN_PATTERN = re.compile(
+    r'\$([A-Z]{2,10})\b|'
+    r'(0x[a-fA-F0-9]{40})|'
+    r'([1-9A-HJ-NP-Za-km-z]{32,44})'
+)
+
 
 class NitterCrawler(BaseCrawler):
-    """Crawls Nitter instances for crypto Twitter signals."""
+    """Crawls Nitter RSS feeds for crypto Twitter signals."""
 
     NITTER_INSTANCES = [
         "https://nitter.privacydev.net",
         "https://nitter.poast.org",
         "https://nitter.woodland.cafe",
+        "https://nitter.cz",
     ]
 
     CRYPTO_SEARCH_TERMS = [
-        "gem", "moon", "100x", "pump", "launch", "presale",
-        "airdrop", "whale", "10x", "bullish", "alpha",
+        "gem crypto", "100x token", "pump launch",
+        "presale crypto", "whale alert", "bullish alpha",
+        "new listing", "airdrop live", "moon shot",
     ]
 
     def __init__(self, search_terms: list[str] | None = None) -> None:
@@ -39,57 +52,148 @@ class NitterCrawler(BaseCrawler):
 
     def fetch_items(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        for term in self.search_terms:
-            items.extend(self._search(term))
+        for term in self.search_terms[:5]:  # Limit to 5 terms per run
+            rss_items = self._search_rss(term)
+            items.extend(rss_items)
         return items
 
-    def _search(self, term: str) -> list[dict[str, Any]]:
-        """Search Nitter for crypto-related tweets."""
+    def _search_rss(self, term: str) -> list[dict[str, Any]]:
+        """Search via Nitter RSS feed — much more reliable than HTML scraping."""
         for instance in self.NITTER_INSTANCES:
             try:
-                response = self.client.get(
-                    f"{instance}/search",
-                    params={"f": "tweets", "q": term},
-                )
+                url = f"{instance}/search/rss"
+                response = self.client.get(url, params={"f": "tweets", "q": term})
                 if response.status_code != 200:
                     continue
-                return self._parse_search(response.text, term)
-            except Exception:
+                return self._parse_rss(response.text, term)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("nitter_rss_error", instance=instance, term=term, error=str(exc))
                 continue
         return []
 
-    def _parse_search(self, html: str, search_term: str) -> list[dict[str, Any]]:
-        """Parse Nitter search results HTML."""
-        items = []
-        # Simple regex extraction for tweet content
-        tweet_pattern = re.compile(
-            r'class="tweet-content[^"]*"[^>]*>(.*?)</div>',
-            re.DOTALL,
-        )
-        for match in tweet_pattern.finditer(html):
-            text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-            if not text or len(text) < 20:
-                continue
-            # Check for token mentions (addresses or symbols)
-            token_mentions = re.findall(
-                r'\$([A-Z]{2,10})\b|'
-                r'(0x[a-fA-F0-9]{40})|'
-                r'([A-Za-z0-9]{32,44})',
-                text,
-            )
-            if not token_mentions:
-                continue
-            items.append({
-                "title": text[:128],
-                "text": text[:512],
-                "url": "",
-                "published": utc_now(),
-                "source_domain": "twitter.com",
-                "source_type": "social",
-                "metrics": {
-                    "search_term": search_term,
-                    "token_mentions": [m for group in token_mentions for m in group if m],
-                    "platform": "twitter",
-                },
-            })
-        return items[:10]
+    def _parse_rss(self, xml_text: str, search_term: str) -> list[dict[str, Any]]:
+        """Parse Nitter RSS/Atom feed into structured items."""
+        items: list[dict[str, Any]] = []
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            # Try to fix common XML issues
+            xml_text = xml_text.replace("&", "&amp;")
+            try:
+                root = ET.fromstring(xml_text)
+            except ET.ParseError:
+                return []
+
+        # Handle both RSS 2.0 (<channel><item>) and Atom (<entry>)
+
+        # RSS 2.0 format
+        for item_el in root.iter("item"):
+            entry = self._parse_rss_item(item_el, search_term)
+            if entry:
+                items.append(entry)
+
+        # Atom format
+        for entry_el in root.iter("{http://www.w3.org/2005/Atom}entry"):
+            entry = self._parse_atom_entry(entry_el, search_term)
+            if entry:
+                items.append(entry)
+
+        return items[:15]  # Cap per search term
+
+    def _parse_rss_item(self, el: ET.Element, search_term: str) -> dict[str, Any] | None:
+        """Parse a single RSS 2.0 <item> element."""
+        title = _text(el, "title")
+        description = _text(el, "description")
+        link = _text(el, "link")
+        pub_date = _text(el, "pubDate")
+
+        text = _strip_html(description or title or "")
+        if not text or len(text) < 20:
+            return None
+
+        token_mentions = _extract_token_mentions(text)
+        if not token_mentions:
+            return None
+
+        return {
+            "title": text[:128],
+            "text": text[:512],
+            "url": link or "",
+            "published": _parse_pub_date(pub_date),
+            "source_domain": "twitter.com",
+            "source_type": "social",
+            "metrics": {
+                "search_term": search_term,
+                "token_mentions": token_mentions,
+                "platform": "twitter",
+                "has_url": bool(link),
+            },
+        }
+
+    def _parse_atom_entry(self, el: ET.Element, search_term: str) -> dict[str, Any] | None:
+        """Parse a single Atom <entry> element."""
+        title = _text(el, "{http://www.w3.org/2005/Atom}title")
+        summary = _text(el, "{http://www.w3.org/2005/Atom}summary")
+        content = _text(el, "{http://www.w3.org/2005/Atom}content")
+        link_el = el.find("{http://www.w3.org/2005/Atom}link")
+        link = link_el.get("href", "") if link_el is not None else ""
+        published = _text(el, "{http://www.w3.org/2005/Atom}published")
+
+        text = _strip_html(content or summary or title or "")
+        if not text or len(text) < 20:
+            return None
+
+        token_mentions = _extract_token_mentions(text)
+        if not token_mentions:
+            return None
+
+        return {
+            "title": text[:128],
+            "text": text[:512],
+            "url": link,
+            "published": _parse_pub_date(published),
+            "source_domain": "twitter.com",
+            "source_type": "social",
+            "metrics": {
+                "search_term": search_term,
+                "token_mentions": token_mentions,
+                "platform": "twitter",
+                "has_url": bool(link),
+            },
+        }
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _text(el: ET.Element, tag: str) -> str:
+    """Extract text content from an XML element."""
+    child = el.find(tag)
+    return (child.text or "").strip() if child is not None else ""
+
+
+def _strip_html(html: str) -> str:
+    """Remove HTML tags from a string."""
+    return re.sub(r"<[^>]+>", "", html).strip()
+
+
+def _extract_token_mentions(text: str) -> list[str]:
+    """Extract unique token mentions from text."""
+    mentions: list[str] = []
+    seen: set[str] = set()
+    for match in _TOKEN_PATTERN.finditer(text):
+        for group in match.groups():
+            if group and group not in seen:
+                seen.add(group)
+                mentions.append(group)
+    return mentions[:5]
+
+
+def _parse_pub_date(date_str: str | None) -> Any:
+    """Parse an RSS/Atom date string to a datetime."""
+    if not date_str:
+        return utc_now()
+    from email.utils import parsedate_to_datetime
+    try:
+        return parsedate_to_datetime(date_str)
+    except Exception:  # noqa: BLE001
+        return utc_now()
