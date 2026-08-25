@@ -1587,6 +1587,70 @@ def nightcrawler_heuristics() -> dict:
     return get_nightcrawler_orchestrator().heuristics.summarize()
 
 
+@app.get("/nightcrawlers/activity")
+def nightcrawler_activity(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[dict]:
+    """Recent crawler activity items from raw evidence, newest first.
+
+    Each item includes source name, item count, observed timestamp,
+    and a signal score derived from token mentions and engagement.
+    """
+    rows = session.scalars(
+        select(models.RawEvidenceItem)
+        .join(models.Source, models.Source.id == models.RawEvidenceItem.source_id)
+        .where(models.Source.name.like("nightcrawler:%"))
+        .order_by(desc(models.RawEvidenceItem.observed_at))
+        .limit(limit)
+    ).all()
+
+    activities: list[dict] = []
+    for row in rows:
+        try:
+            source = session.get(models.Source, row.source_id)
+            source_name = source.name.removeprefix("nightcrawler:") if source else "unknown"
+            payload = row.payload or {}
+            items = payload.get("items", [])
+            count = payload.get("count", len(items))
+
+            # Compute signal score from engagement + token mentions
+            total_engagement = 0
+            seen_tokens: set[str] = set()
+            token_mentions: list[str] = []
+            platform = ""
+            for item in items[:20]:
+                metrics = item.get("metrics", {})
+                total_engagement += metrics.get("engagement_score", 0)
+                total_engagement += metrics.get("likes", 0)
+                total_engagement += metrics.get("recasts", 0) * 2
+                total_engagement += metrics.get("replies", 0)
+                for mention in metrics.get("token_mentions", []):
+                    if mention not in seen_tokens:
+                        seen_tokens.add(mention)
+                        token_mentions.append(mention)
+                if not platform:
+                    platform = metrics.get("platform", "")
+
+            signal_score = min(100, total_engagement * 2 + len(token_mentions) * 10)
+
+            activities.append(
+                {
+                    "source": source_name,
+                    "platform": platform,
+                    "item_count": count,
+                    "observed_at": str(row.observed_at)[:19] if row.observed_at else "",
+                    "signal_score": signal_score,
+                    "token_mentions": token_mentions[:5],
+                    "total_engagement": total_engagement,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            continue
+
+    return activities
+
+
 @app.post("/engine/nightcrawlers", response_model=TriggerResponse)
 def engine_trigger_nightcrawlers() -> TriggerResponse:
     """Trigger a Night Crawler pass: crawl all sources, score signals, feed data lake."""
