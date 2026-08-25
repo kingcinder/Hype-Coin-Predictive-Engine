@@ -19,9 +19,7 @@ NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
 
 def _seed_base_pool(session):
-    chain = get_or_create_chain(
-        session, "base", name="Base", vm_type="evm", native_symbol="ETH"
-    )
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
     source = get_or_create_source(
         session,
         name="evm_rpc",
@@ -86,9 +84,7 @@ def test_liquidity_watcher_detects_burns_and_withdrawals_before_risk(session, mo
     assert watcher.scan(session, decision_ts=NOW)["events"] == 0
     session.commit()
 
-    values = {
-        value.name: value for value in FeatureFactory().build_for_asset(session, asset, NOW)
-    }
+    values = {value.name: value for value in FeatureFactory().build_for_asset(session, asset, NOW)}
     assert values["lp_removal_signal"].value == 2.0
     assert values["lp_removal_signal"].missing is False
 

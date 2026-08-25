@@ -36,9 +36,7 @@ def upgrade() -> None:
             sa.Column("partition_month", sa.Integer(), nullable=False),
             sa.Column("row_count", sa.Integer(), nullable=False),
             sa.Column("byte_size", sa.Integer(), nullable=False),
-            sa.Column(
-                "first_observed_at", sa.DateTime(timezone=True), nullable=False
-            ),
+            sa.Column("first_observed_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("last_observed_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column(
                 "created_at",
@@ -58,9 +56,7 @@ def upgrade() -> None:
             )
         indexes = {index["name"] for index in inspector.get_indexes("raw_evidence_items")}
         if "ix_raw_evidence_observed_at" not in indexes:
-            op.create_index(
-                "ix_raw_evidence_observed_at", "raw_evidence_items", ["observed_at"]
-            )
+            op.create_index("ix_raw_evidence_observed_at", "raw_evidence_items", ["observed_at"])
 
 
 def downgrade() -> None:

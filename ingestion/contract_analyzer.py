@@ -3,6 +3,7 @@
 Analyzes token contracts for suspicious patterns: honeypot functions,
 hidden mint, ownership not renounced, and deployer track record.
 """
+
 from __future__ import annotations
 
 import re
@@ -31,6 +32,7 @@ _known_rug_deployers: set[str] | None = None
 @dataclass
 class ContractAnalysis:
     """Results of analyzing a token contract."""
+
     suspicious_flags: int = 0
     reasons: list[str] = field(default_factory=list)
     is_honeypot: bool = False
@@ -50,6 +52,7 @@ def _get_rug_deployers() -> set[str]:
             from sqlalchemy import text
 
             from storage.database import SessionLocal
+
             with SessionLocal() as session:
                 rows = session.execute(
                     text(

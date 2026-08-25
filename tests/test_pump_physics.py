@@ -48,22 +48,15 @@ def test_detect_phase_seeding_without_pool() -> None:
 
 
 def test_detect_phase_rug_when_book_emptied() -> None:
-    assert (
-        detect_phase(_evidence(withdrawal_events=1, liquidity_usd=0.0))
-        == LifecyclePhase.RUGGED
-    )
+    assert detect_phase(_evidence(withdrawal_events=1, liquidity_usd=0.0)) == LifecyclePhase.RUGGED
 
 
 def test_detect_phase_dead_after_no_trades() -> None:
-    assert (
-        detect_phase(_evidence(last_trade_hours_ago=200.0)) == LifecyclePhase.DEAD
-    )
+    assert detect_phase(_evidence(last_trade_hours_ago=200.0)) == LifecyclePhase.DEAD
 
 
 def test_detect_phase_collapse_on_1h_crash() -> None:
-    assert (
-        detect_phase(_evidence(one_hour_return=-30.0)) == LifecyclePhase.COLLAPSE
-    )
+    assert detect_phase(_evidence(one_hour_return=-30.0)) == LifecyclePhase.COLLAPSE
 
 
 def test_detect_phase_collapse_on_withdrawal() -> None:
@@ -166,9 +159,7 @@ def test_scan_emits_terminal_phase_alert_once(session) -> None:
     engine.scan(session, decision_ts=T0)
     session.commit()
     alerts = session.scalars(
-        select(models.Alert).where(
-            models.Alert.alert_type == "lifecycle_transition"
-        )
+        select(models.Alert).where(models.Alert.alert_type == "lifecycle_transition")
     ).all()
     assert alerts == []
 
@@ -230,9 +221,7 @@ def test_scan_skips_assets_without_evidence(session) -> None:
         name="Lonely",
         first_seen_at=T0,
     )
-    store_raw_evidence(
-        session, source=source, payload={"lone": True}, observed_at=T0
-    )
+    store_raw_evidence(session, source=source, payload={"lone": True}, observed_at=T0)
     session.commit()
     result = LifecycleEngine().scan(session, decision_ts=T0)
     assert result["events"] == 0
@@ -243,9 +232,7 @@ def test_market_rows_feed_volume_and_ratio(session) -> None:
     asset = seed_market_asset(session)
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
-    for idx, (volume, buys, sells) in enumerate(
-        [(1_000, 10, 5), (10_000, 50, 5), (50_000, 80, 4)]
-    ):
+    for idx, (volume, buys, sells) in enumerate([(1_000, 10, 5), (10_000, 50, 5), (50_000, 80, 4)]):
         ts = T0 + timedelta(minutes=30 * idx)
         insert_market_snapshot_once(
             session,

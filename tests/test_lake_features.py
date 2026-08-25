@@ -158,9 +158,7 @@ def _seed_holder_evidence(
                 )
 
 
-def _seed_low_liquidity_scan(
-    session, source, asset, pair, *, with_sql_rows: bool
-) -> None:
+def _seed_low_liquidity_scan(session, source, asset, pair, *, with_sql_rows: bool) -> None:
     """Seed one GeckoTerminal scan whose pool reserve fell below the discovery
     liquidity threshold. In production that scan creates one ``low_liquidity``
     ContractFlag; the lake must count the same thing from the evidence.
@@ -401,9 +399,9 @@ def _seed_sql_and_lake(session, tmp_path) -> models.Asset:
     # Compact half an hour after the decision so the holder snapshot observed
     # exactly at the decision time is archived too (the compactor cut-off is
     # ``decision_ts - compact_after_hours``).
-    RawEvidenceCompactor(
-        store=LocalArchiveStore(tmp_path), settings=settings
-    ).compact(session, DECISION + timedelta(minutes=30))
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
     session.flush()
     return asset
 
@@ -480,9 +478,9 @@ def _seed_lake_only(session, tmp_path) -> models.Asset:
     _seed_low_liquidity_scan(session, source, asset, pair, with_sql_rows=False)
     _seed_contract_analysis(session, asset, with_sql_rows=False)
     session.flush()
-    RawEvidenceCompactor(
-        store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)
-    ).compact(session, DECISION + timedelta(minutes=30))
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
     session.flush()
     return asset
 
@@ -492,9 +490,7 @@ def test_lake_feature_names_are_subset_of_full_set() -> None:
     assert len(LAKE_FEATURE_NAMES) == len(set(LAKE_FEATURE_NAMES))
 
 
-def test_lake_persist_for_assets_writes_rows_without_live_tables(
-    session, tmp_path
-) -> None:
+def test_lake_persist_for_assets_writes_rows_without_live_tables(session, tmp_path) -> None:
     """The lake persistence path writes Feature rows computed from the
     archived Parquet even when the live normalized tables hold nothing."""
     asset = _seed_lake_only(session, tmp_path)
@@ -504,8 +500,7 @@ def test_lake_persist_for_assets_writes_rows_without_live_tables(
     # series as missing — only pair_age_minutes is derivable from the pair row
     # alone. The lake path must reconstruct them from the archived evidence.
     sql_values = {
-        value.name: value
-        for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
     }
     series_names = [
         name
@@ -518,16 +513,12 @@ def test_lake_persist_for_assets_writes_rows_without_live_tables(
     assert not sql_values["suspicious_contract_flags"].missing
 
     factory = LakeFeatureFactory(store=store, settings=_settings(tmp_path))
-    output = factory.persist_for_assets(
-        session, decision_ts=DECISION, asset_ids=[asset.id]
-    )
+    output = factory.persist_for_assets(session, decision_ts=DECISION, asset_ids=[asset.id])
     session.flush()
 
     assert set(output[asset.id]) == set(LAKE_FEATURE_NAMES)
     assert not all(value.missing for value in output[asset.id].values())
-    rows = session.scalars(
-        select(models.Feature).where(models.Feature.asset_id == asset.id)
-    ).all()
+    rows = session.scalars(select(models.Feature).where(models.Feature.asset_id == asset.id)).all()
     assert {row.feature_name for row in rows} == set(LAKE_FEATURE_NAMES)
     by_name = {value.name: value for value in output[asset.id].values()}
     for row in rows:
@@ -537,9 +528,7 @@ def test_lake_persist_for_assets_writes_rows_without_live_tables(
             assert row.feature_value == pytest.approx(expected.value, rel=1e-6)
 
 
-def test_build_and_persist_features_lake_source_switch(
-    session, tmp_path, monkeypatch
-) -> None:
+def test_build_and_persist_features_lake_source_switch(session, tmp_path, monkeypatch) -> None:
     """feature_source='lake' replays features entirely from the archived lake
     and persists them via the same upsert path — no live tables touched."""
     asset = _seed_lake_only(session, tmp_path)
@@ -577,9 +566,7 @@ def test_build_and_persist_features_lake_source_switch(
 
 def test_build_and_persist_features_rejects_unknown_source(session) -> None:
     with pytest.raises(ValueError):
-        build_and_persist_features(
-            session, decision_ts=DECISION, feature_source="bogus"
-        )
+        build_and_persist_features(session, decision_ts=DECISION, feature_source="bogus")
 
 
 def test_lake_read_path_matches_sql_read_path(session, tmp_path) -> None:
@@ -589,25 +576,24 @@ def test_lake_read_path_matches_sql_read_path(session, tmp_path) -> None:
     session.commit()
 
     sql_values = {
-        value.name: value
-        for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
     }
     store = LocalArchiveStore(tmp_path)
-    lake_values = LakeFeatureFactory(
-        store=store, settings=_settings(tmp_path)
-    ).build_for_asset(asset_address=asset.address, decision_ts=DECISION)
+    lake_values = LakeFeatureFactory(store=store, settings=_settings(tmp_path)).build_for_asset(
+        asset_address=asset.address, decision_ts=DECISION
+    )
 
     assert set(lake_values) == set(LAKE_FEATURE_NAMES)
     for name in LAKE_FEATURE_NAMES:
         sql_feature = sql_values[name]
         lake_feature = lake_values[name]
-        assert (
-            lake_feature.missing == sql_feature.missing
-        ), f"{name}: missing flag diverged ({lake_feature.missing} vs {sql_feature.missing})"
+        assert lake_feature.missing == sql_feature.missing, (
+            f"{name}: missing flag diverged ({lake_feature.missing} vs {sql_feature.missing})"
+        )
         if not sql_feature.missing:
-            assert lake_feature.value == pytest.approx(
-                sql_feature.value, rel=1e-6
-            ), f"{name}: value diverged ({lake_feature.value} vs {sql_feature.value})"
+            assert lake_feature.value == pytest.approx(sql_feature.value, rel=1e-6), (
+                f"{name}: value diverged ({lake_feature.value} vs {sql_feature.value})"
+            )
         else:
             assert lake_feature.value == 0.0
     # On-chain evidence parity: holder count/growth/concentration and the
@@ -640,9 +626,7 @@ def _persisted_feature_snapshot(
     }
 
 
-def test_build_and_persist_sql_vs_lake_identical_rows(
-    session, tmp_path, monkeypatch
-) -> None:
+def test_build_and_persist_sql_vs_lake_identical_rows(session, tmp_path, monkeypatch) -> None:
     """The full-pipeline parity contract: persisting via
     ``build_and_persist_features`` with ``feature_source='sql'`` and then
     ``'lake'`` produces IDENTICAL persisted ``Feature`` rows for all 15
@@ -680,8 +664,7 @@ def test_build_and_persist_sql_vs_lake_identical_rows(
         assert set(lake_rows) == set(LAKE_FEATURE_NAMES)
         for name in LAKE_FEATURE_NAMES:
             assert lake_rows[name] == sql_rows[name], (
-                f"{name}: persisted row diverged (sql={sql_rows[name]} "
-                f"lake={lake_rows[name]})"
+                f"{name}: persisted row diverged (sql={sql_rows[name]} lake={lake_rows[name]})"
             )
         # Sanity: the seeded asset's values are the known parity numbers.
         assert sql_rows["holder_count"] == (7.0, False, 1, 1.0)
@@ -709,12 +692,17 @@ def test_lake_replay_fails_loudly_when_requested_asset_hour_is_missing(
                 asset_ids=[asset.id],
                 feature_source="lake",
             )
-        assert session.scalar(
-            select(func.count()).select_from(models.Feature).where(
-                models.Feature.asset_id == asset.id,
-                models.Feature.decision_ts == DECISION,
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(models.Feature)
+                .where(
+                    models.Feature.asset_id == asset.id,
+                    models.Feature.decision_ts == DECISION,
+                )
             )
-        ) == 0
+            == 0
+        )
     finally:
         get_settings.cache_clear()
 
@@ -726,9 +714,7 @@ def test_lake_read_path_reports_missing_on_empty_lake(session, tmp_path) -> None
     ).build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
     assert set(lake_values) == set(LAKE_FEATURE_NAMES)
     assert all(
-        value.missing
-        for name, value in lake_values.items()
-        if name != "suspicious_contract_flags"
+        value.missing for name, value in lake_values.items() if name != "suspicious_contract_flags"
     )
     # suspicious_contract_flags is reported as 0.0 (never missing), mirroring
     # the SQL path's contract-flag counter on an asset with no contracts.
@@ -745,24 +731,18 @@ def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
         store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)
     ).build_for_asset(asset_address=other, decision_ts=DECISION)
     assert all(
-        value.missing
-        for name, value in lake_values.items()
-        if name != "suspicious_contract_flags"
+        value.missing for name, value in lake_values.items() if name != "suspicious_contract_flags"
     )
     assert lake_values["suspicious_contract_flags"].value == 0.0
 
 
-def test_lake_reconstructs_evm_holders_from_blockscout_evidence(
-    session, tmp_path
-) -> None:
+def test_lake_reconstructs_evm_holders_from_blockscout_evidence(session, tmp_path) -> None:
     """The lake path reconstructs holder_count / holder_growth /
     top_holder_concentration for a Base/Ethereum asset from the archived
     ``evm_holders`` evidence (Blockscout) exactly as for Solana — the
     reconstruction is chain-agnostic, keyed on ``source_type='chain_rpc'``
     plus the mint/supply/largest_accounts payload shape."""
-    chain = get_or_create_chain(
-        session, "base", name="Base", vm_type="evm", native_symbol="ETH"
-    )
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
     created_at = DECISION - timedelta(hours=6)
     evm_address = "0xTokenBase11111111111111111111111111111111"
     asset = upsert_asset(
@@ -810,15 +790,14 @@ def test_lake_reconstructs_evm_holders_from_blockscout_evidence(
     session.flush()
 
     settings = _settings(tmp_path)
-    RawEvidenceCompactor(
-        store=LocalArchiveStore(tmp_path), settings=settings
-    ).compact(session, DECISION + timedelta(minutes=30))
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
     session.flush()
     session.commit()
 
     sql_values = {
-        value.name: value
-        for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
     }
     lake_values = LakeFeatureFactory(
         store=LocalArchiveStore(tmp_path), settings=settings
@@ -829,9 +808,9 @@ def test_lake_reconstructs_evm_holders_from_blockscout_evidence(
     assert lake_values["top_holder_concentration"].value == pytest.approx(0.28)
     for name in ("holder_count", "holder_growth", "top_holder_concentration"):
         assert lake_values[name].missing == sql_values[name].missing, f"{name} missing"
-        assert lake_values[name].value == pytest.approx(
-            sql_values[name].value, rel=1e-6
-        ), f"{name}: sql={sql_values[name].value} lake={lake_values[name].value}"
+        assert lake_values[name].value == pytest.approx(sql_values[name].value, rel=1e-6), (
+            f"{name}: sql={sql_values[name].value} lake={lake_values[name].value}"
+        )
 
 
 def test_lake_reconstructs_series_rows(session, tmp_path) -> None:
@@ -839,9 +818,7 @@ def test_lake_reconstructs_series_rows(session, tmp_path) -> None:
     pair-created time from the pool payload."""
     asset = _seed_sql_and_lake(session, tmp_path)
     session.commit()
-    factory = LakeFeatureFactory(
-        store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)
-    )
+    factory = LakeFeatureFactory(store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path))
     series = factory._series_from_lake(asset.address, DECISION)
     # The 1-min print floors into the same hour as the 1h print, so first-wins
     # dedup collapses the arc to one row per (pair, hour) — 6 in total.
@@ -895,9 +872,7 @@ def test_lake_reconstruction_cache_avoids_recompute(session, tmp_path, monkeypat
     assert calls["n"] == 1
 
     # Different hour -> new key -> recompute.
-    factory.build_for_asset(
-        asset_address=asset.address, decision_ts=DECISION - timedelta(hours=1)
-    )
+    factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION - timedelta(hours=1))
     assert calls["n"] == 2
     # Different asset -> new key -> recompute.
     factory.build_for_asset(
@@ -1031,9 +1006,7 @@ def test_lake_backtest_reports_cache_savings(session, tmp_path, monkeypatch) -> 
         first_metrics = {
             row.metric_name: row.metric_value
             for row in session.scalars(
-                select(models.BacktestResult).where(
-                    models.BacktestResult.run_id == first.id
-                )
+                select(models.BacktestResult).where(models.BacktestResult.run_id == first.id)
             ).all()
         }
         assert first_metrics["lake_cache.misses"] >= 1
@@ -1045,9 +1018,7 @@ def test_lake_backtest_reports_cache_savings(session, tmp_path, monkeypatch) -> 
         second_metrics = {
             row.metric_name: row.metric_value
             for row in session.scalars(
-                select(models.BacktestResult).where(
-                    models.BacktestResult.run_id == second.id
-                )
+                select(models.BacktestResult).where(models.BacktestResult.run_id == second.id)
             ).all()
         }
         assert second_metrics["lake_cache.hits"] >= 1
@@ -1090,9 +1061,7 @@ def test_lake_cache_consistent_under_concurrent_builds(session, tmp_path) -> Non
     LakeFeatureFactory.clear_cache()
     LakeFeatureFactory.reset_cache_stats()
     results = _run_concurrent(
-        lambda _: factory.build_for_asset(
-            asset_address=asset.address, decision_ts=DECISION
-        )
+        lambda _: factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION)
     )
     for result in results:
         assert result == baseline

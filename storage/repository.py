@@ -469,9 +469,7 @@ def upsert_news_item(
     raw_evidence_id: int | None = None,
 ) -> models.NewsItem:
     url_hash = stable_hash(url)
-    row = session.scalar(
-        select(models.NewsItem).where(models.NewsItem.url_hash == url_hash)
-    )
+    row = session.scalar(select(models.NewsItem).where(models.NewsItem.url_hash == url_hash))
     if row:
         return row
     row = models.NewsItem(
@@ -719,9 +717,7 @@ def record_scan_result(
 
 
 def latest_scan_result(session: Session) -> models.ScanResult | None:
-    return session.scalar(
-        select(models.ScanResult).order_by(desc(models.ScanResult.ts)).limit(1)
-    )
+    return session.scalar(select(models.ScanResult).order_by(desc(models.ScanResult.ts)).limit(1))
 
 
 def latest_health(session: Session, *, limit: int = 25) -> list[models.SystemHealth]:

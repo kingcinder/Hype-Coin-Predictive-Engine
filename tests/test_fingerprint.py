@@ -91,9 +91,7 @@ def test_learn_and_recidivism_assessment(session) -> None:
     assert engine.learn(session, decision_ts=decision) == 0
     assert session.scalar(select(func.count()).select_from(models.WalletCluster)) == 1
 
-    assessments = engine.assess(
-        session, decision_ts=decision, asset_ids=[fresh.id, clean.id]
-    )
+    assessments = engine.assess(session, decision_ts=decision, asset_ids=[fresh.id, clean.id])
     session.commit()
     assert len(assessments) == 2
     by_asset = {assessment.asset_id: assessment for assessment in assessments}

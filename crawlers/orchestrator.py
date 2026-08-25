@@ -4,6 +4,7 @@ Coordinates the entire army of crawlers: manages scheduling based on adaptive
 frequencies, tracks health across all sources, records signal quality metrics,
 and feeds results into the data lake pipeline.
 """
+
 from __future__ import annotations
 
 import threading
@@ -153,10 +154,7 @@ class NightCrawlerOrchestrator:
             session,
             component="nightcrawler_orchestrator",
             state="ok",
-            message=(
-                f"{len(results)} crawlers, {total_items} total items, "
-                f"{duration:.1f}s"
-            ),
+            message=(f"{len(results)} crawlers, {total_items} total items, {duration:.1f}s"),
         )
 
         return {

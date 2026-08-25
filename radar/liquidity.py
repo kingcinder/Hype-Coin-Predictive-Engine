@@ -83,10 +83,7 @@ class LiquidityRemovalWatcher:
                     session,
                     component=f"source:lp_removal:{chain.slug}",
                     state="ok",
-                    message=(
-                        f"scanned {len(pools)} pools; "
-                        f"{len(logs)} candidate logs"
-                    ),
+                    message=(f"scanned {len(pools)} pools; {len(logs)} candidate logs"),
                     freshness_sec=0.0,
                 )
             except Exception as exc:  # noqa: BLE001 - watcher must not stop ingestion.
@@ -187,15 +184,19 @@ class LiquidityRemovalWatcher:
         log_index = cls._hex_int(log_item.get("logIndex"))
         if block_number is None or log_index is None:
             return None
-        return event_kind, pool, {
-            "tx_hash": tx_hash,
-            "block_number": block_number,
-            "log_index": log_index,
-            "pool_address": pool.address,
-            "topics": [str(topic) for topic in topics],
-            "data": str(log_item.get("data") or "0x"),
-            "event_signature": signature,
-        }
+        return (
+            event_kind,
+            pool,
+            {
+                "tx_hash": tx_hash,
+                "block_number": block_number,
+                "log_index": log_index,
+                "pool_address": pool.address,
+                "topics": [str(topic) for topic in topics],
+                "data": str(log_item.get("data") or "0x"),
+                "event_signature": signature,
+            },
+        )
 
     @staticmethod
     def _hex_int(value: Any) -> int | None:

@@ -28,9 +28,7 @@ def cluster_mentions(
     mentions = [
         mention
         for mention in session.scalars(
-            select(models.SocialMention).where(
-                models.SocialMention.observed_at <= decision_ts
-            )
+            select(models.SocialMention).where(models.SocialMention.observed_at <= decision_ts)
         ).all()
         if not (mention.metrics_json or {}).get("cluster_key")
     ]

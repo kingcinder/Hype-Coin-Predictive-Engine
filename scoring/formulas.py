@@ -123,12 +123,8 @@ def compute_scores(
 
     available_ratio = 1.0 - (len(missing_features) / len(FEATURE_NAMES))
     data_layer_uncertainty = clamp(data_layer_uncertainty)
-    confidence = clamp(
-        100.0 * available_ratio - flag_penalty * 0.25 - data_layer_uncertainty
-    )
-    uncertainty = clamp(
-        100.0 - confidence + len(missing_features) * 2.0 + data_layer_uncertainty
-    )
+    confidence = clamp(100.0 * available_ratio - flag_penalty * 0.25 - data_layer_uncertainty)
+    uncertainty = clamp(100.0 - confidence + len(missing_features) * 2.0 + data_layer_uncertainty)
     catalyst = clamp(
         0.55 * narrative
         + 0.25 * website

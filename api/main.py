@@ -339,6 +339,7 @@ def ack_alert(
 def reenable_alert_type(alert_type: str, session: DbSession) -> dict[str, object]:
     """Explicitly resume an alert family quieted by the quality gate."""
     from ops.alert_quality import reenable_alert_type as _reenable
+
     control = _reenable(session, alert_type)
     return {"alert_type": control.alert_type, "reenabled": control.reenabled}
 
@@ -695,9 +696,7 @@ def catalysts(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[CatalystRow]:
     rows = session.scalars(
-        select(models.Catalyst)
-        .order_by(desc(models.Catalyst.scheduled_at))
-        .limit(limit)
+        select(models.Catalyst).order_by(desc(models.Catalyst.scheduled_at)).limit(limit)
     ).all()
     output: list[CatalystRow] = []
     for row in rows:
@@ -716,9 +715,7 @@ def catalysts(
     return output
 
 
-def _lifecycle_event_row(
-    session: Session, row: models.LifecycleEvent
-) -> LifecycleEventRow:
+def _lifecycle_event_row(session: Session, row: models.LifecycleEvent) -> LifecycleEventRow:
     asset = session.get(models.Asset, row.asset_id)
     chain = session.get(models.Chain, asset.chain_id) if asset else None
     return LifecycleEventRow(
@@ -834,9 +831,7 @@ def archive_manifests(
     sources = {
         source.id: source.name
         for source in session.scalars(
-            select(models.Source).where(
-                models.Source.id.in_({row.source_id for row in rows})
-            )
+            select(models.Source).where(models.Source.id.in_({row.source_id for row in rows}))
         )
     }
     return [
@@ -979,9 +974,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
         else:
             states = get_rpc_pool(chain_slug).snapshot()
             down_count = sum(state.down for state in states)
-            degraded_count = sum(
-                not state.down and state.health < HEALTH_START for state in states
-            )
+            degraded_count = sum(not state.down and state.health < HEALTH_START for state in states)
             endpoints = [
                 RpcPoolEndpointRow(
                     url=state.url,
@@ -994,8 +987,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_successes=state.probe_successes,
                     probe_failures=state.probe_failures,
                     probe_history=[
-                        RpcPoolProbeRow(ts=probe.ts, ok=probe.ok)
-                        for probe in state.probe_history
+                        RpcPoolProbeRow(ts=probe.ts, ok=probe.ok) for probe in state.probe_history
                     ],
                 )
                 for state in states
@@ -1083,6 +1075,7 @@ def trigger_backtest(payload: BacktestRequest) -> TriggerResponse:
     def _run() -> None:
         from backtest.runner import run_backtest
         from storage.database import SessionLocal
+
         with SessionLocal() as session:
             run_backtest(
                 session,
@@ -1168,6 +1161,7 @@ def ops_console(session: DbSession) -> OpsConsoleResponse:
     lake_budget_row = None
     notifier_components = latest_health(session, limit=50)
     from ops.retention import project_lake_growth
+
     retention_rows = session.scalars(
         select(models.RetentionRun).order_by(desc(models.RetentionRun.ts)).limit(30)
     ).all()
@@ -1248,6 +1242,7 @@ def engine_status() -> EngineStatusResponse:
 def engine_seed() -> SeedResponse:
     """Seed fixture data into the database for first-run experience."""
     from storage.seed import seed_reference_data
+
     seed_reference_data()
     return SeedResponse(
         status="ok",
@@ -1273,6 +1268,7 @@ def engine_trigger_scan() -> TriggerResponse:
         try:
             engine_state.mark_scanning(iteration=None, message="Manual scan triggered from API")
             from ingestion.worker import run_once
+
             result = run_once()
             engine_state.mark_scan_result(result)
             engine_state.mark_completed()
@@ -1294,6 +1290,7 @@ def engine_trigger_forecast() -> TriggerResponse:
     import threading
 
     from engine.state import ScanPhase
+
     current = engine_state.scan.phase
     if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
         return TriggerResponse(
@@ -1305,6 +1302,7 @@ def engine_trigger_forecast() -> TriggerResponse:
         try:
             engine_state.mark_forecasting()
             from forecast.engine import maybe_run_forecast
+
             result = maybe_run_forecast()
             engine_state.mark_completed()
             log.info("api_manual_forecast_complete", result=result)
@@ -1322,6 +1320,7 @@ def engine_trigger_retention() -> TriggerResponse:
     import threading
 
     from engine.state import ScanPhase
+
     current = engine_state.scan.phase
     if current not in (ScanPhase.IDLE, ScanPhase.COMPLETED, ScanPhase.ERROR):
         return TriggerResponse(
@@ -1333,6 +1332,7 @@ def engine_trigger_retention() -> TriggerResponse:
         try:
             engine_state.mark_retention()
             from ops.retention import maybe_run_retention
+
             result = maybe_run_retention()
             engine_state.mark_completed()
             log.info("api_manual_retention_complete", result=result)
@@ -1353,7 +1353,7 @@ def engine_sse_stream():
 
     Clients receive a full state snapshot on connect, then incremental
     ``event: <phase>`` messages whenever the engine transitions.
-    
+
     Event format::
 
         event: scanning
@@ -1362,6 +1362,7 @@ def engine_sse_stream():
         event: completed
         data: {"type":"completed","status":"running",...}
     """
+
     async def event_generator():
         # Send initial state snapshot immediately
         initial = engine_state.snapshot()
@@ -1402,6 +1403,7 @@ def engine_sse_stream():
 def data_labels_progress(session: DbSession) -> dict:
     """Label generation progress toward the training threshold."""
     from data_lake.labels import label_generation_progress
+
     return label_generation_progress(session)
 
 
@@ -1409,6 +1411,7 @@ def data_labels_progress(session: DbSession) -> dict:
 def data_signal_score(session: DbSession) -> dict:
     """Score a batch of recent data points for signal strength."""
     from data_lake.signal import score_batch
+
     result = score_batch(session)
     return {
         "total_scored": result.total_scored,
@@ -1436,6 +1439,7 @@ def data_signal_score(session: DbSession) -> dict:
 def data_densify_labels(session: DbSession) -> dict:
     """Densify forecast labels from existing market snapshots."""
     from data_lake.labels import generate_dense_labels
+
     counts = generate_dense_labels(session)
     return counts
 
@@ -1444,6 +1448,7 @@ def data_densify_labels(session: DbSession) -> dict:
 def data_confidence(session: DbSession) -> dict:
     """Confidence dashboard data: label progress, scoring breakdown, scan history."""
     from data_lake.manager import get_confidence_dashboard_data
+
     return get_confidence_dashboard_data(session)
 
 
@@ -1451,6 +1456,7 @@ def data_confidence(session: DbSession) -> dict:
 def webhook_list(session: DbSession) -> list[dict]:
     """List all registered webhooks."""
     from data_lake.webhooks import list_webhooks
+
     webhooks = list_webhooks(session)
     return [
         {
@@ -1479,6 +1485,7 @@ def webhook_register(
 ) -> dict:
     """Register a new webhook. Parameters passed via query strings for GUI compatibility."""
     from data_lake.webhooks import register_webhook
+
     event_types = [e.strip() for e in webhook_events.split(",") if e.strip()]
     webhook = register_webhook(
         session,
@@ -1500,6 +1507,7 @@ def webhook_register(
 def webhook_delete(webhook_id: int, session: DbSession) -> dict:
     """Delete a webhook by ID. Uses POST for GUI compatibility (Streamlit api_post helper)."""
     from data_lake.webhooks import delete_webhook
+
     deleted = delete_webhook(session, webhook_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"webhook {webhook_id} not found")
@@ -1514,6 +1522,7 @@ def webhook_dispatches(
 ) -> list[dict]:
     """Get recent webhook dispatch history."""
     from data_lake.webhooks import webhook_dispatch_history
+
     dispatches = webhook_dispatch_history(session, webhook_id=webhook_id, limit=limit)
     return [
         {
@@ -1534,6 +1543,7 @@ def webhook_dispatches(
 def nightcrawler_status() -> dict:
     """Status of all Night Crawler crawlers."""
     from crawlers.orchestrator import get_nightcrawler_orchestrator
+
     return get_nightcrawler_orchestrator().get_status()
 
 
@@ -1541,6 +1551,7 @@ def nightcrawler_status() -> dict:
 def nightcrawler_heuristics() -> dict:
     """Heuristics engine state: source reliability and learned patterns."""
     from crawlers.orchestrator import get_nightcrawler_orchestrator
+
     return get_nightcrawler_orchestrator().heuristics.summarize()
 
 
@@ -1563,6 +1574,7 @@ def engine_trigger_nightcrawlers() -> TriggerResponse:
             engine_state.mark_scanning(message="Night Crawler pipeline")
             from crawlers.pipeline import run_nightcrawler_pipeline
             from storage.database import SessionLocal
+
             with SessionLocal() as session:
                 result = run_nightcrawler_pipeline(session, force=True)
                 session.commit()
@@ -1595,6 +1607,7 @@ def engine_trigger_data_lake() -> TriggerResponse:
             engine_state.mark_scanning(message="Data lake pass")
             from data_lake.manager import run_data_lake_pass
             from storage.database import SessionLocal
+
             with SessionLocal() as session:
                 result = run_data_lake_pass(session)
                 session.commit()

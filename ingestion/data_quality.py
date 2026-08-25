@@ -3,6 +3,7 @@
 Runs after each ingestion scan to ensure data flowing into the scoring
 and forecast layers is trustworthy. Reports issues to the health dashboard.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -26,6 +27,7 @@ MAX_NULL_RATIO = 0.30
 @dataclass
 class QualityIssue:
     """A single data quality finding."""
+
     category: str  # stale, missing, duplicate, anomalous
     severity: str  # warning, error, critical
     message: str
@@ -35,6 +37,7 @@ class QualityIssue:
 @dataclass
 class QualityReport:
     """Aggregated quality report for one scan pass."""
+
     checked: int = 0
     issues: list[QualityIssue] = field(default_factory=list)
     stale_count: int = 0
@@ -74,17 +77,21 @@ def check_market_snapshots(
 
     for i, snap in enumerate(snapshots):
         # ── Missing required fields ──────────────────────────────────
-        missing_fields = MIN_REQUIRED_FIELDS - set(snap.keys()) - {
-            k for k in MIN_REQUIRED_FIELDS if snap.get(k) is not None
-        }
+        missing_fields = (
+            MIN_REQUIRED_FIELDS
+            - set(snap.keys())
+            - {k for k in MIN_REQUIRED_FIELDS if snap.get(k) is not None}
+        )
         if missing_fields:
             report.missing_count += 1
-            report.issues.append(QualityIssue(
-                category="missing",
-                severity="warning",
-                message=f"Snapshot {i} missing fields: {missing_fields}",
-                details={"index": i, "missing": list(missing_fields)},
-            ))
+            report.issues.append(
+                QualityIssue(
+                    category="missing",
+                    severity="warning",
+                    message=f"Snapshot {i} missing fields: {missing_fields}",
+                    details={"index": i, "missing": list(missing_fields)},
+                )
+            )
 
         # ── Stale price ─────────────────────────────────────────────
         ts = snap.get("ts")
@@ -92,16 +99,18 @@ def check_market_snapshots(
             age = decision_ts - ts if isinstance(ts, datetime) else None
             if age and age > timedelta(minutes=STALE_PRICE_MINUTES):
                 report.stale_count += 1
-                report.issues.append(QualityIssue(
-                    category="stale",
-                    severity="warning",
-                    message=f"Price is {age.total_seconds() / 60:.0f}min old "
-                    f"(threshold {STALE_PRICE_MINUTES}min)",
-                    details={
-                        "age_minutes": age.total_seconds() / 60,
-                        "pair_id": snap.get("pair_id"),
-                    },
-                ))
+                report.issues.append(
+                    QualityIssue(
+                        category="stale",
+                        severity="warning",
+                        message=f"Price is {age.total_seconds() / 60:.0f}min old "
+                        f"(threshold {STALE_PRICE_MINUTES}min)",
+                        details={
+                            "age_minutes": age.total_seconds() / 60,
+                            "pair_id": snap.get("pair_id"),
+                        },
+                    )
+                )
 
         # ── Anomalous price change ──────────────────────────────────
         price = snap.get("price_usd")
@@ -110,24 +119,28 @@ def check_market_snapshots(
             change_pct = abs(float(price) - float(prev_price)) / float(prev_price) * 100
             if change_pct > ANOMALOUS_PRICE_CHANGE_PCT:
                 report.anomalous_count += 1
-                report.issues.append(QualityIssue(
-                    category="anomalous",
-                    severity="error" if change_pct > 1000 else "warning",
-                    message=f"Price changed {change_pct:.0f}% in one scan",
-                    details={"change_pct": change_pct, "pair_id": snap.get("pair_id")},
-                ))
+                report.issues.append(
+                    QualityIssue(
+                        category="anomalous",
+                        severity="error" if change_pct > 1000 else "warning",
+                        message=f"Price changed {change_pct:.0f}% in one scan",
+                        details={"change_pct": change_pct, "pair_id": snap.get("pair_id")},
+                    )
+                )
 
         # ── Null value ratio ────────────────────────────────────────
         null_count = sum(1 for v in snap.values() if v is None)
         ratio = null_count / max(1, len(snap))
         if ratio > MAX_NULL_RATIO:
             report.missing_count += 1
-            report.issues.append(QualityIssue(
-                category="missing",
-                severity="warning",
-                message=f"{ratio:.0%} null values in snapshot (threshold {MAX_NULL_RATIO:.0%})",
-                details={"null_ratio": ratio, "pair_id": snap.get("pair_id")},
-            ))
+            report.issues.append(
+                QualityIssue(
+                    category="missing",
+                    severity="warning",
+                    message=f"{ratio:.0%} null values in snapshot (threshold {MAX_NULL_RATIO:.0%})",
+                    details={"null_ratio": ratio, "pair_id": snap.get("pair_id")},
+                )
+            )
 
     # ── Duplicate detection ──────────────────────────────────────────
     for i, snap in enumerate(snapshots):
@@ -135,22 +148,28 @@ def check_market_snapshots(
         h = hashlib.md5(key.encode()).hexdigest()[:12]
         if h in seen_hashes:
             report.duplicate_count += 1
-            report.issues.append(QualityIssue(
-                category="duplicate",
-                severity="warning",
-                message=f"Duplicate snapshot at index {i}",
-                details={"index": i, "pair_id": snap.get("pair_id")},
-            ))
+            report.issues.append(
+                QualityIssue(
+                    category="duplicate",
+                    severity="warning",
+                    message=f"Duplicate snapshot at index {i}",
+                    details={"index": i, "pair_id": snap.get("pair_id")},
+                )
+            )
         seen_hashes.add(h)
 
     dup_ratio = report.duplicate_count / max(1, len(snapshots))
     if dup_ratio > MAX_DUPLICATE_RATIO:
-        report.issues.append(QualityIssue(
-            category="duplicate",
-            severity="error",
-            message=f"Duplicate ratio {dup_ratio:.0%} exceeds threshold {MAX_DUPLICATE_RATIO:.0%}",
-            details={"duplicate_ratio": dup_ratio},
-        ))
+        report.issues.append(
+            QualityIssue(
+                category="duplicate",
+                severity="error",
+                message=(
+                    f"Duplicate ratio {dup_ratio:.0%} exceeds threshold {MAX_DUPLICATE_RATIO:.0%}"
+                ),
+                details={"duplicate_ratio": dup_ratio},
+            )
+        )
 
     if report.ok:
         log.info("data_quality_check", checked=report.checked, result="ok")

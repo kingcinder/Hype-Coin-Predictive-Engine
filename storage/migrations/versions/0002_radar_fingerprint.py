@@ -34,9 +34,7 @@ def upgrade() -> None:
         if "role" not in columns:
             op.add_column(
                 "wallet_cluster_members",
-                sa.Column(
-                    "role", sa.String(length=32), nullable=False, server_default="unknown"
-                ),
+                sa.Column("role", sa.String(length=32), nullable=False, server_default="unknown"),
             )
 
     if "ignition_events" not in tables:

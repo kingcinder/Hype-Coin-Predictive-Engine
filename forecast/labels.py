@@ -43,11 +43,7 @@ class LabelEngine:
                 rows = point_in_time_market_rows(
                     session, asset_id=asset_id, decision_ts=decision_ts
                 )
-                rows = [
-                    row
-                    for row in rows
-                    if row.price_usd is not None and row.price_usd > 0
-                ]
+                rows = [row for row in rows if row.price_usd is not None and row.price_usd > 0]
                 for index, decision_row in enumerate(rows):
                     decision = ensure_utc(decision_row.ts)
                     if decision + window > decision_ts:
@@ -58,8 +54,7 @@ class LabelEngine:
                     future = [
                         float(row.price_usd)
                         for row in rows[index + 1 :]
-                        if row.price_usd is not None
-                        and ensure_utc(row.ts) <= decision + window
+                        if row.price_usd is not None and ensure_utc(row.ts) <= decision + window
                     ]
                     if not future:
                         continue
@@ -230,7 +225,9 @@ def seed_labels_at_feature_timestamps(
                 continue
             # Skip if labels already exist at this timestamp
             existing = session.scalar(
-                select(func.count()).select_from(models.Label).where(
+                select(func.count())
+                .select_from(models.Label)
+                .where(
                     models.Label.asset_id == asset_id,
                     models.Label.ts == feature_ts,
                 )

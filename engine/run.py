@@ -178,6 +178,7 @@ def main() -> None:
                     now_mono = time.monotonic()
                     if (now_mono - _last_nc_run_monotonic) >= nc_interval_sec:
                         from crawlers.pipeline import run_nightcrawler_pipeline
+
                         with SessionLocal() as session:
                             nc_result = run_nightcrawler_pipeline(session)
                             session.commit()
@@ -195,6 +196,7 @@ def main() -> None:
             try:
                 if settings.data_lake_enabled:
                     from data_lake.manager import run_data_lake_pass
+
                     with SessionLocal() as session:
                         dl_result = run_data_lake_pass(session)
                         session.commit()
@@ -211,6 +213,7 @@ def main() -> None:
         # Clean up Night Crawler HTTP clients
         try:
             from crawlers.orchestrator import close_nightcrawler_orchestrator
+
             close_nightcrawler_orchestrator()
         except Exception:
             pass

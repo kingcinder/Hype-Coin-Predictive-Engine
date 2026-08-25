@@ -71,8 +71,7 @@ class NtfyNotifier:
                 models.Alert.notified_at.is_(None),
                 models.Alert.state == AlertState.OPEN.value,
                 models.Alert.created_at >= backlog_start,
-                models.Alert.snoozed_until.is_(None)
-                | (models.Alert.snoozed_until <= decision_ts),
+                models.Alert.snoozed_until.is_(None) | (models.Alert.snoozed_until <= decision_ts),
             )
         ).all()
         sent = 0
@@ -209,8 +208,7 @@ class NtfyNotifier:
                 asset = session.get(models.Asset, lifecycle_event.asset_id)
                 symbol = asset.symbol if asset else "?"
                 evidence = ", ".join(
-                    f"{key}={value}"
-                    for key, value in (lifecycle_event.details or {}).items()
+                    f"{key}={value}" for key, value in (lifecycle_event.details or {}).items()
                 )
                 suffix = f" | {evidence}" if evidence else ""
                 lines.append(
@@ -279,12 +277,8 @@ class NtfyNotifier:
     def _post(self, message: str, headers: dict[str, str]) -> None:
         base_url = self.settings.ntfy_base_url.rstrip("/")
         topic = self.settings.ntfy_topic.strip("/")
-        with httpx.Client(
-            base_url=base_url, timeout=self.settings.ntfy_timeout_seconds
-        ) as client:
-            response = client.post(
-                f"/{topic}", content=message.encode("utf-8"), headers=headers
-            )
+        with httpx.Client(base_url=base_url, timeout=self.settings.ntfy_timeout_seconds) as client:
+            response = client.post(f"/{topic}", content=message.encode("utf-8"), headers=headers)
             response.raise_for_status()
 
 
@@ -503,7 +497,5 @@ def notify_calibration_bias(
         return False
 
 
-def run_notifier(
-    session: Session, *, decision_ts: datetime | None = None
-) -> dict[str, Any]:
+def run_notifier(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:
     return NtfyNotifier().flush(session, decision_ts=decision_ts)

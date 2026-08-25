@@ -4,6 +4,7 @@ Computes holder_count and holder_growth from actual on-chain data:
 - Solana: getTokenLargestAccounts for top holder concentration
 - EVM: Transfer event logs for unique holder estimation
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ log = get_logger(__name__)
 @dataclass
 class HolderSnapshot:
     """Holder metrics for a token at a point in time."""
+
     holder_count: int | None = None
     top_holder_concentration: float | None = None  # % held by top 10
     holder_growth: float | None = None  # delta from previous scan

@@ -4,6 +4,7 @@ DeFiLlama is the authoritative source for DeFi TVL data. This crawler
 tracks TVL changes, new protocol launches, and yield opportunities that
 signal emerging hype coins in the DeFi space.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -48,27 +49,28 @@ class DeFiLlamaCrawler(BaseCrawler):
                 change_1d = float(proto.get("change_1d") or 0)
                 if abs(change_1d) < 5:
                     continue  # Skip low-change protocols
-                items.append({
-                    "title": proto.get("name", ""),
-                    "text": f"{proto.get('name', '')} TVL changed "
-                    f"{change_1d:.1f}% in 24h",
-                    "url": proto.get(
-                        "url", f"https://defillama.com/protocol/{proto.get('slug', '')}"
-                    ),
-                    "published": utc_now(),
-                    "source_domain": "defillama.com",
-                    "source_type": "defi_data",
-                    "metrics": {
-                        "slug": proto.get("slug"),
-                        "tvl": proto.get("tvl"),
-                        "change_1d": change_1d,
-                        "change_7d": float(proto.get("change_7d") or 0),
-                        "chains": proto.get("chains", []),
-                        "category": proto.get("category"),
-                        "chain": proto.get("chain"),
-                        "mcap": proto.get("mcap"),
-                    },
-                })
+                items.append(
+                    {
+                        "title": proto.get("name", ""),
+                        "text": f"{proto.get('name', '')} TVL changed {change_1d:.1f}% in 24h",
+                        "url": proto.get(
+                            "url", f"https://defillama.com/protocol/{proto.get('slug', '')}"
+                        ),
+                        "published": utc_now(),
+                        "source_domain": "defillama.com",
+                        "source_type": "defi_data",
+                        "metrics": {
+                            "slug": proto.get("slug"),
+                            "tvl": proto.get("tvl"),
+                            "change_1d": change_1d,
+                            "change_7d": float(proto.get("change_7d") or 0),
+                            "chains": proto.get("chains", []),
+                            "category": proto.get("category"),
+                            "chain": proto.get("chain"),
+                            "mcap": proto.get("mcap"),
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -79,22 +81,24 @@ class DeFiLlamaCrawler(BaseCrawler):
             data = self.client.get(f"{self.BASE_URL}/tvl/gainers").json()
             items = []
             for proto in (data if isinstance(data, list) else [])[:20]:
-                items.append({
-                    "title": proto.get("name", ""),
-                    "text": f"{proto.get('name', '')} TVL gainer: "
-                    f"{proto.get('change_1d', 0):.1f}% daily",
-                    "url": f"https://defillama.com/protocol/{proto.get('slug', '')}",
-                    "published": utc_now(),
-                    "source_domain": "defillama.com",
-                    "source_type": "defi_data",
-                    "metrics": {
-                        "slug": proto.get("slug"),
-                        "tvl": proto.get("tvl"),
-                        "change_1d": proto.get("change_1d"),
-                        "category": proto.get("category"),
-                        "tvl_gainer": True,
-                    },
-                })
+                items.append(
+                    {
+                        "title": proto.get("name", ""),
+                        "text": f"{proto.get('name', '')} TVL gainer: "
+                        f"{proto.get('change_1d', 0):.1f}% daily",
+                        "url": f"https://defillama.com/protocol/{proto.get('slug', '')}",
+                        "published": utc_now(),
+                        "source_domain": "defillama.com",
+                        "source_type": "defi_data",
+                        "metrics": {
+                            "slug": proto.get("slug"),
+                            "tvl": proto.get("tvl"),
+                            "change_1d": proto.get("change_1d"),
+                            "category": proto.get("category"),
+                            "tvl_gainer": True,
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -106,32 +110,34 @@ class DeFiLlamaCrawler(BaseCrawler):
             pools = (data.get("data") or []) if isinstance(data, dict) else []
             # Filter for high-APY pools with meaningful TVL
             high_yield = [
-                p for p in pools
-                if float(p.get("apy") or 0) > 50
-                and float(p.get("tvlUsd") or 0) > 100000
+                p
+                for p in pools
+                if float(p.get("apy") or 0) > 50 and float(p.get("tvlUsd") or 0) > 100000
             ][:20]
             items = []
             for pool in high_yield:
-                items.append({
-                    "title": pool.get("project", ""),
-                    "text": f"{pool.get('project', '')} {pool.get('symbol', '')} yields "
-                    f"{float(pool.get('apy', 0)):.1f}% APY",
-                    "url": f"https://defillama.com/yields/pool/{pool.get('pool', '')}",
-                    "published": utc_now(),
-                    "source_domain": "defillama.com",
-                    "source_type": "yield_data",
-                    "metrics": {
-                        "pool": pool.get("pool"),
-                        "project": pool.get("project"),
-                        "symbol": pool.get("symbol"),
-                        "chain": pool.get("chain"),
-                        "apy": float(pool.get("apy") or 0),
-                        "tvl_usd": float(pool.get("tvlUsd") or 0),
-                        "apy_base": pool.get("apyBase"),
-                        "apy_reward": pool.get("apyReward"),
-                        "stablecoin": pool.get("stablecoin", False),
-                    },
-                })
+                items.append(
+                    {
+                        "title": pool.get("project", ""),
+                        "text": f"{pool.get('project', '')} {pool.get('symbol', '')} yields "
+                        f"{float(pool.get('apy', 0)):.1f}% APY",
+                        "url": f"https://defillama.com/yields/pool/{pool.get('pool', '')}",
+                        "published": utc_now(),
+                        "source_domain": "defillama.com",
+                        "source_type": "yield_data",
+                        "metrics": {
+                            "pool": pool.get("pool"),
+                            "project": pool.get("project"),
+                            "symbol": pool.get("symbol"),
+                            "chain": pool.get("chain"),
+                            "apy": float(pool.get("apy") or 0),
+                            "tvl_usd": float(pool.get("tvlUsd") or 0),
+                            "apy_base": pool.get("apyBase"),
+                            "apy_reward": pool.get("apyReward"),
+                            "stablecoin": pool.get("stablecoin", False),
+                        },
+                    }
+                )
             return items
         except Exception:
             return []

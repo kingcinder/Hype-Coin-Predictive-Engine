@@ -147,9 +147,7 @@ class IgnitionRadar:
         ratio = buys / max(1.0, float(sells))
         if ratio < self.settings.radar_sniper_min_buy_sell_ratio:
             return False
-        confidence = min(
-            0.9, 0.4 + 0.08 * math.log2(max(buys, 2.0)) + 0.05 * (ratio - 2.5)
-        )
+        confidence = min(0.9, 0.4 + 0.08 * math.log2(max(buys, 2.0)) + 0.05 * (ratio - 2.5))
         details: dict[str, Any] = {
             "buys": buys,
             "sells": sells,
@@ -206,7 +204,10 @@ class IgnitionRadar:
                     continue
                 outflow = prev_usd - curr_usd
                 volume = self._volume_between(
-                    session, pair_ids=pair_ids, start=previous.ts, end=current.ts,
+                    session,
+                    pair_ids=pair_ids,
+                    start=previous.ts,
+                    end=current.ts,
                     decision_ts=decision_ts,
                 )
                 if volume >= outflow * self.settings.radar_withdrawal_volume_fraction:
@@ -306,6 +307,7 @@ class IgnitionRadar:
         if existing:
             return
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(session, alert_type, self.settings):
             return
         session.add(
@@ -331,9 +333,7 @@ class IgnitionRadar:
 
     def _asset_pair_ids(self, session: Session, asset_id: int) -> list[int]:
         return list(
-            session.scalars(
-                select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
-            )
+            session.scalars(select(models.Pair.id).where(models.Pair.base_asset_id == asset_id))
         )
 
     def _sum_txns(

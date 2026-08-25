@@ -91,9 +91,7 @@ def _git_sha() -> str | None:
         return None
 
 
-def _entry_price(
-    session: Session, *, asset_id: int, decision_ts: datetime
-) -> float | None:
+def _entry_price(session: Session, *, asset_id: int, decision_ts: datetime) -> float | None:
     pair_ids = session.scalars(
         select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
     ).all()
@@ -150,9 +148,7 @@ def _crossing_minutes(
     """Minutes from the transition until the price first crosses the target."""
     threshold = entry * (1.0 + target_pct / 100.0)
     for ts, price in rows:
-        if (target_pct >= 0 and price >= threshold) or (
-            target_pct < 0 and price <= threshold
-        ):
+        if (target_pct >= 0 and price >= threshold) or (target_pct < 0 and price <= threshold):
             return max(0.0, (ts - decision_ts).total_seconds() / 60.0)
     return None
 
@@ -164,9 +160,7 @@ class LifecycleBacktestRunner:
         self.settings = get_settings()
         self.engine = LifecycleEngine()
 
-    def run(
-        self, session: Session, config: LifecycleBacktestConfig
-    ) -> models.BacktestRun:
+    def run(self, session: Session, config: LifecycleBacktestConfig) -> models.BacktestRun:
         start = ensure_utc(config.start)
         end = ensure_utc(config.end)
         run = models.BacktestRun(
@@ -223,9 +217,13 @@ class LifecycleBacktestRunner:
                     unevaluated += 1
 
         self._persist_metrics(
-            session, run=run, ignition=ignition, collapse=collapse,
+            session,
+            run=run,
+            ignition=ignition,
+            collapse=collapse,
             assets_with_transitions=len(assets_with_transitions),
-            steps=steps, unevaluated=unevaluated,
+            steps=steps,
+            unevaluated=unevaluated,
         )
         run.status = "completed"
         session.flush()
@@ -310,12 +308,8 @@ class LifecycleBacktestRunner:
         metrics["lifecycle.overall.false_alarm_rate"] = (
             round(1.0 - combined_tp / combined, 4) if combined else 0.0
         )
-        metrics["lifecycle.overall.median_ignition_lead_minutes"] = round(
-            ignition.median_lead(), 2
-        )
-        metrics["lifecycle.overall.median_collapse_lead_minutes"] = round(
-            collapse.median_lead(), 2
-        )
+        metrics["lifecycle.overall.median_ignition_lead_minutes"] = round(ignition.median_lead(), 2)
+        metrics["lifecycle.overall.median_collapse_lead_minutes"] = round(collapse.median_lead(), 2)
         for name, value in metrics.items():
             session.add(
                 models.BacktestResult(
@@ -350,9 +344,7 @@ def run_lifecycle_backtest(
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Walk-forward lifecycle state-machine backtest"
-    )
+    parser = argparse.ArgumentParser(description="Walk-forward lifecycle state-machine backtest")
     parser.add_argument("--start", required=True, help="ISO datetime, e.g. 2026-05-01T00:00:00Z")
     parser.add_argument("--end", help="ISO datetime (default: now)")
     parser.add_argument("--step-hours", type=int, default=6)
@@ -362,9 +354,7 @@ def main() -> None:
     from storage.database import SessionLocal
 
     start = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
-    end = (
-        datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else None
-    )
+    end = datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else None
     with SessionLocal() as session:
         run = run_lifecycle_backtest(
             session,

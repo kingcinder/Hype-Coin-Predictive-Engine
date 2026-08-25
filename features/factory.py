@@ -183,18 +183,14 @@ def compute_market_block(
     return {value.name: value for value in values}
 
 
-def _venue_agreement(
-    market_rows: Sequence[Any], decision_ts: datetime
-) -> float | None:
+def _venue_agreement(market_rows: Sequence[Any], decision_ts: datetime) -> float | None:
     latest_by_pair: dict[int, Any] = {}
     for row in market_rows:
         if ensure_utc(row.ts) <= ensure_utc(decision_ts) and row.price_usd is not None:
             current = latest_by_pair.get(row.pair_id)
             if current is None or ensure_utc(row.ts) > ensure_utc(current.ts):
                 latest_by_pair[row.pair_id] = row
-    prices = [
-        _safe_float(row.price_usd, 0.0) for row in latest_by_pair.values() if row.price_usd
-    ]
+    prices = [_safe_float(row.price_usd, 0.0) for row in latest_by_pair.values() if row.price_usd]
     if len(prices) < 2:
         return 100.0 if len(prices) == 1 else None
     avg = float(np.mean(prices))
@@ -270,9 +266,7 @@ class FeatureFactory:
         mention_velocity, narrative_acceleration = self._attention_features(
             session, asset, decision_ts
         )
-        ignition_signal, withdrawal_signal = self._ignition_features(
-            session, asset.id, decision_ts
-        )
+        ignition_signal, withdrawal_signal = self._ignition_features(session, asset.id, decision_ts)
         lp_removal_signal = self._lp_removal_signal(session, asset.id, decision_ts)
         recidivism = self._recidivism_feature(session, asset.id, decision_ts)
         prelaunch_priority = self._prelaunch_feature(session, asset, decision_ts)
@@ -483,38 +477,42 @@ class FeatureFactory:
         self, session: Session, asset_id: int, decision_ts: datetime
     ) -> tuple[float, float]:
         window_start = decision_ts - timedelta(hours=24)
-        ignition_count = session.scalar(
-            select(func.count())
-            .select_from(models.IgnitionEvent)
-            .where(
-                models.IgnitionEvent.asset_id == asset_id,
-                models.IgnitionEvent.event_type.in_(
-                    [
-                        IgnitionEventType.FIRST_LIQUIDITY_INJECTION.value,
-                        IgnitionEventType.SNIPER_BURST.value,
-                    ]
-                ),
-                models.IgnitionEvent.ts >= window_start,
-                models.IgnitionEvent.ts <= decision_ts,
-                models.IgnitionEvent.observed_at <= decision_ts,
+        ignition_count = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.IgnitionEvent)
+                .where(
+                    models.IgnitionEvent.asset_id == asset_id,
+                    models.IgnitionEvent.event_type.in_(
+                        [
+                            IgnitionEventType.FIRST_LIQUIDITY_INJECTION.value,
+                            IgnitionEventType.SNIPER_BURST.value,
+                        ]
+                    ),
+                    models.IgnitionEvent.ts >= window_start,
+                    models.IgnitionEvent.ts <= decision_ts,
+                    models.IgnitionEvent.observed_at <= decision_ts,
+                )
             )
-        ) or 0
-        withdrawal_count = session.scalar(
-            select(func.count())
-            .select_from(models.IgnitionEvent)
-            .where(
-                models.IgnitionEvent.asset_id == asset_id,
-                models.IgnitionEvent.event_type == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
-                models.IgnitionEvent.ts >= window_start,
-                models.IgnitionEvent.ts <= decision_ts,
-                models.IgnitionEvent.observed_at <= decision_ts,
+            or 0
+        )
+        withdrawal_count = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.IgnitionEvent)
+                .where(
+                    models.IgnitionEvent.asset_id == asset_id,
+                    models.IgnitionEvent.event_type == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
+                    models.IgnitionEvent.ts >= window_start,
+                    models.IgnitionEvent.ts <= decision_ts,
+                    models.IgnitionEvent.observed_at <= decision_ts,
+                )
             )
-        ) or 0
+            or 0
+        )
         return (1.0 if ignition_count else 0.0), float(withdrawal_count)
 
-    def _lp_removal_signal(
-        self, session: Session, asset_id: int, decision_ts: datetime
-    ) -> float:
+    def _lp_removal_signal(self, session: Session, asset_id: int, decision_ts: datetime) -> float:
         """Count fresh on-chain LP burns/withdrawals before this decision."""
         count = session.scalar(
             select(func.count())
@@ -675,9 +673,7 @@ class FeatureFactory:
 
         # --- star / download velocity: cumulative-metric delta per repo -------
         def _cumulative_rate(source_name: str, metric_key: str) -> float | None:
-            source = session.scalar(
-                select(models.Source).where(models.Source.name == source_name)
-            )
+            source = session.scalar(select(models.Source).where(models.Source.name == source_name))
             if source is None:
                 return None
             relevant_urls = {
@@ -838,6 +834,7 @@ class FeatureFactory:
             1.0, float(previous_count or 0)
         )
         return velocity, acceleration
+
 
 def build_and_persist_features(
     session: Session,

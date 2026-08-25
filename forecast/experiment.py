@@ -23,9 +23,7 @@ def main() -> None:
         else None
     )
     with SessionLocal() as session:
-        result = ForecastEngine().run_velocity_ab_experiment(
-            session, decision_ts=decision_ts
-        )
+        result = ForecastEngine().run_velocity_ab_experiment(session, decision_ts=decision_ts)
         session.commit()
     print(json.dumps(result, default=str, indent=2, sort_keys=True))
 

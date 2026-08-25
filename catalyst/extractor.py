@@ -62,9 +62,7 @@ def extract_scheduled_at(text: str, observed_at: datetime) -> datetime | None:
     return None
 
 
-def extract_catalysts(
-    session: Session, *, decision_ts: datetime | None = None
-) -> int:
+def extract_catalysts(session: Session, *, decision_ts: datetime | None = None) -> int:
     decision_ts = ensure_utc(decision_ts or utc_now())
     created = 0
     try:
@@ -127,9 +125,7 @@ def _resolve_asset_for_title(session: Session, title: str) -> models.Asset | Non
     return None
 
 
-def alert_upcoming_catalysts(
-    session: Session, *, decision_ts: datetime | None = None
-) -> int:
+def alert_upcoming_catalysts(session: Session, *, decision_ts: datetime | None = None) -> int:
     """Raise UPCOMING_CATALYST alerts for catalysts scheduled within the window."""
     settings = get_settings()
     decision_ts = ensure_utc(decision_ts or utc_now())
@@ -162,6 +158,7 @@ def alert_upcoming_catalysts(
             (ensure_utc(scheduled_at) - decision_ts).total_seconds() / 3600.0,
         )
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(session, AlertType.UPCOMING_CATALYST.value, settings):
             continue
         session.add(

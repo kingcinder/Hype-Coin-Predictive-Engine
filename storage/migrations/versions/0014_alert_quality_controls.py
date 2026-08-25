@@ -1,4 +1,5 @@
 """Add alert quality quieting controls."""
+
 from __future__ import annotations
 
 import sqlalchemy as sa

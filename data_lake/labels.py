@@ -11,6 +11,7 @@ labels (currently 4). This module densifies the label generation by:
 
 This should increase label count from 4 to 30+ quickly.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -30,9 +31,7 @@ LABEL_IGNITION = "ignition"
 LABEL_COLLAPSE = "collapse"
 
 
-def _interpolate_price(
-    snapshots: list[models.MarketSnapshot], target_ts: datetime
-) -> float | None:
+def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: datetime) -> float | None:
     """Linearly interpolate price at target_ts from surrounding snapshots."""
     if not snapshots:
         return None
@@ -132,7 +131,7 @@ def generate_dense_labels(
         # excessive iteration on long histories (max 7 days of history).
         max_hours = min(
             int((last_ts - first_ts).total_seconds() / 3600.0),
-            168  # 7 days max
+            168,  # 7 days max
         )
         current = first_ts
         hour_count = 0
@@ -246,43 +245,61 @@ def label_generation_progress(session: Session) -> dict[str, Any]:
 
     # Count existing labels
     total_labels = session.scalar(select(func.count()).select_from(models.Label)) or 0
-    ignition_1 = session.scalar(
-        select(func.count()).select_from(models.Label).where(
-            models.Label.label_type == LABEL_IGNITION,
-            models.Label.label_value == "1",
+    ignition_1 = (
+        session.scalar(
+            select(func.count())
+            .select_from(models.Label)
+            .where(
+                models.Label.label_type == LABEL_IGNITION,
+                models.Label.label_value == "1",
+            )
         )
-    ) or 0
-    ignition_0 = session.scalar(
-        select(func.count()).select_from(models.Label).where(
-            models.Label.label_type == LABEL_IGNITION,
-            models.Label.label_value == "0",
+        or 0
+    )
+    ignition_0 = (
+        session.scalar(
+            select(func.count())
+            .select_from(models.Label)
+            .where(
+                models.Label.label_type == LABEL_IGNITION,
+                models.Label.label_value == "0",
+            )
         )
-    ) or 0
-    collapse_1 = session.scalar(
-        select(func.count()).select_from(models.Label).where(
-            models.Label.label_type == LABEL_COLLAPSE,
-            models.Label.label_value == "1",
+        or 0
+    )
+    collapse_1 = (
+        session.scalar(
+            select(func.count())
+            .select_from(models.Label)
+            .where(
+                models.Label.label_type == LABEL_COLLAPSE,
+                models.Label.label_value == "1",
+            )
         )
-    ) or 0
-    collapse_0 = session.scalar(
-        select(func.count()).select_from(models.Label).where(
-            models.Label.label_type == LABEL_COLLAPSE,
-            models.Label.label_value == "0",
+        or 0
+    )
+    collapse_0 = (
+        session.scalar(
+            select(func.count())
+            .select_from(models.Label)
+            .where(
+                models.Label.label_type == LABEL_COLLAPSE,
+                models.Label.label_value == "0",
+            )
         )
-    ) or 0
+        or 0
+    )
 
     min_samples = settings.forecast_min_samples
     progress_pct = min(100.0, (total_labels / max(1, min_samples)) * 100.0)
 
     # Count unique assets with labels
-    unique_assets = session.scalar(
-        select(func.count(func.distinct(models.Label.asset_id)))
-    ) or 0
+    unique_assets = session.scalar(select(func.count(func.distinct(models.Label.asset_id)))) or 0
 
     # Count assets with market snapshots (potential label sources)
-    assets_with_snapshots = session.scalar(
-        select(func.count(func.distinct(models.MarketSnapshot.pair_id)))
-    ) or 0
+    assets_with_snapshots = (
+        session.scalar(select(func.count(func.distinct(models.MarketSnapshot.pair_id)))) or 0
+    )
 
     return {
         "total_labels": total_labels,

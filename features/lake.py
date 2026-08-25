@@ -443,9 +443,7 @@ class LakeFeatureFactory:
         self, recon: LakeReconstruction, decision_ts: datetime
     ) -> dict[str, FeatureValue]:
         """Turn one asset's reconstruction into the FeatureValue set."""
-        asset = SimpleNamespace(
-            first_seen_at=recon.pair_created_at or ensure_utc(decision_ts)
-        )
+        asset = SimpleNamespace(first_seen_at=recon.pair_created_at or ensure_utc(decision_ts))
         pairs = (
             [SimpleNamespace(created_at_source=recon.pair_created_at)]
             if recon.pair_created_at is not None
@@ -505,20 +503,17 @@ class LakeFeatureFactory:
         assets = session.scalars(stmt).all()
         if not assets:
             return {}
-        values_by_asset = self.build_for_assets(
-            [asset.address for asset in assets], decision_ts
-        )
+        values_by_asset = self.build_for_assets([asset.address for asset in assets], decision_ts)
         output: dict[int, dict[str, FeatureValue]] = {}
         for asset in assets:
             values = values_by_asset[asset.address]
             covered = [
-                value for value in values.values()
-                if value.name != "suspicious_contract_flags"
+                value for value in values.values() if value.name != "suspicious_contract_flags"
             ]
             has_tradable_pair = session.scalar(
-                select(func.count()).select_from(models.Pair).where(
-                    models.Pair.base_asset_id == asset.id
-                )
+                select(func.count())
+                .select_from(models.Pair)
+                .where(models.Pair.base_asset_id == asset.id)
             )
             if has_tradable_pair and covered and all(value.missing for value in covered):
                 raise RuntimeError(
@@ -540,18 +535,12 @@ class LakeFeatureFactory:
                 )
         return output
 
-    def _series_from_lake(
-        self, asset_address: str, decision_ts: datetime
-    ) -> LakeMarketSeries:
+    def _series_from_lake(self, asset_address: str, decision_ts: datetime) -> LakeMarketSeries:
         """Reconstruct the normalized market/liquidity series via DuckDB."""
         recon = self._reconstruct(asset_address, decision_ts)
-        return LakeMarketSeries(
-            recon.market_rows, recon.liquidity_rows, recon.pair_created_at
-        )
+        return LakeMarketSeries(recon.market_rows, recon.liquidity_rows, recon.pair_created_at)
 
-    def _reconstruct(
-        self, asset_address: str, decision_ts: datetime
-    ) -> LakeReconstruction:
+    def _reconstruct(self, asset_address: str, decision_ts: datetime) -> LakeReconstruction:
         """Reconstruct for an asset at a decision time, serving the
         ``(asset, hour)`` cache when the decision lands on an hour boundary.
 
@@ -616,22 +605,14 @@ class LakeFeatureFactory:
                 files.append(str(dest))
             con = duckdb.connect()
             try:
-                market_by_asset = self._market_series_batch(
-                    con, files, addresses, naive_ts
-                )
-                holder_by_asset = self._holder_features_batch(
-                    con, files, addresses, naive_ts
-                )
-                flag_by_asset = self._flag_count_batch(
-                    con, files, addresses, naive_ts
-                )
+                market_by_asset = self._market_series_batch(con, files, addresses, naive_ts)
+                holder_by_asset = self._holder_features_batch(con, files, addresses, naive_ts)
+                flag_by_asset = self._flag_count_batch(con, files, addresses, naive_ts)
             finally:
                 con.close()
         out: dict[str, LakeReconstruction] = {}
         for address in addresses:
-            market_rows, liquidity_rows, pair_created = market_by_asset.get(
-                address, ([], [], None)
-            )
+            market_rows, liquidity_rows, pair_created = market_by_asset.get(address, ([], [], None))
             holder_count, holder_growth, concentration = holder_by_asset.get(
                 address, (None, None, None)
             )
@@ -654,9 +635,7 @@ class LakeFeatureFactory:
         naive_ts: datetime,
     ) -> tuple[list[SimpleNamespace], list[SimpleNamespace], datetime | None]:
         """Single-asset wrapper over the batched market-series reconstruction."""
-        return self._market_series_batch(con, files, [asset_address], naive_ts)[
-            asset_address
-        ]
+        return self._market_series_batch(con, files, [asset_address], naive_ts)[asset_address]
 
     def _market_series_batch(
         self,
@@ -678,9 +657,9 @@ class LakeFeatureFactory:
             },
         ).fetchall()
         columns = [description[0] for description in con.description]
-        out: dict[
-            str, tuple[list[SimpleNamespace], list[SimpleNamespace], datetime | None]
-        ] = {address: ([], [], None) for address in addresses}
+        out: dict[str, tuple[list[SimpleNamespace], list[SimpleNamespace], datetime | None]] = {
+            address: ([], [], None) for address in addresses
+        }
         for values in rows:
             record = dict(zip(columns, values, strict=True))
             address = str(record["base_address"])
@@ -728,9 +707,7 @@ class LakeFeatureFactory:
         naive_ts: datetime,
     ) -> tuple[float | None, float | None, float | None]:
         """Single-asset wrapper over the batched holder reconstruction."""
-        return self._holder_features_batch(con, files, [asset_address], naive_ts)[
-            asset_address
-        ]
+        return self._holder_features_batch(con, files, [asset_address], naive_ts)[asset_address]
 
     def _holder_features_batch(
         self,
@@ -814,9 +791,7 @@ class LakeFeatureFactory:
         naive_ts: datetime,
     ) -> float:
         """Single-asset wrapper over the batched flag count."""
-        return self._flag_count_batch(con, files, [asset_address], naive_ts)[
-            asset_address
-        ]
+        return self._flag_count_batch(con, files, [asset_address], naive_ts)[asset_address]
 
     def _flag_count_batch(
         self,

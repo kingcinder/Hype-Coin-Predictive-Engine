@@ -196,15 +196,11 @@ class IngestionService:
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
             result["holder_snapshots"] += self._ingest_evm_holder_snapshots(session)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
-            result["lp_removals"] = LiquidityRemovalWatcher().scan(
-                session, decision_ts=decision_ts
-            )
+            result["lp_removals"] = LiquidityRemovalWatcher().scan(session, decision_ts=decision_ts)
             result["prelaunch"] = len(PrelaunchQueue().scan(session, decision_ts=decision_ts))
             result["narrative"] = run_narrative(session, decision_ts=decision_ts)
             result["catalysts"] = extract_catalysts(session, decision_ts=decision_ts)
-            result["catalyst_alerts"] = alert_upcoming_catalysts(
-                session, decision_ts=decision_ts
-            )
+            result["catalyst_alerts"] = alert_upcoming_catalysts(session, decision_ts=decision_ts)
             radar_result = IgnitionRadar().scan(session, decision_ts=decision_ts)
             result["ignition_events"] = sum(radar_result.values())
             fingerprint = FingerprintEngine()
@@ -277,8 +273,11 @@ class IngestionService:
                 prelaunch=result.get("prelaunch", 0),
                 catalysts=result.get("catalysts", 0),
                 archive=_int_from_result(result.get("archive", 0)),
-                ntfy_sent=(result.get("ntfy", {}).get("sent", 0)
-                           if isinstance(result.get("ntfy"), dict) else 0),
+                ntfy_sent=(
+                    result.get("ntfy", {}).get("sent", 0)
+                    if isinstance(result.get("ntfy"), dict)
+                    else 0
+                ),
                 rpc_pool_notifications=result.get("rpc_pool_notifications", 0),
                 rpc_pool_snapshots=result.get("rpc_pool_snapshots", 0),
                 state="ok",
@@ -310,13 +309,15 @@ class IngestionService:
         ).all()
         snap_dicts: list[dict[str, Any]] = []
         for s in recent_snaps:
-            snap_dicts.append({
-                "pair_id": s.pair_id,
-                "price_usd": s.price_usd,
-                "ts": s.ts,
-                "source_id": s.source_id,
-                "volume_usd": s.volume_usd,
-            })
+            snap_dicts.append(
+                {
+                    "pair_id": s.pair_id,
+                    "price_usd": s.price_usd,
+                    "ts": s.ts,
+                    "source_id": s.source_id,
+                    "volume_usd": s.volume_usd,
+                }
+            )
         report = check_market_snapshots(snap_dicts, decision_ts=decision_ts)
         return {
             "checked": report.checked,
@@ -341,9 +342,7 @@ class IngestionService:
         never re-created.
         """
         # Find assets that don't yet have a contract_flag record
-        analyzed_ids = session.scalars(
-            select(models.ContractFlag.contract_id)
-        ).all()
+        analyzed_ids = session.scalars(select(models.ContractFlag.contract_id)).all()
         query = select(models.Asset).order_by(desc(models.Asset.created_at)).limit(10)
         if analyzed_ids:
             query = (
@@ -416,16 +415,18 @@ class IngestionService:
                     )
                 )
                 existing.add(flag_type)
-            results.append({
-                "asset_id": asset.id,
-                "address": asset.address,
-                "suspicious_flags": analysis.suspicious_flags,
-                "is_honeypot": analysis.is_honeypot,
-                "has_mint": analysis.has_mint_function,
-                "ownership_renounced": analysis.ownership_renounced,
-                "findings": findings,
-                "reasons": analysis.reasons,
-            })
+            results.append(
+                {
+                    "asset_id": asset.id,
+                    "address": asset.address,
+                    "suspicious_flags": analysis.suspicious_flags,
+                    "is_honeypot": analysis.is_honeypot,
+                    "has_mint": analysis.has_mint_function,
+                    "ownership_renounced": analysis.ownership_renounced,
+                    "findings": findings,
+                    "reasons": analysis.reasons,
+                }
+            )
         flagged = sum(1 for r in results if r["suspicious_flags"] > 0)
         return {"analyzed": len(results), "flagged": flagged}
 
@@ -434,7 +435,10 @@ class IngestionService:
         if "solana" not in self.settings.target_chains:
             return 0
         get_or_create_source(
-            session, name="birdeye", source_type="market_data", tier="venue",
+            session,
+            name="birdeye",
+            source_type="market_data",
+            tier="venue",
             base_url=BirdeyeClient.BASE_URL,
         )
         source = self._source(session, "birdeye")
@@ -443,8 +447,10 @@ class IngestionService:
         try:
             new_tokens = client.new_tokens(limit=20)
             store_raw_evidence(
-                session, source=source,
-                payload={"birdeye_new_tokens": new_tokens}, observed_at=utc_now(),
+                session,
+                source=source,
+                payload={"birdeye_new_tokens": new_tokens},
+                observed_at=utc_now(),
             )
             for token in new_tokens:
                 address = token.get("address") or ""
@@ -453,9 +459,7 @@ class IngestionService:
                 upsert_asset(
                     session,
                     chain_id=(
-                        solana_chain.id
-                        if (solana_chain := self._chain(session, "solana"))
-                        else 1
+                        solana_chain.id if (solana_chain := self._chain(session, "solana")) else 1
                     ),
                     address=address,
                     symbol=token.get("symbol") or "UNKNOWN",
@@ -464,13 +468,18 @@ class IngestionService:
                 )
                 count += 1
             record_health(
-                session, component="source:birdeye", state="ok",
+                session,
+                component="source:birdeye",
+                state="ok",
                 message=f"{count} new tokens",
             )
         except Exception as exc:  # noqa: BLE001
             record_health(
-                session, component="source:birdeye", state="red",
-                message=str(exc), error_count=1,
+                session,
+                component="source:birdeye",
+                state="red",
+                message=str(exc),
+                error_count=1,
             )
             log.warning("birdeye_ingestion_failed", error=str(exc))
         finally:
@@ -611,9 +620,7 @@ class IngestionService:
         chain = self._chain(session, "solana")
         if not chain:
             return 0
-        assets = self._holder_scan_assets(
-            session, chain.id, self.settings.solana_holder_scan_limit
-        )
+        assets = self._holder_scan_assets(session, chain.id, self.settings.solana_holder_scan_limit)
         if not assets:
             record_health(
                 session,
@@ -704,9 +711,7 @@ class IngestionService:
         ``top_holder_concentration`` for EVM assets exactly like Solana. One
         aggregate ``source:evm_holders`` health row covers both chains.
         """
-        evm_chains = [
-            slug for slug in ("base", "ethereum") if slug in self.settings.target_chains
-        ]
+        evm_chains = [slug for slug in ("base", "ethereum") if slug in self.settings.target_chains]
         if not evm_chains:
             return 0
         source = get_or_create_source(
@@ -771,8 +776,7 @@ class IngestionService:
                             )
                             count += 1
                         raw.raw_path = (
-                            raw.raw_path
-                            or f"evm_holder_snapshot:{asset.id}:{ts.isoformat()}"
+                            raw.raw_path or f"evm_holder_snapshot:{asset.id}:{ts.isoformat()}"
                         )
                     except Exception as exc:  # noqa: BLE001 - per-asset source failure.
                         errors.append(f"{chain_slug}:{asset.address}: {exc}")
@@ -949,9 +953,7 @@ def _analysis_findings(analysis: ContractAnalysis) -> list[dict[str, str]]:
     if analysis.has_pause_function:
         findings.append({"flag_type": "pause_function", "severity": "warning"})
     if analysis.ownership_renounced is False:
-        findings.append(
-            {"flag_type": "ownership_not_renounced", "severity": "warning"}
-        )
+        findings.append({"flag_type": "ownership_not_renounced", "severity": "warning"})
     if analysis.deployer_known_rug:
         findings.append({"flag_type": "rug_deployer", "severity": "critical"})
     return findings

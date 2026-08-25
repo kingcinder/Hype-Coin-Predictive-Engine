@@ -320,9 +320,7 @@ def alerts_view() -> None:
     m2.metric("Useful", ledger["useful"])
     m3.metric(
         "Useful rate",
-        f"{ledger['useful_rate']:.0%}"
-        if ledger.get("useful_rate") is not None
-        else "—",
+        f"{ledger['useful_rate']:.0%}" if ledger.get("useful_rate") is not None else "—",
     )
     if ledger.get("recent"):
         st.dataframe(
@@ -390,7 +388,7 @@ def live_ops_console() -> None:
         elif scan_state == "yellow":
             st.warning(f"Scan completed with warnings at {last_scan['ts']}")
         else:
-            error_msg = last_scan.get('error_message', 'unknown error')
+            error_msg = last_scan.get("error_message", "unknown error")
             st.error(f"Scan failed at {last_scan['ts']}: {error_msg}")
 
         duration = last_scan.get("duration_sec")
@@ -639,8 +637,7 @@ def forecast_view() -> None:
         return
     df = pd.DataFrame(data)
     st.caption(
-        "Calibrated 24h phase-transition probabilities. P(collapse) feeds RiskScore "
-        "and ExitRisk."
+        "Calibrated 24h phase-transition probabilities. P(collapse) feeds RiskScore and ExitRisk."
     )
     st.dataframe(
         df[
@@ -661,9 +658,7 @@ def forecast_view() -> None:
     )
 
     options = {
-        f"{row.symbol} | {row.chain} | collapse={row.p_collapse_24h:.1%} | id={row.id}": int(
-            row.id
-        )
+        f"{row.symbol} | {row.chain} | collapse={row.p_collapse_24h:.1%} | id={row.id}": int(row.id)
         for row in df.itertuples(index=False)
     }
     selected_label = st.selectbox("Prediction explanation", list(options.keys()))
@@ -814,9 +809,7 @@ def backtest_results() -> None:
         start = st.date_input("Start date")
         end = st.date_input("End date")
         top_k = st.number_input("Top K", min_value=1, max_value=200, value=10)
-        forward_hours = st.number_input(
-            "Forward hours", min_value=1, max_value=168, value=24
-        )
+        forward_hours = st.number_input("Forward hours", min_value=1, max_value=168, value=24)
         submitted = st.form_submit_button("Start backtest")
     if submitted:
         start_ts = pd.Timestamp(start).tz_localize("UTC").isoformat()
@@ -847,9 +840,7 @@ def backtest_results() -> None:
         metrics = run.get("metrics") or {}
         if metrics:
             st.dataframe(
-                pd.DataFrame(
-                    [{"metric": name, "value": value} for name, value in metrics.items()]
-                ),
+                pd.DataFrame([{"metric": name, "value": value} for name, value in metrics.items()]),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -857,9 +848,7 @@ def backtest_results() -> None:
             st.info("This run has no metrics yet.")
 
 
-def _lake_growth_frame(
-    runs: list[dict[str, Any]], growth: dict[str, Any]
-) -> pd.DataFrame:
+def _lake_growth_frame(runs: list[dict[str, Any]], growth: dict[str, Any]) -> pd.DataFrame:
     """DataFrame for the lake-growth trendline: observed points, the linear
     extrapolation to the projected full timestamp, and the capacity cap line."""
     rows = sorted(runs, key=lambda r: r["ts"])
@@ -887,9 +876,7 @@ def _lake_growth_frame(
         {
             "ts": proj_ts,
             "byte_size": [
-                last_bytes
-                + rate * (ts - last_ts).total_seconds() / 3600.0
-                for ts in proj_ts
+                last_bytes + rate * (ts - last_ts).total_seconds() / 3600.0 for ts in proj_ts
             ],
         }
     )
@@ -910,7 +897,7 @@ def archive_retention() -> None:
         "RETENTION_BUDGET_ALERT_DAYS fires a `lake_budget` ntfy warning. Run one "
         "pass by hand with `make retention`. Zero-container profile keeps the "
         "lake on local disk; the docker profile uses MinIO. Query the lake with "
-        "`python -m ops.archive --query \"SELECT ...\"`."
+        '`python -m ops.archive --query "SELECT ..."`.'
     )
     growth = api_get("/retention/growth", params={"limit": 30})
     if growth and growth.get("runs"):
@@ -972,9 +959,9 @@ def archive_retention() -> None:
     data = api_get("/archive/manifests", params={"limit": 200})
     if not data:
         st.info(
-        "No archive manifests yet. Run ingestion so raw evidence accumulates, then "
-        "`python -m ops.archive --once` (or let the retention autopilot compact "
-        "on its cadence — the worker never touches the archive)."
+            "No archive manifests yet. Run ingestion so raw evidence accumulates, then "
+            "`python -m ops.archive --once` (or let the retention autopilot compact "
+            "on its cadence — the worker never touches the archive)."
         )
         return
     df = pd.DataFrame(data)
@@ -1152,8 +1139,10 @@ def rpc_pool_status() -> None:
             use_container_width=True,
             hide_index=True,
         )
-        st.progress(min(1.0, max(0.0, 1.0 - chain["down_count"] / max(1, len(chain["endpoints"])))),
-            text="pool availability")
+        st.progress(
+            min(1.0, max(0.0, 1.0 - chain["down_count"] / max(1, len(chain["endpoints"])))),
+            text="pool availability",
+        )
 
 
 @st.fragment(run_every=NARRATIVE_DEV_ACTIVITY_REFRESH_SECONDS)
@@ -1192,11 +1181,7 @@ def narrative_dev_activity() -> None:
         st.caption(f"Latest feature snapshot: {latest_snapshot}")
     display = df.copy()
     display["kol"] = display.apply(
-        lambda row: (
-            "missing"
-            if row["kol_velocity_missing"]
-            else f"{row['kol_velocity']:.1f}"
-        ),
+        lambda row: "missing" if row["kol_velocity_missing"] else f"{row['kol_velocity']:.1f}",
         axis=1,
     )
     display["stars/day"] = display.apply(
@@ -1349,7 +1334,6 @@ def engine_control() -> None:
             st.success(f"✅ {result.get('message', 'Done')}")
 
 
-
 def data_lake_dashboard() -> None:
     """Data Lake dashboard: signal scoring, label progress, archive stats."""
     st.header("Data Lake Dashboard")
@@ -1416,14 +1400,16 @@ def data_lake_dashboard() -> None:
                 st.markdown("**Top Signals**")
                 signal_df = pd.DataFrame(top_signals)
                 st.dataframe(
-                    signal_df[[
-                        "source_table",
-                        "signal_score",
-                        "novelty_score",
-                        "magnitude_score",
-                        "actionable",
-                        "reasons",
-                    ]],
+                    signal_df[
+                        [
+                            "source_table",
+                            "signal_score",
+                            "novelty_score",
+                            "magnitude_score",
+                            "actionable",
+                            "reasons",
+                        ]
+                    ],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -1459,7 +1445,9 @@ def webhook_manager() -> None:
     with st.form("register_webhook"):
         col1, col2 = st.columns(2)
         with col1:
-            webhook_url = st.text_input("Webhook URL", placeholder="https://hooks.example.com/alerts")
+            webhook_url = st.text_input(
+                "Webhook URL", placeholder="https://hooks.example.com/alerts"
+            )
             webhook_name = st.text_input("Name", placeholder="my-alerts")
         with col2:
             webhook_events = st.multiselect(
@@ -1473,7 +1461,6 @@ def webhook_manager() -> None:
                 ],
                 default=["ignition_detected", "lifecycle_transition"],
             )
-
 
         if st.form_submit_button("Register Webhook"):
             if webhook_url and webhook_name:
@@ -1521,14 +1508,16 @@ def webhook_manager() -> None:
     if dispatches:
         df = pd.DataFrame(dispatches)
         st.dataframe(
-            df[[
-                "dispatched_at",
-                "event_type",
-                "success",
-                "status_code",
-                "duration_ms",
-                "error_message",
-            ]],
+            df[
+                [
+                    "dispatched_at",
+                    "event_type",
+                    "success",
+                    "status_code",
+                    "duration_ms",
+                    "error_message",
+                ]
+            ],
             use_container_width=True,
             hide_index=True,
         )
@@ -1616,10 +1605,7 @@ def confidence_dashboard() -> None:
             m_cols[1].metric(
                 "Real-only precision@10",
                 f"{real_precision:.3f}" if real_precision is not None else "—",
-                help=(
-                    "Test samples with observed labels only "
-                    f"({int(real_samples)} samples)."
-                ),
+                help=(f"Test samples with observed labels only ({int(real_samples)} samples)."),
             )
             m_cols[1].metric(
                 "Real-only calibration error",
@@ -1708,7 +1694,6 @@ def command_center() -> None:
     lifecycle = api_get("/lifecycle/current", params={"limit": 100}) or []
     pool = api_get("/rpc/pool") or []
 
-
     last_scan = (ops or {}).get("last_scan")
     pool_state = max((chain.get("state") for chain in pool), default="—")
 
@@ -1720,9 +1705,13 @@ def command_center() -> None:
     iterations = engine.get("total_iterations", 0) if engine else 0
 
     phase_colors = {
-        "idle": "🟢", "completed": "🟢", "scanning": "🔵",
-        "forecasting": "🔵", "retention": "🔵",
-        "bootstrapping": "🟡", "error": "🔴",
+        "idle": "🟢",
+        "completed": "🟢",
+        "scanning": "🔵",
+        "forecasting": "🔵",
+        "retention": "🔵",
+        "bootstrapping": "🟡",
+        "error": "🔴",
     }
     phase_emoji = phase_colors.get(phase, "⚪")
 
@@ -1731,7 +1720,7 @@ def command_center() -> None:
         "Engine",
         eng_status.upper(),
         help=f"{phase_emoji} Phase: {phase} · Iterations: {iterations}"
-            + (f" · Uptime: {uptime:.0f}s" if uptime else ""),
+        + (f" · Uptime: {uptime:.0f}s" if uptime else ""),
     )
     if phase in ("scanning", "forecasting", "retention", "bootstrapping"):
         eng_cols[1].metric("Phase", phase.upper(), help=scan_info.get("phase_message", ""))
@@ -1751,9 +1740,7 @@ def command_center() -> None:
     status_cols[0].metric("API", (health or {}).get("status", "down"))
     if last_scan:
         duration = last_scan.get("duration_sec")
-        help_text = (
-            f"{last_scan.get('ts')} · {duration:.1f}s" if duration is not None else "—"
-        )
+        help_text = f"{last_scan.get('ts')} · {duration:.1f}s" if duration is not None else "—"
         status_cols[1].metric("Last Scan", last_scan.get("state", "?"), help=help_text)
     else:
         status_cols[1].metric("Last Scan", "never")
@@ -1779,9 +1766,7 @@ def command_center() -> None:
             st.info("No research candidates yet.")
         else:
             st.dataframe(
-                research[
-                    ["symbol", "chain", "research_priority", "risk_band", "hype"]
-                ].head(6),
+                research[["symbol", "chain", "research_priority", "risk_band", "hype"]].head(6),
                 use_container_width=True,
                 hide_index=True,
                 height=220,
@@ -1841,9 +1826,7 @@ def command_center() -> None:
     st.markdown("**Recent alerts**")
     recent = (ops or {}).get("recent_alerts") or []
     if recent:
-        alerts_df = pd.DataFrame(recent)[
-            ["created_at", "alert_type", "symbol", "state"]
-        ].head(6)
+        alerts_df = pd.DataFrame(recent)[["created_at", "alert_type", "symbol", "state"]].head(6)
         st.dataframe(alerts_df, use_container_width=True, hide_index=True, height=220)
     else:
         st.info("No alerts have been pushed yet.")
@@ -1900,6 +1883,7 @@ def render_active_view(view: str) -> None:
 
 # ── SSE-injected live banner (shown at top of every page) ─────────────────
 
+
 def main() -> None:
     st.set_page_config(page_title="Serpent Circle Hype-Coin Engine", layout="wide")
     st.title("Serpent Circle Hype-Coin Engine")
@@ -1949,6 +1933,7 @@ def main() -> None:
         engine_control()
     elif view == "Night Crawlers":
         from ui.nightcrawler_view import nightcrawler_view
+
         nightcrawler_view()
     elif view == "Data Lake":
         data_lake_dashboard()

@@ -187,9 +187,7 @@ class ScoringEngine:
                 "previous": round(prior_value, 6),
                 "current": round(float(current_value), 6),
                 "delta": round(delta, 6),
-                "pct_delta": round((delta / prior_value) * 100.0, 4)
-                if prior_value != 0
-                else 0.0,
+                "pct_delta": round((delta / prior_value) * 100.0, 4) if prior_value != 0 else 0.0,
             }
         return dict(
             sorted(changed.items(), key=lambda item: abs(item[1]["delta"]), reverse=True)[:12]
@@ -219,6 +217,7 @@ class ScoringEngine:
         if existing:
             return
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(session, alert_type.value, self.settings):
             return
         session.add(

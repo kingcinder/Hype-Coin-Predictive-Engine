@@ -42,9 +42,10 @@ def test_sniper_burst_requires_buy_volume_and_ratio(session) -> None:
         pair_address="PairQuiet111111111111111111111111111111",
     )
     pair = session.scalar(
-        select(models.Pair).where(models.Pair.base_asset_id == session.scalar(
-            select(models.Asset.id).where(models.Asset.symbol == "QUIET")
-        ))
+        select(models.Pair).where(
+            models.Pair.base_asset_id
+            == session.scalar(select(models.Asset.id).where(models.Asset.symbol == "QUIET"))
+        )
     )
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     insert_market_snapshot_once(
@@ -74,9 +75,10 @@ def test_liquidity_withdrawal_detected_when_volume_cannot_explain_drop(session) 
         pair_address="PairWithdraw111111111111111111111111111",
     )
     pool = session.scalar(
-        select(models.Pool).where(models.Pool.base_asset_id == session.scalar(
-            select(models.Asset.id).where(models.Asset.symbol == "WDR")
-        ))
+        select(models.Pool).where(
+            models.Pool.base_asset_id
+            == session.scalar(select(models.Asset.id).where(models.Asset.symbol == "WDR"))
+        )
     )
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     insert_liquidity_snapshot_once(

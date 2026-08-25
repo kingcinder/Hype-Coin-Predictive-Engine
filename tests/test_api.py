@@ -26,9 +26,7 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         pair_address="Pair222222222222222222222222222222222222",
     )
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    score_current_assets(
-        session, decision_ts=decision_ts, asset_ids=[asset.id, similar_asset.id]
-    )
+    score_current_assets(session, decision_ts=decision_ts, asset_ids=[asset.id, similar_asset.id])
     IgnitionRadar().scan(session, decision_ts=decision_ts)
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     session.add(
@@ -115,9 +113,12 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         assert isinstance(client.get("/radar/prelaunch").json(), list)
         forecasts = client.get("/forecasts").json()
         assert isinstance(forecasts, list)
-        assert forecasts[0]["details"]["feature_contributions"]["github_star_velocity"][
-            "p_ignition_delta"
-        ] == 0.08
+        assert (
+            forecasts[0]["details"]["feature_contributions"]["github_star_velocity"][
+                "p_ignition_delta"
+            ]
+            == 0.08
+        )
         assert isinstance(client.get("/narrative/clusters").json(), list)
         assert isinstance(client.get("/catalysts").json(), list)
         manifests = client.get("/archive/manifests").json()
@@ -152,8 +153,7 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         )
         velocity = client.get("/features/velocity").json()
         assert any(
-            item["asset_id"] == asset.id
-            and item["github_star_velocity_missing"] is True
+            item["asset_id"] == asset.id and item["github_star_velocity_missing"] is True
             for item in velocity
         )
     finally:
@@ -471,10 +471,7 @@ def test_alert_ack_path_and_quality_ledger(session) -> None:
         assert response.status_code == 200
         assert response.json()["ack_quality"] == "noise"
         # Invalid quality and missing alerts are rejected.
-        assert (
-            client.post(f"/alerts/{alert.id}/ack", json={"quality": "meh"}).status_code
-            == 422
-        )
+        assert client.post(f"/alerts/{alert.id}/ack", json={"quality": "meh"}).status_code == 422
         assert client.post("/alerts/999999/ack", json={}).status_code == 404
         # The ledger reflects operator feedback.
         ledger = client.get("/alerts/quality").json()
@@ -493,9 +490,7 @@ def test_alert_ack_path_and_quality_ledger(session) -> None:
 
 def test_retention_growth_api_projects_disk_full_horizon(session, monkeypatch) -> None:
     decision_ts = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
-    for index, (days, size) in enumerate(
-        [(0, 1_000), (1, 2_000), (2, 4_000)]
-    ):
+    for index, (days, size) in enumerate([(0, 1_000), (1, 2_000), (2, 4_000)]):
         session.add(
             models.RetentionRun(
                 ts=decision_ts + timedelta(days=days),
@@ -624,9 +619,7 @@ def test_parity_mismatches_endpoint_returns_history(session) -> None:
         assert rows[1]["feature_name"] == "holder_count"
         assert rows[1]["lake_missing"] is True
         assert rows[1]["symbol"] == asset.symbol
-        filtered = client.get(
-            "/parity/mismatches", params={"feature": "holder_count"}
-        ).json()
+        filtered = client.get("/parity/mismatches", params={"feature": "holder_count"}).json()
         assert len(filtered) == 1
         assert filtered[0]["feature_name"] == "holder_count"
     finally:

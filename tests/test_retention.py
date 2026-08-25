@@ -58,9 +58,9 @@ def _seed_evidence(session, *, count: int = 2, days_ago: float = 11.0, batch: st
 
 
 def _compact(session, tmp_path, settings: Settings) -> None:
-    RawEvidenceCompactor(
-        store=LocalArchiveStore(tmp_path), settings=settings
-    ).compact(session, DECISION_TS)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION_TS
+    )
     session.flush()
 
 
@@ -110,18 +110,14 @@ def test_retention_second_run_reports_growth(session, tmp_path) -> None:
     # More evidence lands in the same partition; compaction grows the lake.
     _seed_evidence(session, count=2, days_ago=10.0, batch="b")
     _compact(session, tmp_path, settings)
-    second = run_retention(
-        session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings
-    )
+    second = run_retention(session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings)
     session.flush()
 
     assert second["status"] == "ok"
     assert second["growth_bytes"] > 0
     assert second["growth_pct"] is not None
     assert second["growth_bytes"] == second["byte_size"] - first["byte_size"]
-    runs = session.scalars(
-        select(models.RetentionRun).order_by(models.RetentionRun.ts)
-    ).all()
+    runs = session.scalars(select(models.RetentionRun).order_by(models.RetentionRun.ts)).all()
     assert len(runs) == 2
     assert runs[1].growth_bytes == second["growth_bytes"]
     assert runs[1].growth_pct == second["growth_pct"]
@@ -148,9 +144,7 @@ def test_two_real_retention_passes_page_once_at_capacity(session, tmp_path, monk
     assert first["status"] == "ok"
 
     _seed_evidence(session, count=2, days_ago=10.0, batch="second")
-    second = run_retention(
-        session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings
-    )
+    second = run_retention(session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings)
     session.flush()
 
     assert second["status"] == "ok"
@@ -180,9 +174,7 @@ def test_retention_spreads_due_partitions_across_passes(session, tmp_path) -> No
     assert first["due_partitions_remaining"] == 1
     assert first["compacted"] == 1
 
-    second = run_retention(
-        session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings
-    )
+    second = run_retention(session, decision_ts=DECISION_TS + timedelta(days=1), settings=settings)
     session.flush()
     assert second["status"] == "ok"
     assert second["due_partitions"] == 1
@@ -229,9 +221,7 @@ def test_retention_failure_records_red_health(session, tmp_path, monkeypatch) ->
     assert health.error_count == 1
 
 
-def test_retention_compaction_invalidates_lake_cache(
-    session, tmp_path, monkeypatch
-) -> None:
+def test_retention_compaction_invalidates_lake_cache(session, tmp_path, monkeypatch) -> None:
     """A retention pass that compacts new evidence clears the
     LakeFeatureFactory (asset, hour) cache so long-lived processes don't serve
     stale reconstructions; a pass with nothing due keeps the cache warm."""
@@ -256,9 +246,7 @@ def test_retention_compaction_invalidates_lake_cache(
 
     # Second pass immediately after: nothing new is due, zero compaction -> the
     # cache stays warm (no invalidation).
-    second = run_retention(
-        session, decision_ts=DECISION_TS + timedelta(hours=1), settings=settings
-    )
+    second = run_retention(session, decision_ts=DECISION_TS + timedelta(hours=1), settings=settings)
     session.flush()
     assert second["compacted"] == 0
     assert calls["n"] == 1
@@ -277,8 +265,7 @@ def test_check_lake_budget_fires_when_horizon_within_alert_days(
     )
     # 2 GiB/day growth over 5 passes: last pass at 18 GiB, 12 GiB left -> 6 days.
     history = [
-        _run(DECISION_TS + timedelta(days=day), (10 + 2 * day) * 1024**3)
-        for day in range(5)
+        _run(DECISION_TS + timedelta(days=day), (10 + 2 * day) * 1024**3) for day in range(5)
     ]
     calls: list[dict[str, object]] = []
 
@@ -287,9 +274,7 @@ def test_check_lake_budget_fires_when_horizon_within_alert_days(
         return True
 
     monkeypatch.setattr("ops.retention.notify_lake_budget", _fake_push)
-    out = check_lake_budget(
-        session, history=history, now=DECISION_TS, settings=settings
-    )
+    out = check_lake_budget(session, history=history, now=DECISION_TS, settings=settings)
     session.flush()
 
     assert out["alert"] is True
@@ -319,17 +304,12 @@ def test_check_lake_budget_respects_cooldown(session, tmp_path, monkeypatch) -> 
         retention_budget_alert_cooldown_hours=24.0,
     )
     history = [
-        _run(DECISION_TS + timedelta(days=day), (10 + 2 * day) * 1024**3)
-        for day in range(5)
+        _run(DECISION_TS + timedelta(days=day), (10 + 2 * day) * 1024**3) for day in range(5)
     ]
     calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        "ops.retention.notify_lake_budget", lambda **kw: calls.append(kw) or True
-    )
+    monkeypatch.setattr("ops.retention.notify_lake_budget", lambda **kw: calls.append(kw) or True)
 
-    first = check_lake_budget(
-        session, history=history, now=DECISION_TS, settings=settings
-    )
+    first = check_lake_budget(session, history=history, now=DECISION_TS, settings=settings)
     # A pass 1h later is still inside the 24h cooldown: health row refreshes,
     # but the ntfy warning is not re-pushed.
     second = check_lake_budget(
@@ -361,15 +341,10 @@ def test_check_lake_budget_quiet_within_budget(session, tmp_path, monkeypatch) -
         retention_budget_alert_cooldown_hours=24.0,
     )
     # 1 GiB/day over 10 passes: last at 19 GiB, 41 left -> 41 days > 14.
-    history = [
-        _run(DECISION_TS + timedelta(days=day), (10 + day) * 1024**3)
-        for day in range(10)
-    ]
+    history = [_run(DECISION_TS + timedelta(days=day), (10 + day) * 1024**3) for day in range(10)]
     monkeypatch.setattr("ops.retention.notify_lake_budget", lambda **kw: True)
 
-    out = check_lake_budget(
-        session, history=history, now=DECISION_TS, settings=settings
-    )
+    out = check_lake_budget(session, history=history, now=DECISION_TS, settings=settings)
     assert out == {"alert": False, "days_to_full": 41.0}
     assert (
         session.scalar(
@@ -406,9 +381,7 @@ def test_check_lake_freshness_records_yellow_when_stale(session, tmp_path) -> No
     )
     session.flush()
 
-    out = check_lake_freshness(
-        session, now=DECISION_TS + timedelta(hours=25), settings=settings
-    )
+    out = check_lake_freshness(session, now=DECISION_TS + timedelta(hours=25), settings=settings)
     session.flush()
 
     assert out["fresh"] is False
@@ -425,9 +398,7 @@ def test_check_lake_freshness_records_yellow_when_stale(session, tmp_path) -> No
     assert "lake stale" in (health.message or "")
 
 
-def test_check_lake_freshness_escalates_after_stale_cycles(
-    session, tmp_path, monkeypatch
-) -> None:
+def test_check_lake_freshness_escalates_after_stale_cycles(session, tmp_path, monkeypatch) -> None:
     settings = _settings(
         tmp_path,
         retention_stale_warning_after_cycles=3,
@@ -479,9 +450,7 @@ def test_check_lake_freshness_fresh_records_nothing(session, tmp_path) -> None:
     )
     session.flush()
 
-    out = check_lake_freshness(
-        session, now=DECISION_TS + timedelta(hours=23), settings=settings
-    )
+    out = check_lake_freshness(session, now=DECISION_TS + timedelta(hours=23), settings=settings)
     session.flush()
 
     assert out["fresh"] is True
@@ -496,9 +465,7 @@ def test_check_lake_freshness_fresh_records_nothing(session, tmp_path) -> None:
     )
 
 
-def test_check_lake_freshness_no_pass_or_disabled_records_nothing(
-    session, tmp_path
-) -> None:
+def test_check_lake_freshness_no_pass_or_disabled_records_nothing(session, tmp_path) -> None:
     """A brand-new deployment (no pass yet) and a disabled autopilot are
     never flagged stale."""
     settings = _settings(tmp_path)
@@ -520,9 +487,7 @@ def test_check_lake_freshness_no_pass_or_disabled_records_nothing(
         )
     )
     session.flush()
-    out = check_lake_freshness(
-        session, now=DECISION_TS, settings=disabled
-    )
+    out = check_lake_freshness(session, now=DECISION_TS, settings=disabled)
     assert out == {"fresh": True, "recorded": False}
     assert (
         session.scalar(
@@ -545,14 +510,8 @@ def test_retention_due_uses_cadence(session, tmp_path) -> None:
     session.flush()
 
     # Fresh pass -> not due until the cadence elapses.
-    assert (
-        retention_due(session, now=DECISION_TS + timedelta(hours=23), settings=settings)
-        is False
-    )
-    assert (
-        retention_due(session, now=DECISION_TS + timedelta(hours=25), settings=settings)
-        is True
-    )
+    assert retention_due(session, now=DECISION_TS + timedelta(hours=23), settings=settings) is False
+    assert retention_due(session, now=DECISION_TS + timedelta(hours=25), settings=settings) is True
 
     # Disabled autopilot is never due.
     disabled = _settings(tmp_path, retention_autopilot_enabled=False)
@@ -611,8 +570,7 @@ def test_project_lake_growth_single_or_flat_run_has_no_horizon() -> None:
 def test_project_lake_growth_extrapolates_disk_full_horizon() -> None:
     # Exactly 1 GiB/day growth: 10 passes from 10 GiB to 19 GiB.
     runs = [
-        _run(DECISION_TS + timedelta(days=day), 10 * 1024**3 + day * 1024**3)
-        for day in range(10)
+        _run(DECISION_TS + timedelta(days=day), 10 * 1024**3 + day * 1024**3) for day in range(10)
     ]
     out = project_lake_growth(runs, max_bytes=60 * 1024**3)
     assert out["growth_rate_bytes_per_hour"] == round(1024**3 / 24.0, 2)

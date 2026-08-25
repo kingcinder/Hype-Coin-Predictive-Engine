@@ -177,9 +177,7 @@ def maybe_run_forecast() -> dict[str, Any]:
 CALIBRATION_GAP_HEALTH_COMPONENT = "forecast_calibration"
 
 
-def _cal_gap_push_due(
-    session: Session, now: datetime, cooldown_hours: float
-) -> bool:
+def _cal_gap_push_due(session: Session, now: datetime, cooldown_hours: float) -> bool:
     """True when the last red calibration-gap row is older than the cooldown
     (or there is none), so a persistently biased model cannot spam the same
     warning every training pass."""
@@ -333,6 +331,7 @@ class ForecastEngine:
         # accelerate training data accumulation (unblocks the ML model faster).
         try:
             from data_lake.labels import generate_dense_labels
+
             dense_counts = generate_dense_labels(session, decision_ts=decision_ts)
             label_counts["dense_ignition"] = dense_counts.get("ignition", 0)
             label_counts["dense_collapse"] = dense_counts.get("collapse", 0)
@@ -452,9 +451,7 @@ class ForecastEngine:
             )
         return samples
 
-    def _features_at(
-        self, session: Session, asset_id: int, ts: datetime
-    ) -> dict[str, float]:
+    def _features_at(self, session: Session, asset_id: int, ts: datetime) -> dict[str, float]:
         rows = session.scalars(
             select(models.Feature).where(
                 models.Feature.asset_id == asset_id,
@@ -498,12 +495,8 @@ class ForecastEngine:
 
         ignition_probs = ignition_model.predict_proba(test_x)[:, 1]
         collapse_probs = collapse_model.predict_proba(test_x)[:, 1]
-        ignition_calibrator, calibrated_ignition = self._calibrate(
-            ignition_probs, test_ignition
-        )
-        collapse_calibrator, calibrated_collapse = self._calibrate(
-            collapse_probs, test_collapse
-        )
+        ignition_calibrator, calibrated_ignition = self._calibrate(ignition_probs, test_ignition)
+        collapse_calibrator, calibrated_collapse = self._calibrate(collapse_probs, test_collapse)
 
         hazard = self._fit_hazard(session, samples)
         peak_hazard = self._fit_peak_hazard(session, samples)
@@ -722,9 +715,7 @@ class ForecastEngine:
         }
 
     @staticmethod
-    def _fit_classifier(
-        x: np.ndarray, y: np.ndarray
-    ) -> HistGradientBoostingClassifier | None:
+    def _fit_classifier(x: np.ndarray, y: np.ndarray) -> HistGradientBoostingClassifier | None:
         if len(np.unique(y)) < 2:
             return None
         model = HistGradientBoostingClassifier(
@@ -734,9 +725,7 @@ class ForecastEngine:
         return model
 
     @staticmethod
-    def _calibrate(
-        probs: np.ndarray, labels: np.ndarray
-    ) -> tuple[IsotonicRegression, np.ndarray]:
+    def _calibrate(probs: np.ndarray, labels: np.ndarray) -> tuple[IsotonicRegression, np.ndarray]:
         calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
         calibrator.fit(probs, labels)
         return calibrator, calibrator.predict(probs)
@@ -773,9 +762,7 @@ class ForecastEngine:
                 times.append(forward_hours)
         return DiscreteHazardModel(self.settings.forecast_forward_hours).fit(times, events)
 
-    def _fit_phase_hazards(
-        self, session: Session, samples: list[Sample]
-    ) -> dict[str, HazardFit]:
+    def _fit_phase_hazards(self, session: Session, samples: list[Sample]) -> dict[str, HazardFit]:
         """One time-to-collapse survival fit per lifecycle phase.
 
         Samples are bucketed by the asset's lifecycle phase at the label's
@@ -795,9 +782,7 @@ class ForecastEngine:
         buckets: dict[str, list[Sample]] = defaultdict(list)
         for sample in samples:
             buckets[_phase_slug(sample.features.get("lifecycle_phase"))].append(sample)
-        return {
-            slug: self._fit_peak_hazard(session, bucket) for slug, bucket in buckets.items()
-        }
+        return {slug: self._fit_peak_hazard(session, bucket) for slug, bucket in buckets.items()}
 
     def _peak_hours(self, session: Session, asset_id: int, ts: datetime) -> float | None:
         forward = timedelta(hours=self.settings.forecast_forward_hours)
@@ -831,9 +816,7 @@ class ForecastEngine:
                 times.append(forward_hours)
         return DiscreteHazardModel(self.settings.forecast_forward_hours).fit(times, events)
 
-    def _trough_hours(
-        self, session: Session, asset_id: int, ts: datetime
-    ) -> float | None:
+    def _trough_hours(self, session: Session, asset_id: int, ts: datetime) -> float | None:
         forward = timedelta(hours=self.settings.forecast_forward_hours)
         from backtest.runner import point_in_time_market_rows
 
@@ -949,8 +932,7 @@ class ForecastEngine:
 
         reasons: list[str] = []
         if baseline_precision is not None and (
-            trailing_precision
-            < baseline_precision - self.settings.forecast_drift_precision_margin
+            trailing_precision < baseline_precision - self.settings.forecast_drift_precision_margin
             and trailing_precision < self.settings.forecast_drift_min_precision
         ):
             reasons.append("trailing precision collapsed vs baseline")
@@ -1069,12 +1051,8 @@ class ForecastEngine:
         return {
             "real_test_samples": float(self._last_metrics.get("real_test_samples", 0.0)),
             "calibration_error": float(self._last_metrics.get("calibration_error", 0.0)),
-            "calibration_error_real": float(
-                self._last_metrics.get("calibration_error_real", 0.0)
-            ),
-            "precision_at_10_real": float(
-                self._last_metrics.get("precision_at_10_real", 0.0)
-            ),
+            "calibration_error_real": float(self._last_metrics.get("calibration_error_real", 0.0)),
+            "precision_at_10_real": float(self._last_metrics.get("precision_at_10_real", 0.0)),
         }
 
     def _real_metrics_untrustworthy(self) -> bool:
@@ -1110,9 +1088,7 @@ class ForecastEngine:
         ) / len(states)
 
     @staticmethod
-    def _model_probability(
-        model: ForecastModel, row: np.ndarray, *, target: str
-    ) -> float:
+    def _model_probability(model: ForecastModel, row: np.ndarray, *, target: str) -> float:
         classifier = model.ignition if target == "ignition" else model.collapse
         calibrator = (
             model.ignition_calibrator if target == "ignition" else model.collapse_calibrator
@@ -1120,9 +1096,7 @@ class ForecastEngine:
         if classifier is None or calibrator is None:
             probability = 0.0
         else:
-            probability = float(
-                calibrator.predict(classifier.predict_proba(row)[:, 1])[0]
-            )
+            probability = float(calibrator.predict(classifier.predict_proba(row)[:, 1])[0])
         rpc_index = FORECAST_FEATURE_NAMES.index("rpc_pool_health")
         return _widen_probability(probability, float(row[0, rpc_index]))
 
@@ -1145,12 +1119,8 @@ class ForecastEngine:
         for index, name in enumerate(FORECAST_FEATURE_NAMES):
             neutral_row = row.copy()
             neutral_row[0, index] = _feature_default(name)
-            neutral_ignition = self._model_probability(
-                model, neutral_row, target="ignition"
-            )
-            neutral_collapse = self._model_probability(
-                model, neutral_row, target="collapse"
-            )
+            neutral_ignition = self._model_probability(model, neutral_row, target="ignition")
+            neutral_collapse = self._model_probability(model, neutral_row, target="collapse")
             contributions[name] = {
                 "value": float(row[0, index]),
                 "baseline": _feature_default(name),
@@ -1181,9 +1151,7 @@ class ForecastEngine:
             # a stale persisted snapshot.
             features["rpc_pool_health"] = self._live_rpc_pool_health(session, int(asset_id))
             row = np.array(
-                [
-                    [features.get(name, _feature_default(name)) for name in FORECAST_FEATURE_NAMES]
-                ],
+                [[features.get(name, _feature_default(name)) for name in FORECAST_FEATURE_NAMES]],
                 dtype=float,
             )
             p_ignition = self._model_probability(model, row, target="ignition")

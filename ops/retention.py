@@ -102,10 +102,14 @@ def run_retention(
             session.scalar(select(func.count()).select_from(models.RetentionRun)) or 0
         )
         offset = completed_passes % len(all_due) if all_due else 0
-        due = [
-            all_due[(offset + index) % len(all_due)]
-            for index in range(min(max_partitions, len(all_due)))
-        ] if all_due else []
+        due = (
+            [
+                all_due[(offset + index) % len(all_due)]
+                for index in range(min(max_partitions, len(all_due)))
+            ]
+            if all_due
+            else []
+        )
         archive_result = run_archive(
             session,
             decision_ts=decision_ts,
@@ -152,20 +156,21 @@ def run_retention(
         # Retention budget alert: warn via ntfy when the projected lake growth
         # would fill the capacity cap within RETENTION_BUDGET_ALERT_DAYS.
         history = session.scalars(
-            select(models.RetentionRun)
-            .order_by(models.RetentionRun.ts.desc())
-            .limit(60)
+            select(models.RetentionRun).order_by(models.RetentionRun.ts.desc()).limit(60)
         ).all()
-        budget = check_lake_budget(
-            session, history=history, now=decision_ts, settings=settings
-        )
+        budget = check_lake_budget(session, history=history, now=decision_ts, settings=settings)
         backlog_cutoff = decision_ts - timedelta(hours=settings.archive_compact_after_hours)
-        backlog_rows = session.scalar(
-            select(func.count()).select_from(models.RawEvidenceItem).where(
-                models.RawEvidenceItem.observed_at < backlog_cutoff,
-                models.RawEvidenceItem.archived_at.is_(None),
+        backlog_rows = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.RawEvidenceItem)
+                .where(
+                    models.RawEvidenceItem.observed_at < backlog_cutoff,
+                    models.RawEvidenceItem.archived_at.is_(None),
+                )
             )
-        ) or 0
+            or 0
+        )
         backlog_pushed = False
         if backlog_rows >= settings.retention_backlog_warning_threshold:
             previous_backlog = session.scalar(
@@ -180,11 +185,9 @@ def run_retention(
             )
             if "backlog=" in previous_message:
                 previous_count = int(previous_message.split("backlog=")[1].split()[0])
-            warning_due = (
-                previous_backlog is None
-                or decision_ts - ensure_utc(previous_backlog.ts)
-                >= timedelta(hours=settings.retention_backlog_warning_cooldown_hours)
-            )
+            warning_due = previous_backlog is None or decision_ts - ensure_utc(
+                previous_backlog.ts
+            ) >= timedelta(hours=settings.retention_backlog_warning_cooldown_hours)
             if backlog_rows > previous_count and warning_due:
                 backlog_pushed = notify_lake_backlog(
                     backlog_rows, settings.archive_batch_size, settings=settings
@@ -274,8 +277,7 @@ def project_lake_growth(
     mean_h = sum(hours) / len(hours)
     mean_b = sum(r.byte_size for r in ordered) / len(ordered)
     numerator = sum(
-        (h - mean_h) * (r.byte_size - mean_b)
-        for h, r in zip(hours, ordered, strict=True)
+        (h - mean_h) * (r.byte_size - mean_b) for h, r in zip(hours, ordered, strict=True)
     )
     denominator = sum((h - mean_h) ** 2 for h in hours)
     if denominator <= 0:
@@ -320,9 +322,7 @@ def retention_due(
     latest = _latest_run(session)
     if latest is None:
         return True
-    return now - ensure_utc(latest.ts) >= timedelta(
-        hours=settings.retention_cadence_hours
-    )
+    return now - ensure_utc(latest.ts) >= timedelta(hours=settings.retention_cadence_hours)
 
 
 def _budget_alert_due(
@@ -373,9 +373,7 @@ def check_lake_budget(
         f"{projection['growth_rate_bytes_per_hour']:,.0f} B/h growth, "
         f"cap {settings.archive_lake_max_bytes:,} B)"
     )
-    push_due = _budget_alert_due(
-        session, now, settings.retention_budget_alert_cooldown_hours
-    )
+    push_due = _budget_alert_due(session, now, settings.retention_budget_alert_cooldown_hours)
     record_health(
         session,
         component="lake_budget",
@@ -410,7 +408,9 @@ def retention_backlog_depth(
     cutoff = ensure_utc(now) - timedelta(hours=settings.archive_compact_after_hours)
     return int(
         session.scalar(
-            select(func.count()).select_from(models.RawEvidenceItem).where(
+            select(func.count())
+            .select_from(models.RawEvidenceItem)
+            .where(
                 models.RawEvidenceItem.observed_at < cutoff,
                 models.RawEvidenceItem.archived_at.is_(None),
             )
@@ -471,10 +471,8 @@ def check_lake_freshness(
             .order_by(models.SystemHealth.ts.desc())
             .limit(1)
         )
-        warning_due = (
-            last_warning is None
-            or now - ensure_utc(last_warning.ts)
-            >= timedelta(hours=settings.retention_stale_warning_cooldown_hours)
+        warning_due = last_warning is None or now - ensure_utc(last_warning.ts) >= timedelta(
+            hours=settings.retention_stale_warning_cooldown_hours
         )
         if warning_due:
             warning_pushed = notify_lake_stale(
@@ -487,10 +485,7 @@ def check_lake_freshness(
                 session,
                 component="lake_stale_warning",
                 state="yellow",
-                message=(
-                    f"stale lake warning: {stale_cycles} cycles; "
-                    f"pushed={warning_pushed}"
-                ),
+                message=(f"stale lake warning: {stale_cycles} cycles; pushed={warning_pushed}"),
             )
     result: dict[str, object] = {
         "fresh": False,
@@ -518,9 +513,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Serpent Circle retention autopilot: compaction + pruning + lake growth"
     )
-    parser.add_argument(
-        "--once", action="store_true", help="run one retention pass and exit"
-    )
+    parser.add_argument("--once", action="store_true", help="run one retention pass and exit")
     parser.add_argument(
         "--check-due",
         action="store_true",

@@ -186,8 +186,7 @@ class FingerprintEngine:
         withdrawn_asset_ids = set(
             session.scalars(
                 select(models.IgnitionEvent.asset_id).where(
-                    models.IgnitionEvent.event_type
-                    == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
+                    models.IgnitionEvent.event_type == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
                     models.IgnitionEvent.observed_at <= decision_ts,
                 )
             ).all()
@@ -353,9 +352,7 @@ class FingerprintEngine:
             self._maybe_recidivism_alert(session, asset, assessment)
         return assessment
 
-    def _asset_wallets(
-        self, session: Session, asset_id: int, decision_ts: datetime
-    ) -> set[str]:
+    def _asset_wallets(self, session: Session, asset_id: int, decision_ts: datetime) -> set[str]:
         wallets: set[str] = set()
         latest_ts = session.scalar(
             select(func.max(models.Holder.ts)).where(
@@ -457,16 +454,19 @@ class FingerprintEngine:
                 .order_by(models.Score.decision_ts.desc())
                 .limit(1)
             )
-            withdrawal_count = session.scalar(
-                select(func.count())
-                .select_from(models.IgnitionEvent)
-                .where(
-                    models.IgnitionEvent.asset_id == asset_id,
-                    models.IgnitionEvent.event_type
-                    == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
-                    models.IgnitionEvent.observed_at <= decision_ts,
+            withdrawal_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(models.IgnitionEvent)
+                    .where(
+                        models.IgnitionEvent.asset_id == asset_id,
+                        models.IgnitionEvent.event_type
+                        == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value,
+                        models.IgnitionEvent.observed_at <= decision_ts,
+                    )
                 )
-            ) or 0
+                or 0
+            )
             if (score is not None and score.risk_band in TOXIC_BANDS) or withdrawal_count > 0:
                 toxic += 1
         return toxic / len(asset_ids), toxic, len(asset_ids)
@@ -528,6 +528,7 @@ class FingerprintEngine:
         if existing:
             return
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(
             session, AlertType.SYNDICATE_RECIDIVISM.value, self.settings
         ):

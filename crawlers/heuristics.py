@@ -4,6 +4,7 @@ Learns which data sources provide the most actionable signals, adjusts
 crawl frequencies based on source reliability, tracks pattern correlations
 with successful hype coins, and prunes low-value sources automatically.
 """
+
 from __future__ import annotations
 
 import math
@@ -80,29 +81,37 @@ class HeuristicsEngine:
         self._source_reliabilities: dict[str, SourceReliability] = {}
         self._pattern_memory: dict[str, PatternMemory] = {}
 
-    def analyze_source_reliability(
-        self, session: Session, source_name: str
-    ) -> SourceReliability:
+    def analyze_source_reliability(self, session: Session, source_name: str) -> SourceReliability:
         """Analyze how reliable and actionable a source has been."""
         # Count signals from this source in the last 7 days
         cutoff = utc_now() - timedelta(days=7)
 
-        total_signals = session.scalar(
-            select(func.count()).select_from(models.SocialMention).where(
-                models.SocialMention.source_id.in_(
-                    select(models.Source.id).where(models.Source.name == source_name)
-                ),
-                models.SocialMention.observed_at >= cutoff,
+        total_signals = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.SocialMention)
+                .where(
+                    models.SocialMention.source_id.in_(
+                        select(models.Source.id).where(models.Source.name == source_name)
+                    ),
+                    models.SocialMention.observed_at >= cutoff,
+                )
             )
-        ) or 0
+            or 0
+        )
 
         # Count signals that led to scored tokens
-        actionable = session.scalar(
-            select(func.count()).select_from(models.Score).where(
-                models.Score.decision_ts >= cutoff,
-                models.Score.research_priority > 20.0,
+        actionable = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.Score)
+                .where(
+                    models.Score.decision_ts >= cutoff,
+                    models.Score.research_priority > 20.0,
+                )
             )
-        ) or 0
+            or 0
+        )
 
         reliability = SourceReliability(
             source_name=source_name,
@@ -121,9 +130,7 @@ class HeuristicsEngine:
     ) -> None:
         """Record the outcome of a detection from a source."""
         if source_name not in self._source_reliabilities:
-            self._source_reliabilities[source_name] = SourceReliability(
-                source_name=source_name
-            )
+            self._source_reliabilities[source_name] = SourceReliability(source_name=source_name)
         rel = self._source_reliabilities[source_name]
         if token_lasted:
             rel.actionable_dispatches += 1
@@ -137,9 +144,7 @@ class HeuristicsEngine:
     ) -> None:
         """Learn from a pattern observation."""
         if pattern_key not in self._pattern_memory:
-            self._pattern_memory[pattern_key] = PatternMemory(
-                pattern_key=pattern_key
-            )
+            self._pattern_memory[pattern_key] = PatternMemory(pattern_key=pattern_key)
         pm = self._pattern_memory[pattern_key]
         pm.occurrence_count += 1
         if success:
@@ -171,9 +176,7 @@ class HeuristicsEngine:
             source_name, SourceReliability(source_name=source_name)
         )
 
-    def get_top_patterns(
-        self, limit: int = 20
-    ) -> list[PatternMemory]:
+    def get_top_patterns(self, limit: int = 20) -> list[PatternMemory]:
         """Get the most successful patterns for hype coin prediction."""
         patterns = sorted(
             self._pattern_memory.values(),
@@ -191,9 +194,7 @@ class HeuristicsEngine:
                 name: {
                     "actionability_rate": round(rel.actionability_rate, 3),
                     "recommendation": rel.recommendation,
-                    "frequency_multiplier": round(
-                        self.get_crawl_frequency_multiplier(name), 2
-                    ),
+                    "frequency_multiplier": round(self.get_crawl_frequency_multiplier(name), 2),
                 }
                 for name, rel in self._source_reliabilities.items()
             },

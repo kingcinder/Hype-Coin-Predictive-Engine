@@ -1,4 +1,5 @@
 """Night Crawler GUI view functions for Streamlit."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -23,15 +24,17 @@ def nightcrawler_view() -> None:
     if status:
         rows = []
         for name, info in status.items():
-            rows.append({
-                "Crawler": name,
-                "Reliability": f"{info.get('reliability', 0):.1%}",
-                "Total Runs": info.get("total_runs", 0),
-                "Total Items": info.get("total_items", 0),
-                "Error Rate": f"{info.get('error_rate', 0):.1%}",
-                "Last Run": str(info.get("last_run", "never"))[:19],
-                "Freq Multiplier": f"{info.get('frequency_multiplier', 1.0):.2f}x",
-            })
+            rows.append(
+                {
+                    "Crawler": name,
+                    "Reliability": f"{info.get('reliability', 0):.1%}",
+                    "Total Runs": info.get("total_runs", 0),
+                    "Total Items": info.get("total_items", 0),
+                    "Error Rate": f"{info.get('error_rate', 0):.1%}",
+                    "Last Run": str(info.get("last_run", "never"))[:19],
+                    "Freq Multiplier": f"{info.get('frequency_multiplier', 1.0):.2f}x",
+                }
+            )
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:

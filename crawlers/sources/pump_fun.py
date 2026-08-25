@@ -4,6 +4,7 @@ Pump.fun is the dominant Solana token launch platform. This crawler
 discovers new tokens the moment they appear, providing early signals
 that feed the ignition radar and prelaunch queue.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -40,27 +41,29 @@ class PumpFunCrawler(BaseCrawler):
             items = []
             tokens = data if isinstance(data, list) else data.get("coins", [])
             for token in tokens[:50]:
-                items.append({
-                    "title": token.get("name", ""),
-                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
-                    f"launched on Pump.fun",
-                    "url": f"https://pump.fun/coin/{token.get('mint', '')}",
-                    "published": utc_now(),
-                    "source_domain": "pump.fun",
-                    "source_type": "launch_platform",
-                    "metrics": {
-                        "mint": token.get("mint"),
-                        "symbol": token.get("symbol"),
-                        "name": token.get("name"),
-                        "initial_buy": token.get("initial_buy"),
-                        "market_cap": token.get("market_cap"),
-                        "reply_count": token.get("reply_count", 0),
-                        "usd_market_cap": token.get("usd_market_cap"),
-                        "created_timestamp": token.get("created_timestamp"),
-                        "virtual_sol_reserves": token.get("virtual_sol_reserves"),
-                        "platform": "pump_fun",
-                    },
-                })
+                items.append(
+                    {
+                        "title": token.get("name", ""),
+                        "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
+                        f"launched on Pump.fun",
+                        "url": f"https://pump.fun/coin/{token.get('mint', '')}",
+                        "published": utc_now(),
+                        "source_domain": "pump.fun",
+                        "source_type": "launch_platform",
+                        "metrics": {
+                            "mint": token.get("mint"),
+                            "symbol": token.get("symbol"),
+                            "name": token.get("name"),
+                            "initial_buy": token.get("initial_buy"),
+                            "market_cap": token.get("market_cap"),
+                            "reply_count": token.get("reply_count", 0),
+                            "usd_market_cap": token.get("usd_market_cap"),
+                            "created_timestamp": token.get("created_timestamp"),
+                            "virtual_sol_reserves": token.get("virtual_sol_reserves"),
+                            "platform": "pump_fun",
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -75,25 +78,27 @@ class PumpFunCrawler(BaseCrawler):
             items = []
             tokens = data if isinstance(data, list) else data.get("coins", [])
             for token in tokens[:30]:
-                items.append({
-                    "title": token.get("name", ""),
-                    "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
-                    f"approaching graduation on Pump.fun",
-                    "url": f"https://pump.fun/coin/{token.get('mint', '')}",
-                    "published": utc_now(),
-                    "source_domain": "pump.fun",
-                    "source_type": "launch_platform",
-                    "metrics": {
-                        "mint": token.get("mint"),
-                        "symbol": token.get("symbol"),
-                        "name": token.get("name"),
-                        "market_cap": token.get("market_cap"),
-                        "usd_market_cap": token.get("usd_market_cap"),
-                        "virtual_sol_reserves": token.get("virtual_sol_reserves"),
-                        "graduating": True,
-                        "platform": "pump_fun",
-                    },
-                })
+                items.append(
+                    {
+                        "title": token.get("name", ""),
+                        "text": f"{token.get('name', '')} ({token.get('symbol', '')}) "
+                        f"approaching graduation on Pump.fun",
+                        "url": f"https://pump.fun/coin/{token.get('mint', '')}",
+                        "published": utc_now(),
+                        "source_domain": "pump.fun",
+                        "source_type": "launch_platform",
+                        "metrics": {
+                            "mint": token.get("mint"),
+                            "symbol": token.get("symbol"),
+                            "name": token.get("name"),
+                            "market_cap": token.get("market_cap"),
+                            "usd_market_cap": token.get("usd_market_cap"),
+                            "virtual_sol_reserves": token.get("virtual_sol_reserves"),
+                            "graduating": True,
+                            "platform": "pump_fun",
+                        },
+                    }
+                )
             return items
         except Exception:
             return []

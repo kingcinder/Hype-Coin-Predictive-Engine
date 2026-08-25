@@ -15,9 +15,7 @@ NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 NTFY_URL = "https://ntfy.sh/serpent-test"
 
 
-def _seed_alert(
-    session, *, asset_id: int, alert_type: str, created_at: datetime
-) -> models.Alert:
+def _seed_alert(session, *, asset_id: int, alert_type: str, created_at: datetime) -> models.Alert:
     alert = models.Alert(
         asset_id=asset_id,
         alert_type=alert_type,
@@ -110,9 +108,7 @@ def test_notifier_pushes_each_type_once(session) -> None:
         assert any("Liquidity Withdrawal Warning" in title for title in titles)
         assert any("Syndicate Recidivism" in title for title in titles)
         assert any("Lifecycle Transition" in title for title in titles)
-        lifecycle = next(
-            item for item in sent_payloads if "Lifecycle Transition" in item["title"]
-        )
+        lifecycle = next(item for item in sent_payloads if "Lifecycle Transition" in item["title"])
         assert lifecycle["priority"] == "5"
         assert lifecycle["tags"] == "collision"
 
@@ -131,9 +127,7 @@ def test_notifier_pushes_each_type_once(session) -> None:
 
 def test_notifier_retries_failed_push(session) -> None:
     asset = seed_market_asset(session)
-    _seed_alert(
-        session, asset_id=asset.id, alert_type="ignition_detected", created_at=NOW
-    )
+    _seed_alert(session, asset_id=asset.id, alert_type="ignition_detected", created_at=NOW)
     session.commit()
     notifier = NtfyNotifier()
     _enable_ntfy(notifier)

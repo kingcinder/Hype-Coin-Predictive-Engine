@@ -210,9 +210,7 @@ class ArchiveManifest(Base):
     """One row per Parquet partition written by the ops/archive compactor."""
 
     __tablename__ = "archive_manifests"
-    __table_args__ = (
-        UniqueConstraint("object_key", name="uq_archive_manifest_object_key"),
-    )
+    __table_args__ = (UniqueConstraint("object_key", name="uq_archive_manifest_object_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -506,9 +504,7 @@ class Label(Base):
 class IgnitionEvent(Base):
     __tablename__ = "ignition_events"
     __table_args__ = (
-        UniqueConstraint(
-            "asset_id", "event_type", "ts", "source_id", name="uq_ignition_event"
-        ),
+        UniqueConstraint("asset_id", "event_type", "ts", "source_id", name="uq_ignition_event"),
         Index("ix_ignition_events_asset_ts", "asset_id", "ts"),
         Index("ix_ignition_events_type_ts", "event_type", "ts"),
     )
@@ -605,9 +601,7 @@ class FingerprintAssessment(Base):
 class PrelaunchCandidate(Base):
     __tablename__ = "prelaunch_candidates"
     __table_args__ = (
-        UniqueConstraint(
-            "asset_id", "decision_ts", "model_version", name="uq_prelaunch_asset_ts"
-        ),
+        UniqueConstraint("asset_id", "decision_ts", "model_version", name="uq_prelaunch_asset_ts"),
         Index("ix_prelaunch_asset_ts", "asset_id", "decision_ts"),
     )
 
@@ -701,9 +695,7 @@ class RpcPoolSnapshot(Base):
     probe_count: Mapped[int] = mapped_column(Integer, nullable=False)
     probe_successes: Mapped[int] = mapped_column(Integer, nullable=False)
     probe_failures: Mapped[int] = mapped_column(Integer, nullable=False)
-    probe_history: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSON, default=list, nullable=False
-    )
+    probe_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
 
 
 class IngestionWatermark(Base):
@@ -809,9 +801,7 @@ class WebhookDispatch(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    webhook_config_id: Mapped[int] = mapped_column(
-        ForeignKey("webhook_configs.id"), nullable=False
-    )
+    webhook_config_id: Mapped[int] = mapped_column(ForeignKey("webhook_configs.id"), nullable=False)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False)
     dispatched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

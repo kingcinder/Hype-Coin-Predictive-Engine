@@ -138,9 +138,7 @@ class EVMFactoryWatcher:
         return "0x" + str(topic)[-40:].lower()
 
     def _eth_call(self, to: str, data: str) -> bytes | None:
-        response = self._rpc(
-            "eth_call", [{"to": to, "data": data}, "latest"]
-        )
+        response = self._rpc("eth_call", [{"to": to, "data": data}, "latest"])
         try:
             result = str(response["result"])
         except (KeyError, TypeError):
@@ -310,9 +308,7 @@ class EVMFactoryWatcher:
         )
 
 
-def run_evm_watch(
-    session: Session, *, decision_ts: datetime | None = None
-) -> dict[str, Any]:
+def run_evm_watch(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:
     settings = get_settings()
     if not settings.mempool_enabled:
         return {"skipped": True}
@@ -332,9 +328,7 @@ def run_evm_watch(
         try:
             watcher = EVMFactoryWatcher(chain_slug, factory)
             try:
-                total += watcher.watch(
-                    session, source=source, decision_ts=decision_ts
-                )
+                total += watcher.watch(session, source=source, decision_ts=decision_ts)
             finally:
                 watcher.close()
         except Exception as exc:  # noqa: BLE001 - preserve per-chain failure.

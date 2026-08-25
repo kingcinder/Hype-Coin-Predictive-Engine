@@ -101,9 +101,7 @@ def _future_prices(
 ) -> list[float]:
     return [
         price
-        for _, price in _future_rows(
-            session, asset_id=asset_id, start_ts=start_ts, end_ts=end_ts
-        )
+        for _, price in _future_rows(session, asset_id=asset_id, start_ts=start_ts, end_ts=end_ts)
     ]
 
 
@@ -113,9 +111,7 @@ def _lead_time_minutes(
     """Minutes from the flag until the price first crosses ``target_pct``."""
     threshold = entry * (1.0 + target_pct / 100.0)
     for ts, price in rows:
-        if (target_pct >= 0 and price >= threshold) or (
-            target_pct < 0 and price <= threshold
-        ):
+        if (target_pct >= 0 and price >= threshold) or (target_pct < 0 and price <= threshold):
             return max(0.0, (ts - decision_ts).total_seconds() / 60.0)
     return None
 
@@ -143,8 +139,7 @@ def _latest_forecast_metrics(session: Session) -> dict[str, float]:
     if run is None:
         return {}
     rows = session.execute(
-        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value)
-        .where(
+        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value).where(
             models.BacktestResult.run_id == run.id,
             models.BacktestResult.metric_name.in_(_FORECAST_METRIC_NAMES),
         )
@@ -357,9 +352,7 @@ def main() -> None:
     from storage.database import SessionLocal
 
     start = datetime.fromisoformat(args.start.replace("Z", "+00:00"))
-    end = (
-        datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else None
-    )
+    end = datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else None
     with SessionLocal() as session:
         run = run_backtest(
             session,

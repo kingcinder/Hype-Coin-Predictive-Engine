@@ -155,8 +155,7 @@ class Settings(BaseSettings):
     ntfy_backlog_hours: int = 24
     ntfy_daily_digest_enabled: bool = True
     ntfy_alert_types_csv: str = (
-        "ignition_detected,liquidity_withdrawal_warning,syndicate_recidivism,"
-        "lifecycle_transition"
+        "ignition_detected,liquidity_withdrawal_warning,syndicate_recidivism,lifecycle_transition"
     )
 
     # archive & retention: Parquet compaction of raw evidence
@@ -298,14 +297,10 @@ class Settings(BaseSettings):
     def narrative_endpoint_pools(self) -> dict[str, list[str]]:
         return {
             "reddit": [
-                part.strip()
-                for part in self.reddit_endpoint_pool_csv.split(",")
-                if part.strip()
+                part.strip() for part in self.reddit_endpoint_pool_csv.split(",") if part.strip()
             ],
             "github": [
-                part.strip()
-                for part in self.github_endpoint_pool_csv.split(",")
-                if part.strip()
+                part.strip() for part in self.github_endpoint_pool_csv.split(",") if part.strip()
             ],
             "huggingface": [
                 part.strip()
@@ -321,9 +316,7 @@ class Settings(BaseSettings):
     @property
     def telegram_channel_handles(self) -> list[str]:
         return [
-            part.strip()
-            for part in self.telegram_channel_handles_csv.split(",")
-            if part.strip()
+            part.strip() for part in self.telegram_channel_handles_csv.split(",") if part.strip()
         ]
 
     @property
@@ -372,13 +365,10 @@ class Settings(BaseSettings):
         if primary and primary not in entries:
             entries.insert(0, primary)
         return entries
+
     @property
     def target_chains(self) -> list[str]:
-        return [
-            part.strip().lower()
-            for part in self.target_chains_csv.split(",")
-            if part.strip()
-        ]
+        return [part.strip().lower() for part in self.target_chains_csv.split(",") if part.strip()]
 
     def rpc_url_for_chain(self, chain_slug: str) -> str | None:
         if chain_slug == "solana":

@@ -109,9 +109,7 @@ def upgrade() -> None:
             ),
             sa.UniqueConstraint("cluster_key", name="uq_narrative_cluster_key"),
         )
-        op.create_index(
-            "ix_narrative_clusters_last_seen", "narrative_clusters", ["last_seen_at"]
-        )
+        op.create_index("ix_narrative_clusters_last_seen", "narrative_clusters", ["last_seen_at"])
 
 
 def downgrade() -> None:

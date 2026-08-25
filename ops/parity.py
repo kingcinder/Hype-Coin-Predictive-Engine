@@ -106,13 +106,10 @@ def compare_asset(
     lifecycle) by design.
     """
     sql_values = {
-        value.name: value
-        for value in FeatureFactory().build_for_asset(session, asset, decision_ts)
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision_ts)
     }
     if lake_values is None:
-        lake_values = LakeFeatureFactory(
-            settings=settings or get_settings()
-        ).build_for_asset(
+        lake_values = LakeFeatureFactory(settings=settings or get_settings()).build_for_asset(
             asset_address=asset.address, decision_ts=decision_ts
         )
     mismatches: list[ParityMismatch] = []
@@ -172,9 +169,7 @@ def _persist_mismatches(
     the retention window first, so operators can review divergence history
     instead of only the latest ntfy page."""
     cutoff = run_ts - timedelta(days=settings.parity_history_retention_days)
-    session.execute(
-        delete(models.ParityMismatch).where(models.ParityMismatch.run_ts < cutoff)
-    )
+    session.execute(delete(models.ParityMismatch).where(models.ParityMismatch.run_ts < cutoff))
     for mismatch in mismatches:
         session.add(
             models.ParityMismatch(
@@ -293,18 +288,13 @@ def run_parity(
         mismatch_count = len(mismatches)
         state = "ok"
         if mismatch_count > 0:
-            state = (
-                "red"
-                if mismatch_count >= settings.parity_alert_threshold
-                else "yellow"
-            )
+            state = "red" if mismatch_count >= settings.parity_alert_threshold else "yellow"
         examples = [_format_mismatch(mismatch) for mismatch in mismatches[:5]]
         # Evaluate the push cooldown BEFORE recording this run's health row,
         # otherwise the gate would always see the just-written red row and
         # suppress the page (the lake-budget check does the same).
-        push_due = (
-            mismatch_count >= settings.parity_alert_threshold
-            and _parity_push_due(session, utc_now(), settings.parity_alert_cooldown_hours)
+        push_due = mismatch_count >= settings.parity_alert_threshold and _parity_push_due(
+            session, utc_now(), settings.parity_alert_cooldown_hours
         )
         record_health(
             session,
@@ -423,9 +413,7 @@ def _parse_parity_message(message: str) -> _ParsedParity:
     }
 
 
-def latest_parity(
-    session: Session, *, settings: Settings | None = None
-) -> ParityLatest | None:
+def latest_parity(session: Session, *, settings: Settings | None = None) -> ParityLatest | None:
     """Structured summary of the most recent parity run from its health row.
 
     Returns ``None`` when no parity pass has run yet. Used by ``GET
@@ -461,9 +449,7 @@ def main() -> None:
         description="Serpent Circle lake-vs-SQL parity CI: compare the DuckDB "
         "lake read path against the live SQL path and page mismatches via ntfy"
     )
-    parser.add_argument(
-        "--once", action="store_true", help="run one parity check and exit"
-    )
+    parser.add_argument("--once", action="store_true", help="run one parity check and exit")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -485,10 +471,7 @@ def main() -> None:
             result = run_parity(session)
             session.commit()
         print(json.dumps(result, default=str))
-        if (
-            args.strict
-            and result.get("status") in ("red", "yellow")
-        ):
+        if args.strict and result.get("status") in ("red", "yellow"):
             raise SystemExit(1)
         return
 

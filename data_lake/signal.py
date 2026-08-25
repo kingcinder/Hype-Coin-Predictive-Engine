@@ -11,6 +11,7 @@ is scored for "signal strength" based on four dimensions:
 High-signal data gets prioritized for feature extraction and scoring.
 Low-signal data gets archived but not actively processed.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -91,13 +92,18 @@ def _novelty_score(
 
     elif source_table == "social_mentions":
         # Check for recent mentions of the same topic
-        count = session.scalar(
-            select(func.count()).select_from(models.SocialMention).where(
-                models.SocialMention.source_id == source_id,
-                models.SocialMention.observed_at >= observed_at - window,
-                models.SocialMention.observed_at < observed_at,
+        count = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.SocialMention)
+                .where(
+                    models.SocialMention.source_id == source_id,
+                    models.SocialMention.observed_at >= observed_at - window,
+                    models.SocialMention.observed_at < observed_at,
+                )
             )
-        ) or 0
+            or 0
+        )
         score = max(0.0, 1.0 - (count / 100.0))
         reasons.append(f"{count} recent mentions from same source")
         return score, reasons
@@ -128,15 +134,18 @@ def _corroboration_score(
         return 0.0, ["no asset_id for corroboration"]
 
     window = timedelta(hours=6)
-    source_count = session.scalar(
-        select(func.count(func.distinct(models.MarketSnapshot.source_id))).where(
-            models.MarketSnapshot.pair_id.in_(
-                select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
-            ),
-            models.MarketSnapshot.observed_at >= observed_at - window,
-            models.MarketSnapshot.observed_at <= observed_at,
+    source_count = (
+        session.scalar(
+            select(func.count(func.distinct(models.MarketSnapshot.source_id))).where(
+                models.MarketSnapshot.pair_id.in_(
+                    select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
+                ),
+                models.MarketSnapshot.observed_at >= observed_at - window,
+                models.MarketSnapshot.observed_at <= observed_at,
+            )
         )
-    ) or 0
+        or 0
+    )
 
     if source_count >= 3:
         reasons.append(f"{source_count} sources corroborate")
@@ -247,12 +256,7 @@ def score_market_snapshot(
     )
 
     # Weighted combination
-    signal = (
-        0.25 * novelty
-        + 0.25 * corroboration
-        + 0.20 * temporal
-        + 0.30 * magnitude
-    )
+    signal = 0.25 * novelty + 0.25 * corroboration + 0.20 * temporal + 0.30 * magnitude
 
     return SignalScore(
         source_table="market_snapshots",

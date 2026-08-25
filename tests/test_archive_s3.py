@@ -135,9 +135,7 @@ def test_s3_store_download_to_materializes_object(s3, tmp_path) -> None:
     assert dest.read_bytes() == b"lake-bytes"
 
 
-def test_s3_query_archive_skips_unreadable_partition(
-    session, s3, tmp_path, monkeypatch
-) -> None:
+def test_s3_query_archive_skips_unreadable_partition(session, s3, tmp_path, monkeypatch) -> None:
     """One failed S3 download must degrade gracefully: query_archive logs and
     skips the corrupt object while still querying every healthy partition.
     If all objects are unreadable it returns an honest empty result."""
@@ -158,23 +156,17 @@ def test_s3_query_archive_skips_unreadable_partition(
         return original_download(key, dest)
 
     monkeypatch.setattr(store, "download_to", fail_one)
-    rows = query_archive(
-        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
-    )
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
     assert rows == [{"n": 2}], "healthy partition remains queryable"
 
     def fail_all(key, dest):
         raise OSError(f"simulated unreadable object: {key}")
 
     monkeypatch.setattr(store, "download_to", fail_all)
-    assert query_archive(
-        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
-    ) == []
+    assert query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings) == []
 
 
-def test_s3_second_batch_in_same_partition_merges_not_clobbers(
-    session, s3, tmp_path
-) -> None:
+def test_s3_second_batch_in_same_partition_merges_not_clobbers(session, s3, tmp_path) -> None:
     """A second compaction batch landing in the same (source, year, month)
     S3 partition must APPEND to the partition object, never overwrite the
     rows an earlier pass compacted — the MinIO mirror of the local-store
@@ -202,23 +194,17 @@ def test_s3_second_batch_in_same_partition_merges_not_clobbers(
     # One partition object in the bucket, not two clobbered fragments.
     assert len(store.list_objects("evidence")) == 1
 
-    rows = query_archive(
-        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
-    )
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
     assert rows == [{"n": 5}]
 
 
 def test_make_store_selects_backend_by_config(s3, tmp_path) -> None:
     assert isinstance(make_store(_settings()), S3ArchiveStore)
-    local = _settings(
-        archive_backend="local", archive_local_dir=str(tmp_path), minio_bucket=BUCKET
-    )
+    local = _settings(archive_backend="local", archive_local_dir=str(tmp_path), minio_bucket=BUCKET)
     assert isinstance(make_store(local), LocalArchiveStore)
 
 
-def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(
-    session, s3, tmp_path
-) -> None:
+def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(session, s3, tmp_path) -> None:
     """Full MinIO-style flow: compaction writes partitioned Parquet to S3 and
     the DuckDB query path materializes the objects and returns the rows."""
     source = _seed_evidence(session, count=2, days_ago=11.0)
@@ -226,9 +212,7 @@ def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(
     settings = _settings()
     store = S3ArchiveStore(settings)
 
-    result = RawEvidenceCompactor(store=store, settings=settings).compact(
-        session, DECISION_TS
-    )
+    result = RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
     session.flush()
 
     assert result["compacted"] == 3
@@ -238,9 +222,7 @@ def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(
     assert {m.partition_month for m in manifests} == {4, 6}
     assert all(m.object_key.startswith("evidence/source=dexscreener/") for m in manifests)
 
-    rows = query_archive(
-        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
-    )
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
     assert rows == [{"n": 3}]
 
     by_source = query_archive(

@@ -181,9 +181,7 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         source=gt,
         payload={
             "chain": "solana",
-            "new_pools": [
-                _pool_payload(PAIR_ADDRESS, 0.5, 100, 900, 1, 1, created)
-            ],
+            "new_pools": [_pool_payload(PAIR_ADDRESS, 0.5, 100, 900, 1, 1, created)],
         },
         observed_at=low_observed,
     )
@@ -325,9 +323,9 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
     session.flush()
     # Compact half an hour after the decision so the holder snapshot observed
     # exactly at the decision time is archived too.
-    RawEvidenceCompactor(
-        store=LocalArchiveStore(tmp_path), settings=settings
-    ).compact(session, DECISION + timedelta(minutes=30))
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
     session.flush()
     return asset
 
@@ -365,9 +363,7 @@ def test_parity_ok_on_consistent_lake(session, tmp_path) -> None:
     assert result["pushed"] is False  # ntfy disabled by default
 
     row = session.scalar(
-        select(models.SystemHealth).where(
-            models.SystemHealth.component == "parity"
-        )
+        select(models.SystemHealth).where(models.SystemHealth.component == "parity")
     )
     assert row is not None
     assert row.state == "ok"
@@ -384,12 +380,8 @@ def test_parity_pages_mismatch_via_ntfy(session, tmp_path, monkeypatch) -> None:
 
     calls: dict = {}
 
-    def fake_notify(
-        mismatch_count, compared_assets, decision_ts, examples, *, settings=None
-    ):
-        calls.update(
-            {"count": mismatch_count, "assets": compared_assets, "examples": examples}
-        )
+    def fake_notify(mismatch_count, compared_assets, decision_ts, examples, *, settings=None):
+        calls.update({"count": mismatch_count, "assets": compared_assets, "examples": examples})
         return True
 
     monkeypatch.setattr(parity_module, "notify_parity_mismatch", fake_notify)
@@ -401,8 +393,7 @@ def test_parity_pages_mismatch_via_ntfy(session, tmp_path, monkeypatch) -> None:
     assert calls["count"] == result["mismatches"]
     assert calls["assets"] == 2
     assert any(
-        "holder_count" in example or "holder_growth" in example
-        for example in calls["examples"]
+        "holder_count" in example or "holder_growth" in example for example in calls["examples"]
     )
 
     row = session.scalar(
@@ -423,9 +414,7 @@ def test_parity_push_cooldown(session, tmp_path, monkeypatch) -> None:
 
     pushes = {"n": 0}
 
-    def fake_notify(
-        mismatch_count, compared_assets, decision_ts, examples, *, settings=None
-    ):
+    def fake_notify(mismatch_count, compared_assets, decision_ts, examples, *, settings=None):
         pushes["n"] += 1
         return True
 
@@ -479,9 +468,7 @@ def test_parity_persists_mismatch_history(session, tmp_path) -> None:
         select(models.ParityMismatch).order_by(models.ParityMismatch.run_ts)
     ).all()
     assert rows, "divergences must persist as history rows"
-    assert all(ensure_utc(row.run_ts) > old for row in rows), (
-        "stale history must be pruned"
-    )
+    assert all(ensure_utc(row.run_ts) > old for row in rows), "stale history must be pruned"
     by_feature = {row.feature_name: row for row in rows}
     # The SQL-only holder diverges on holder_count (and holder_growth).
     row = by_feature.get("holder_count")
@@ -525,9 +512,7 @@ def test_parity_builds_lake_block_once_per_run(session, tmp_path, monkeypatch) -
         calls["addresses"] = list(addresses)
         return real(self, addresses, decision_ts)
 
-    monkeypatch.setattr(
-        parity_module.LakeFeatureFactory, "build_for_assets", counting_batch
-    )
+    monkeypatch.setattr(parity_module.LakeFeatureFactory, "build_for_assets", counting_batch)
     result = run_parity(session, decision_ts=DECISION, settings=settings)
     assert calls["n"] == 1
     # Both the base token and its quote asset are compared in the one call.
@@ -556,9 +541,7 @@ def test_parity_due_gate(session, tmp_path) -> None:
     )
     # Disabled -> never due.
     assert (
-        parity_due(
-            session, now=utc_now(), settings=_settings(tmp_path, parity_enabled=False)
-        )
+        parity_due(session, now=utc_now(), settings=_settings(tmp_path, parity_enabled=False))
         is False
     )
 
@@ -586,9 +569,7 @@ def test_notify_parity_mismatch_disabled_and_post(monkeypatch) -> None:
     """ntfy parity paging: disabled -> False; enabled -> posts and True."""
     disabled = Settings(_env_file=None, ntfy_enabled=False, ntfy_topic="t")
     assert (
-        notify_parity_mismatch(
-            3, 10, DECISION, ["x [y]: sql=1.0 lake=2.0"], settings=disabled
-        )
+        notify_parity_mismatch(3, 10, DECISION, ["x [y]: sql=1.0 lake=2.0"], settings=disabled)
         is False
     )
 
@@ -598,13 +579,9 @@ def test_notify_parity_mismatch_disabled_and_post(monkeypatch) -> None:
         sent.update({"message": message, "headers": headers})
 
     monkeypatch.setattr("ops.notifier.NtfyNotifier._post", fake_post)
-    enabled = Settings(
-        _env_file=None, ntfy_enabled=True, ntfy_topic="serpent-test"
-    )
+    enabled = Settings(_env_file=None, ntfy_enabled=True, ntfy_topic="serpent-test")
     assert (
-        notify_parity_mismatch(
-            3, 10, DECISION, ["x [y]: sql=1.0 lake=2.0"], settings=enabled
-        )
+        notify_parity_mismatch(3, 10, DECISION, ["x [y]: sql=1.0 lake=2.0"], settings=enabled)
         is True
     )
     assert "3 mismatches across 10" in sent["message"]

@@ -390,9 +390,7 @@ class NarrativeEngine:
         return None
 
 
-def run_narrative(
-    session: Session, *, decision_ts: datetime | None = None
-) -> dict[str, Any]:
+def run_narrative(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:
     settings = get_settings()
     if not settings.narrative_crawl_enabled:
         return {"skipped": True}

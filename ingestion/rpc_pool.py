@@ -118,11 +118,7 @@ class RpcEndpointPool:
             raise RuntimeError("RPC pool has no endpoints")
         with self._lock:
             self._tick += 1.0
-            down = [
-                url
-                for url in self.endpoints
-                if self._is_down(url)
-            ]
+            down = [url for url in self.endpoints if self._is_down(url)]
             available = [url for url in self.endpoints if url not in down]
             if down and not self._background_active and self._tick % PROBE_EVERY_PICKS == 0:
                 # Pick-probe slot: force one downed endpoint through so it can
@@ -340,9 +336,7 @@ class RpcEndpointPool:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         with self._lock:
-            if self._background_thread is thread and (
-                thread is None or not thread.is_alive()
-            ):
+            if self._background_thread is thread and (thread is None or not thread.is_alive()):
                 self._background_thread = None
 
     def _probe_loop(self, probe: Callable[[str], bool], interval_seconds: float) -> None:
@@ -406,16 +400,13 @@ def get_rpc_pool(chain_slug: str = "solana") -> RpcEndpointPool:
     )
 
 
-
 def _pool_health_row(session: Session, chain_slug: str) -> None:
     pool = get_rpc_pool(chain_slug)
     states = pool.snapshot()
     if not states:
         return
     down = [state.url for state in states if state.down]
-    degraded = [
-        state.url for state in states if state.health < HEALTH_START and not state.down
-    ]
+    degraded = [state.url for state in states if state.health < HEALTH_START and not state.down]
     state = "red" if down else ("yellow" if degraded else "ok")
     message = (
         f"{chain_slug} rpc pool: {len(states)} endpoints, {len(down)} down, "

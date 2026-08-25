@@ -4,6 +4,7 @@ Tracks whale wallets, large transfers, and unusual accumulation patterns
 that often precede hype coin pumps. Uses public blockchain RPCs and
 block explorer APIs to detect smart money movements.
 """
+
 from __future__ import annotations
 
 import time
@@ -24,7 +25,6 @@ ETH_WHALE_ADDRESSES = [
     "0x28C6c06298d514Db089934071355E5743bf21d60",  # Binance 14
     "0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503",  # Justin Sun
 ]
-
 
 
 # Minimum transfer values to flag as whale activity
@@ -76,26 +76,28 @@ class WhaleTrackerCrawler(BaseCrawler):
                     if value_eth < ETH_MIN_VALUE_ETH:
                         continue
                     ts = _unix_to_iso(int(tx.get("timeStamp", 0)))
-                    items.append({
-                        "title": f"Whale transfer: {value_eth:,.1f} ETH",
-                        "text": (
-                            f"Large ETH movement of {value_eth:,.1f} ETH "
-                            f"from {address[:10]}... to {(tx.get('to') or '')[:10]}..."
-                        ),
-                        "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
-                        "published": ts,
-                        "source_domain": "etherscan.io",
-                        "source_type": "on_chain",
-                        "metrics": {
-                            "chain": "ethereum",
-                            "tx_hash": tx.get("hash"),
-                            "from": address,
-                            "to": tx.get("to"),
-                            "value_eth": round(value_eth, 4),
-                            "block": tx.get("blockNumber"),
-                            "whale_alert": True,
-                        },
-                    })
+                    items.append(
+                        {
+                            "title": f"Whale transfer: {value_eth:,.1f} ETH",
+                            "text": (
+                                f"Large ETH movement of {value_eth:,.1f} ETH "
+                                f"from {address[:10]}... to {(tx.get('to') or '')[:10]}..."
+                            ),
+                            "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
+                            "published": ts,
+                            "source_domain": "etherscan.io",
+                            "source_type": "on_chain",
+                            "metrics": {
+                                "chain": "ethereum",
+                                "tx_hash": tx.get("hash"),
+                                "from": address,
+                                "to": tx.get("to"),
+                                "value_eth": round(value_eth, 4),
+                                "block": tx.get("blockNumber"),
+                                "whale_alert": True,
+                            },
+                        }
+                    )
                 time.sleep(0.25)  # Etherscan rate limit
             except Exception as exc:  # noqa: BLE001
                 log.debug("whale_eth_error", address=address, error=str(exc))
@@ -130,27 +132,29 @@ class WhaleTrackerCrawler(BaseCrawler):
                 if value_eth < ETH_MIN_VALUE_ETH:
                     continue
                 ts = _unix_to_iso(int(tx.get("timeStamp", 0)))
-                items.append({
-                    "title": f"Large DEX swap: {value_eth:,.1f} ETH via Uniswap",
-                    "text": (
-                        f"Whale-sized swap of {value_eth:,.1f} ETH detected on "
-                        f"Uniswap V2 Router from {(tx.get('from') or '')[:10]}..."
-                    ),
-                    "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
-                    "published": ts,
-                    "source_domain": "etherscan.io",
-                    "source_type": "on_chain",
-                    "metrics": {
-                        "chain": "ethereum",
-                        "tx_hash": tx.get("hash"),
-                        "from": tx.get("from"),
-                        "to": tx.get("to"),
-                        "value_eth": round(value_eth, 4),
-                        "block": tx.get("blockNumber"),
-                        "dex": "uniswap_v2",
-                        "whale_alert": True,
-                    },
-                })
+                items.append(
+                    {
+                        "title": f"Large DEX swap: {value_eth:,.1f} ETH via Uniswap",
+                        "text": (
+                            f"Whale-sized swap of {value_eth:,.1f} ETH detected on "
+                            f"Uniswap V2 Router from {(tx.get('from') or '')[:10]}..."
+                        ),
+                        "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
+                        "published": ts,
+                        "source_domain": "etherscan.io",
+                        "source_type": "on_chain",
+                        "metrics": {
+                            "chain": "ethereum",
+                            "tx_hash": tx.get("hash"),
+                            "from": tx.get("from"),
+                            "to": tx.get("to"),
+                            "value_eth": round(value_eth, 4),
+                            "block": tx.get("blockNumber"),
+                            "dex": "uniswap_v2",
+                            "whale_alert": True,
+                        },
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
             log.debug("whale_eth_swap_error", error=str(exc))
         return items
@@ -199,26 +203,28 @@ class WhaleTrackerCrawler(BaseCrawler):
                     if sol_change is not None and abs(sol_change) >= SOL_MIN_VALUE_SOL:
                         ts = _unix_to_iso(tx.get("blockTime", 0))
                         direction = "outflow" if sol_change < 0 else "inflow"
-                        items.append({
-                            "title": f"Solana whale {direction}: {abs(sol_change):,.0f} SOL",
-                            "text": (
-                                f"Large SOL {'sent' if sol_change < 0 else 'received'} by "
-                                f"{account[:8]}...: {abs(sol_change):,.0f} SOL"
-                            ),
-                            "url": f"https://solscan.io/tx/{sig}",
-                            "published": ts,
-                            "source_domain": "solscan.io",
-                            "source_type": "on_chain",
-                            "metrics": {
-                                "chain": "solana",
-                                "tx_hash": sig,
-                                "from": account if sol_change < 0 else None,
-                                "to": account if sol_change > 0 else None,
-                                "value_sol": round(abs(sol_change), 4),
-                                "block": tx.get("slot"),
-                                "whale_alert": True,
-                            },
-                        })
+                        items.append(
+                            {
+                                "title": f"Solana whale {direction}: {abs(sol_change):,.0f} SOL",
+                                "text": (
+                                    f"Large SOL {'sent' if sol_change < 0 else 'received'} by "
+                                    f"{account[:8]}...: {abs(sol_change):,.0f} SOL"
+                                ),
+                                "url": f"https://solscan.io/tx/{sig}",
+                                "published": ts,
+                                "source_domain": "solscan.io",
+                                "source_type": "on_chain",
+                                "metrics": {
+                                    "chain": "solana",
+                                    "tx_hash": sig,
+                                    "from": account if sol_change < 0 else None,
+                                    "to": account if sol_change > 0 else None,
+                                    "value_sol": round(abs(sol_change), 4),
+                                    "block": tx.get("slot"),
+                                    "whale_alert": True,
+                                },
+                            }
+                        )
                     time.sleep(0.1)  # Rate limit
             except Exception as exc:  # noqa: BLE001
                 log.debug("whale_sol_error", account=account, error=str(exc))
@@ -261,6 +267,7 @@ def _extract_sol_transfer(tx: dict[str, Any], watch_account: str) -> float | Non
 def _unix_to_iso(ts: int) -> Any:
     """Convert unix timestamp to ISO format string."""
     from datetime import datetime
+
     if ts <= 0:
         return utc_now()
     return datetime.fromtimestamp(ts, tz=UTC)

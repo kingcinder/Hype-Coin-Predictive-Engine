@@ -60,10 +60,7 @@ class LocalArchiveStore:
         if not base.is_dir():
             return []
         root = self._root_resolved
-        return [
-            str(path.relative_to(root)).replace("\\", "/")
-            for path in base.rglob("*.parquet")
-        ]
+        return [str(path.relative_to(root)).replace("\\", "/") for path in base.rglob("*.parquet")]
 
     def download_to(self, key: str, dest: Path) -> Path:
         source = self._path(key)
@@ -94,9 +91,7 @@ class S3ArchiveStore:
         return self._client
 
     def put_object(self, key: str, data: bytes) -> int:
-        self._get_client().put_object(
-            Bucket=self.settings.minio_bucket, Key=key, Body=data
-        )
+        self._get_client().put_object(Bucket=self.settings.minio_bucket, Key=key, Body=data)
         return len(data)
 
     def object_exists(self, key: str) -> bool:
@@ -262,9 +257,7 @@ class RawEvidenceCompactor:
         source_names = {
             source.id: source.name
             for source in session.scalars(
-                select(models.Source).where(
-                    models.Source.id.in_({row.source_id for row in rows})
-                )
+                select(models.Source).where(models.Source.id.in_({row.source_id for row in rows}))
             )
         }
         groups: dict[tuple[int, int, int], list[models.RawEvidenceItem]] = {}
@@ -347,12 +340,8 @@ class RawEvidenceCompactor:
     def _prune(self, session: Session, decision_ts: datetime) -> int:
         retention_cutoff = decision_ts - timedelta(days=self.settings.archive_retention_days)
         referenced = or_(
-            exists().where(
-                models.MarketSnapshot.raw_evidence_id == models.RawEvidenceItem.id
-            ),
-            exists().where(
-                models.LiquiditySnapshot.raw_evidence_id == models.RawEvidenceItem.id
-            ),
+            exists().where(models.MarketSnapshot.raw_evidence_id == models.RawEvidenceItem.id),
+            exists().where(models.LiquiditySnapshot.raw_evidence_id == models.RawEvidenceItem.id),
             exists().where(models.ContractFlag.evidence_id == models.RawEvidenceItem.id),
             exists().where(models.NewsItem.raw_evidence_id == models.RawEvidenceItem.id),
         )

@@ -7,9 +7,7 @@ from common.config import Settings
 from storage import models
 
 
-def alert_generation_allowed(
-    session: Session, alert_type: str, settings: Settings
-) -> bool:
+def alert_generation_allowed(session: Session, alert_type: str, settings: Settings) -> bool:
     """Return whether low-quality alert types should currently be emitted."""
     control = session.scalar(
         select(models.AlertTypeControl).where(models.AlertTypeControl.alert_type == alert_type)

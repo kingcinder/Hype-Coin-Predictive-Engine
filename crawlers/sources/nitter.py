@@ -4,6 +4,7 @@ Uses Nitter RSS feeds to crawl Twitter/X without API keys. RSS parsing
 is far more reliable than regex HTML scraping and survives Nitter instance
 markup changes. Falls back to Farcaster search when Nitter is unavailable.
 """
+
 from __future__ import annotations
 
 import re
@@ -18,9 +19,9 @@ log = get_logger(__name__)
 
 # Token mention patterns: $TICKER, 0x addresses, Solana base58 addresses
 _TOKEN_PATTERN = re.compile(
-    r'\$([A-Z]{2,10})\b|'
-    r'(0x[a-fA-F0-9]{40})|'
-    r'([1-9A-HJ-NP-Za-km-z]{32,44})'
+    r"\$([A-Z]{2,10})\b|"
+    r"(0x[a-fA-F0-9]{40})|"
+    r"([1-9A-HJ-NP-Za-km-z]{32,44})"
 )
 
 
@@ -35,9 +36,15 @@ class NitterCrawler(BaseCrawler):
     ]
 
     CRYPTO_SEARCH_TERMS = [
-        "gem crypto", "100x token", "pump launch",
-        "presale crypto", "whale alert", "bullish alpha",
-        "new listing", "airdrop live", "moon shot",
+        "gem crypto",
+        "100x token",
+        "pump launch",
+        "presale crypto",
+        "whale alert",
+        "bullish alpha",
+        "new listing",
+        "airdrop live",
+        "moon shot",
     ]
 
     def __init__(self, search_terms: list[str] | None = None) -> None:
@@ -165,6 +172,7 @@ class NitterCrawler(BaseCrawler):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+
 def _text(el: ET.Element, tag: str) -> str:
     """Extract text content from an XML element."""
     child = el.find(tag)
@@ -193,6 +201,7 @@ def _parse_pub_date(date_str: str | None) -> Any:
     if not date_str:
         return utc_now()
     from email.utils import parsedate_to_datetime
+
     try:
         return parsedate_to_datetime(date_str)
     except Exception:  # noqa: BLE001

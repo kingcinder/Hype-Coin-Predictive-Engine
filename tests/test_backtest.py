@@ -65,9 +65,7 @@ def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> N
 
     captured: dict[str, str] = {}
 
-    def _fake_build(
-        session, *, decision_ts=None, asset_ids=None, feature_source="sql"
-    ):
+    def _fake_build(session, *, decision_ts=None, asset_ids=None, feature_source="sql"):
         captured["feature_source"] = feature_source
         return {}
 
@@ -86,10 +84,13 @@ def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> N
     assert captured["feature_source"] == "lake"
     assert run.status == "completed"
     assert run.config_json["feature_source"] == "lake"
-    assert BacktestConfig(
-        start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
-        end=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
-    ).feature_source == "sql"
+    assert (
+        BacktestConfig(
+            start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+            end=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        ).feature_source
+        == "sql"
+    )
 
 
 def test_backtest_surfaces_latest_forecast_metrics(session) -> None:

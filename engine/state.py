@@ -25,6 +25,7 @@ log = get_logger(__name__)
 # calls the mark_* mutators) enqueues a snapshot via ``broadcast_event()``;
 # the FastAPI SSE handler drains its queue into the HTTP response stream.
 
+
 class _SSEBroker:
     """Thread-safe broadcaster that bridges sync worker → async SSE endpoints."""
 
@@ -225,17 +226,11 @@ class EngineState:
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-safe snapshot of the current state."""
         with self._lock:
-            uptime_sec = (
-                (time.monotonic() - self.started_at) if self.started_at else None
-            )
+            uptime_sec = (time.monotonic() - self.started_at) if self.started_at else None
             scan_duration = (
                 (self.scan.completed_at - self.scan.started_at)
                 if self.scan.started_at and self.scan.completed_at
-                else (
-                    (time.monotonic() - self.scan.started_at)
-                    if self.scan.started_at
-                    else None
-                )
+                else ((time.monotonic() - self.scan.started_at) if self.scan.started_at else None)
             )
             return {
                 "status": "running" if self.started_at else "stopped",

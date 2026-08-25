@@ -94,9 +94,7 @@ def test_geckoterminal_pool_ingest_creates_point_in_time_rows(session, monkeypat
     assert session.scalar(select(func.count()).select_from(models.RawEvidenceItem)) == 1
 
 
-def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(
-    session, monkeypatch
-) -> None:
+def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
     asset = seed_market_asset(session)
     service = IngestionService()
     service.ensure_reference_data(session)
@@ -231,9 +229,7 @@ def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> 
     assert payload["chain"] == "solana"
     assert payload["findings"] == expected_findings
 
-    contract = session.scalar(
-        select(models.Contract).where(models.Contract.asset_id == asset.id)
-    )
+    contract = session.scalar(select(models.Contract).where(models.Contract.asset_id == asset.id))
     assert contract is not None
     flags = session.scalars(
         select(models.ContractFlag).where(models.ContractFlag.contract_id == contract.id)
@@ -257,16 +253,12 @@ def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> 
     assert len(evidence) == 1
 
 
-def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(
-    session, monkeypatch
-) -> None:
+def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
     """The EVM holder scan (Blockscout) stores the same evidence shape as the
     Solana path on the evm_holders chain_rpc source, writes Holder rows with
     pct-of-supply, reports source:evm_holders health, and is idempotent on a
     repeat scan."""
-    chain = get_or_create_chain(
-        session, "base", name="Base", vm_type="evm", native_symbol="ETH"
-    )
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
     service = IngestionService()
     service.ensure_reference_data(session)
     service.settings.evm_holder_scan_limit = 1
@@ -326,9 +318,7 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(
     assert service._ingest_evm_holder_snapshots(session) == 2
     session.commit()
 
-    holders = session.scalars(
-        select(models.Holder).where(models.Holder.asset_id == asset.id)
-    ).all()
+    holders = session.scalars(select(models.Holder).where(models.Holder.asset_id == asset.id)).all()
     assert len(holders) == 2
     assert round(sum(holder.pct_supply or 0.0 for holder in holders), 6) == 0.9
 
@@ -372,12 +362,8 @@ def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(service, "_run_data_quality_check", lambda session, decision_ts: {})
     monkeypatch.setattr(service, "_run_contract_analysis", lambda session, decision_ts: {})
     monkeypatch.setattr(ingestion_service, "run_mempool", lambda session, decision_ts=None: {})
-    monkeypatch.setattr(
-        ingestion_service, "run_narrative", lambda session, decision_ts=None: {}
-    )
-    monkeypatch.setattr(
-        ingestion_service, "extract_catalysts", lambda session, decision_ts=None: 0
-    )
+    monkeypatch.setattr(ingestion_service, "run_narrative", lambda session, decision_ts=None: {})
+    monkeypatch.setattr(ingestion_service, "extract_catalysts", lambda session, decision_ts=None: 0)
     monkeypatch.setattr(
         ingestion_service,
         "alert_upcoming_catalysts",
@@ -410,9 +396,7 @@ def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
 
     assert result["archive"] == {"skipped": True, "partitions": 0, "compacted": 0}
     assert LocalArchiveStore(tmp_path).list_objects("evidence") == []
-    scan = session.scalar(
-        select(models.ScanResult).order_by(models.ScanResult.ts.desc()).limit(1)
-    )
+    scan = session.scalar(select(models.ScanResult).order_by(models.ScanResult.ts.desc()).limit(1))
     assert scan is not None
     assert scan.state == "ok"
     assert scan.archive == 0

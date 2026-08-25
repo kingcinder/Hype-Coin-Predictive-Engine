@@ -108,21 +108,30 @@ def test_endpoint_down_alert_waits_for_cooldown_and_retries_failed_delivery() ->
     pool.mark_failure(POOL[0])
     now = utc_now()
     events = []
-    assert pool.dispatch_alerts(
-        lambda event: events.append(event) or True,
-        cooldown_seconds=900,
-        now=now,
-    ) == 0
-    assert pool.dispatch_alerts(
-        lambda _event: False,
-        cooldown_seconds=900,
-        now=now + timedelta(seconds=901),
-    ) == 0
-    assert pool.dispatch_alerts(
-        lambda event: events.append(event) or True,
-        cooldown_seconds=900,
-        now=now + timedelta(seconds=902),
-    ) == 1
+    assert (
+        pool.dispatch_alerts(
+            lambda event: events.append(event) or True,
+            cooldown_seconds=900,
+            now=now,
+        )
+        == 0
+    )
+    assert (
+        pool.dispatch_alerts(
+            lambda _event: False,
+            cooldown_seconds=900,
+            now=now + timedelta(seconds=901),
+        )
+        == 0
+    )
+    assert (
+        pool.dispatch_alerts(
+            lambda event: events.append(event) or True,
+            cooldown_seconds=900,
+            now=now + timedelta(seconds=902),
+        )
+        == 1
+    )
     assert events[-1].kind == "endpoint_down_cooldown"
     assert events[-1].url == POOL[0]
 
@@ -364,9 +373,7 @@ def test_record_pool_health_writes_per_chain_rows(session, monkeypatch) -> None:
         }
         pools["solana"].mark_failure("https://rpc-sol.example.com")
         pools["base"].mark_failure("https://rpc-base.example.com")
-        monkeypatch.setattr(
-            rpc_pool_module, "get_rpc_pool", lambda chain_slug: pools[chain_slug]
-        )
+        monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain_slug: pools[chain_slug])
 
         rpc_pool_module.record_pool_health(session)
         session.flush()

@@ -41,9 +41,7 @@ def upgrade() -> None:
         sa.Column("probe_history", sa.JSON(), nullable=False),
         sa.UniqueConstraint("chain_slug", "url", "ts", name="uq_rpc_pool_snapshot"),
     )
-    op.create_index(
-        "ix_rpc_pool_snapshots_chain_ts", "rpc_pool_snapshots", ["chain_slug", "ts"]
-    )
+    op.create_index("ix_rpc_pool_snapshots_chain_ts", "rpc_pool_snapshots", ["chain_slug", "ts"])
     op.create_index("ix_rpc_pool_snapshots_url_ts", "rpc_pool_snapshots", ["url", "ts"])
 
 

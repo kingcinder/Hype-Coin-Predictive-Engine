@@ -4,6 +4,7 @@ Pulls trending tokens, new listings, market cap data, and historical OHLC
 from the CoinGecko free API. This crawler provides the market intelligence
 that feeds the signal scoring engine and label densification.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -40,23 +41,25 @@ class CoinGeckoCrawler(BaseCrawler):
             items = []
             for coin in (data.get("coins") or [])[:25]:
                 item = coin.get("item") or {}
-                items.append({
-                    "title": item.get("name", ""),
-                    "text": f"{item.get('name', '')} {item.get('symbol', '')} "
-                    f"trending on CoinGecko",
-                    "url": f"https://www.coingecko.com/en/coins/{item.get('id', '')}",
-                    "published": utc_now(),
-                    "source_domain": "coingecko.com",
-                    "source_type": "market_data",
-                    "metrics": {
-                        "coingecko_id": item.get("id"),
-                        "symbol": item.get("symbol"),
-                        "market_cap_rank": item.get("market_cap_rank"),
-                        "score": item.get("score", 0),
-                        "price_btc": item.get("price_btc"),
-                        "trending": True,
-                    },
-                })
+                items.append(
+                    {
+                        "title": item.get("name", ""),
+                        "text": f"{item.get('name', '')} {item.get('symbol', '')} "
+                        f"trending on CoinGecko",
+                        "url": f"https://www.coingecko.com/en/coins/{item.get('id', '')}",
+                        "published": utc_now(),
+                        "source_domain": "coingecko.com",
+                        "source_type": "market_data",
+                        "metrics": {
+                            "coingecko_id": item.get("id"),
+                            "symbol": item.get("symbol"),
+                            "market_cap_rank": item.get("market_cap_rank"),
+                            "score": item.get("score", 0),
+                            "price_btc": item.get("price_btc"),
+                            "trending": True,
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -77,29 +80,31 @@ class CoinGeckoCrawler(BaseCrawler):
             ).json()
             items = []
             for coin in data:
-                items.append({
-                    "title": coin.get("name", ""),
-                    "text": f"{coin.get('name', '')} ({coin.get('symbol', '')}) market data",
-                    "url": f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
-                    "published": utc_now(),
-                    "source_domain": "coingecko.com",
-                    "source_type": "market_data",
-                    "metrics": {
-                        "coingecko_id": coin.get("id"),
-                        "symbol": coin.get("symbol"),
-                        "current_price": coin.get("current_price"),
-                        "market_cap": coin.get("market_cap"),
-                        "total_volume": coin.get("total_volume"),
-                        "price_change_1h": coin.get("price_change_percentage_1h_in_currency"),
-                        "price_change_24h": coin.get("price_change_percentage_24h"),
-                        "price_change_7d": coin.get("price_change_percentage_7d_in_currency"),
-                        "market_cap_rank": coin.get("market_cap_rank"),
-                        "circulating_supply": coin.get("circulating_supply"),
-                        "total_supply": coin.get("total_supply"),
-                        "ath": coin.get("ath"),
-                        "ath_change_pct": coin.get("ath_change_percentage"),
-                    },
-                })
+                items.append(
+                    {
+                        "title": coin.get("name", ""),
+                        "text": f"{coin.get('name', '')} ({coin.get('symbol', '')}) market data",
+                        "url": f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
+                        "published": utc_now(),
+                        "source_domain": "coingecko.com",
+                        "source_type": "market_data",
+                        "metrics": {
+                            "coingecko_id": coin.get("id"),
+                            "symbol": coin.get("symbol"),
+                            "current_price": coin.get("current_price"),
+                            "market_cap": coin.get("market_cap"),
+                            "total_volume": coin.get("total_volume"),
+                            "price_change_1h": coin.get("price_change_percentage_1h_in_currency"),
+                            "price_change_24h": coin.get("price_change_percentage_24h"),
+                            "price_change_7d": coin.get("price_change_percentage_7d_in_currency"),
+                            "market_cap_rank": coin.get("market_cap_rank"),
+                            "circulating_supply": coin.get("circulating_supply"),
+                            "total_supply": coin.get("total_supply"),
+                            "ath": coin.get("ath"),
+                            "ath_change_pct": coin.get("ath_change_percentage"),
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -120,31 +125,34 @@ class CoinGeckoCrawler(BaseCrawler):
             ).json()
             # Filter for high-volume coins with significant price movement
             gainers = [
-                c for c in data
+                c
+                for c in data
                 if (c.get("price_change_percentage_24h") or 0) > 10
                 and (c.get("total_volume") or 0) > 100000
             ][:20]
             items = []
             for coin in gainers:
-                items.append({
-                    "title": coin.get("name", ""),
-                    "text": f"{coin.get('name', '')} up "
-                    f"{coin.get('price_change_percentage_24h', 0):.1f}% in 24h",
-                    "url": f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
-                    "published": utc_now(),
-                    "source_domain": "coingecko.com",
-                    "source_type": "market_data",
-                    "metrics": {
-                        "coingecko_id": coin.get("id"),
-                        "symbol": coin.get("symbol"),
-                        "current_price": coin.get("current_price"),
-                        "market_cap": coin.get("market_cap"),
-                        "volume_24h": coin.get("total_volume"),
-                        "price_change_24h_pct": coin.get("price_change_percentage_24h"),
-                        "market_cap_rank": coin.get("market_cap_rank"),
-                        "gainer": True,
-                    },
-                })
+                items.append(
+                    {
+                        "title": coin.get("name", ""),
+                        "text": f"{coin.get('name', '')} up "
+                        f"{coin.get('price_change_percentage_24h', 0):.1f}% in 24h",
+                        "url": f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
+                        "published": utc_now(),
+                        "source_domain": "coingecko.com",
+                        "source_type": "market_data",
+                        "metrics": {
+                            "coingecko_id": coin.get("id"),
+                            "symbol": coin.get("symbol"),
+                            "current_price": coin.get("current_price"),
+                            "market_cap": coin.get("market_cap"),
+                            "volume_24h": coin.get("total_volume"),
+                            "price_change_24h_pct": coin.get("price_change_percentage_24h"),
+                            "market_cap_rank": coin.get("market_cap_rank"),
+                            "gainer": True,
+                        },
+                    }
+                )
             return items
         except Exception:
             return []

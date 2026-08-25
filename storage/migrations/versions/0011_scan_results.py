@@ -4,6 +4,7 @@ Revision ID: 0011_scan_results
 Revises: 0010_liquidity_removal_events
 Create Date: 2026-08-20
 """
+
 import sqlalchemy as sa
 from alembic import op
 

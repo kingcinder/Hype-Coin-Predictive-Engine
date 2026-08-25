@@ -39,9 +39,7 @@ class DiscreteHazardModel:
         survival = 1.0
         curve: list[float] = [survival]
         for hour in range(1, self.forward_hours + 1):
-            hazard = sum(1 for time in event_times if hour - 1 < time <= hour) / max(
-                at_risk, 1.0
-            )
+            hazard = sum(1 for time in event_times if hour - 1 < time <= hour) / max(at_risk, 1.0)
             survival *= max(0.0, 1.0 - hazard)
             curve.append(round(survival, 6))
         # Expected time-to-event from the discrete survival curve.

@@ -26,12 +26,8 @@ def test_minhash_similarity_separates_campaigns() -> None:
     campaign_a = "HYPE token is launching soon with a big presale on Solana x100 gem"
     campaign_a_retweet = "HYPE token is launching soon with a big presale on Solana x100 gem!!!"
     unrelated = "bitcoin price analysis today fed decision"
-    assert embedder.similarity(
-        embedder.embed(campaign_a), embedder.embed(campaign_a_retweet)
-    ) > 0.5
-    assert embedder.similarity(
-        embedder.embed(campaign_a), embedder.embed(unrelated)
-    ) < 0.3
+    assert embedder.similarity(embedder.embed(campaign_a), embedder.embed(campaign_a_retweet)) > 0.5
+    assert embedder.similarity(embedder.embed(campaign_a), embedder.embed(unrelated)) < 0.3
 
 
 @respx.mock
@@ -115,9 +111,7 @@ def test_telegram_public_channel_gate() -> None:
     assert TelegramCrawler._is_public_channel(
         SimpleNamespace(username="solana_shills", broadcast=True)
     )
-    assert not TelegramCrawler._is_public_channel(
-        SimpleNamespace(username=None, broadcast=True)
-    )
+    assert not TelegramCrawler._is_public_channel(SimpleNamespace(username=None, broadcast=True))
     assert not TelegramCrawler._is_public_channel(
         SimpleNamespace(username="private_group", broadcast=False)
     )
@@ -150,11 +144,7 @@ def test_narrative_pool_probes_all_endpoints_and_skips_dead_one(session) -> None
         respx.get("https://dead.reddit.test/r/CryptoMoonShots/new.json").mock(
             return_value=Response(503)
         )
-        payload = {
-            "data": {
-                "children": [{"data": {"title": "HYPE from live Reddit"}}]
-            }
-        }
+        payload = {"data": {"children": [{"data": {"title": "HYPE from live Reddit"}}]}}
         respx.get("https://live.reddit.test/r/CryptoMoonShots/new.json").mock(
             return_value=Response(200, json=payload)
         )

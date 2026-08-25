@@ -6,6 +6,7 @@ Called after each ingestion scan to:
 3. Dispatch webhook alerts for high-signal events
 4. Track data lake statistics for the confidence dashboard
 """
+
 from __future__ import annotations
 
 import re
@@ -64,9 +65,7 @@ def run_data_lake_pass(
         result["progress"] = progress
 
         # 4. Dispatch webhooks for high-signal alerts
-        webhook_results = _dispatch_high_signal_webhooks(
-            session, signal_result, decision_ts
-        )
+        webhook_results = _dispatch_high_signal_webhooks(session, signal_result, decision_ts)
         result["webhooks"] = {
             "dispatched": len(webhook_results),
             "successful": sum(1 for r in webhook_results if r.success),
@@ -196,6 +195,7 @@ def get_confidence_dashboard_data(
 
     # Get top-scored tokens with feature breakdown
     from storage.repository import latest_scores
+
     top_scores = latest_scores(session, limit=10, include_black=False, order_by="hype")
 
     scoring_breakdown = []
@@ -215,32 +215,38 @@ def get_confidence_dashboard_data(
         feature_importance = {
             f.feature_name: round(f.feature_value, 4)
             for f in features
-            if f.feature_name in (
-                "five_min_return", "one_hour_return", "volume_acceleration",
-                "liquidity_depth", "mention_velocity", "kol_velocity",
-                "github_star_velocity", "hf_download_velocity",
+            if f.feature_name
+            in (
+                "five_min_return",
+                "one_hour_return",
+                "volume_acceleration",
+                "liquidity_depth",
+                "mention_velocity",
+                "kol_velocity",
+                "github_star_velocity",
+                "hf_download_velocity",
             )
         }
 
-        scoring_breakdown.append({
-            "asset_id": score.asset_id,
-            "symbol": asset.symbol if asset else "UNKNOWN",
-            "chain": chain.slug if chain else "unknown",
-            "hype": round(score.hype, 2),
-            "ethos": round(score.ethos, 2),
-            "risk": round(score.risk, 2),
-            "liquidity_access": round(score.liquidity_access, 2),
-            "confidence": round(score.confidence, 2),
-            "research_priority": round(score.research_priority, 2),
-            "risk_band": score.risk_band,
-            "feature_importance": feature_importance,
-        })
+        scoring_breakdown.append(
+            {
+                "asset_id": score.asset_id,
+                "symbol": asset.symbol if asset else "UNKNOWN",
+                "chain": chain.slug if chain else "unknown",
+                "hype": round(score.hype, 2),
+                "ethos": round(score.ethos, 2),
+                "risk": round(score.risk, 2),
+                "liquidity_access": round(score.liquidity_access, 2),
+                "confidence": round(score.confidence, 2),
+                "research_priority": round(score.research_priority, 2),
+                "risk_band": score.risk_band,
+                "feature_importance": feature_importance,
+            }
+        )
 
     # Get scan history for the chart
     scan_history = session.scalars(
-        select(models.ScanResult)
-        .order_by(models.ScanResult.ts.desc())
-        .limit(20)
+        select(models.ScanResult).order_by(models.ScanResult.ts.desc()).limit(20)
     ).all()
 
     scan_chart = [
@@ -307,13 +313,9 @@ def _latest_forecast_metrics(session: Session) -> dict[str, float | None]:
     if run is None:
         return {}
     rows = session.execute(
-        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value)
-        .where(
+        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value).where(
             models.BacktestResult.run_id == run.id,
             models.BacktestResult.metric_name.in_(_FORECAST_METRIC_NAMES),
         )
     ).all()
-    return {
-        str(name).split(".", 1)[1]: float(value)
-        for name, value in rows
-    }
+    return {str(name).split(".", 1)[1]: float(value) for name, value in rows}

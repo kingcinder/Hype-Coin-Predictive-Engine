@@ -83,9 +83,7 @@ def _seed_arc(session, *, symbol: str, prices: list[float]) -> models.Asset:
     return asset
 
 
-def _seed_features(
-    session, asset: models.Asset, hour: int, *, crash: bool = False
-) -> None:
+def _seed_features(session, asset: models.Asset, hour: int, *, crash: bool = False) -> None:
     ts = T0 + timedelta(hours=hour)
     values = {
         "liquidity_depth": 1_000.0 if crash and hour >= 16 else 200_000.0,
@@ -155,19 +153,16 @@ def test_forecast_engine_trains_and_predicts_collapse(session) -> None:
     assert result["samples"] >= 5
     assert result["forecasts"] == 4
 
-    forecasts = {
-        row.asset_id: row
-        for row in session.scalars(select(models.Forecast)).all()
-    }
+    forecasts = {row.asset_id: row for row in session.scalars(select(models.Forecast)).all()}
     assert set(forecasts.keys()) == {flat.id, drop_a.id, drop_b.id, late.id}
     assert forecasts[drop_a.id].p_collapse_24h > forecasts[flat.id].p_collapse_24h
     assert forecasts[drop_b.id].p_collapse_24h > forecasts[flat.id].p_collapse_24h
     assert forecasts[drop_a.id].calibrated is True
     assert forecasts[drop_a.id].calibration_bucket is not None
     assert forecasts[drop_a.id].expected_hours_to_collapse is not None
-    assert any(
-        row.expected_hours_to_peak is not None for row in forecasts.values()
-    ), "expected_hours_to_peak should populate for ignition-prone assets"
+    assert any(row.expected_hours_to_peak is not None for row in forecasts.values()), (
+        "expected_hours_to_peak should populate for ignition-prone assets"
+    )
 
     metrics = session.scalars(
         select(models.BacktestResult).where(
@@ -293,14 +288,10 @@ def test_drift_persists_metrics_with_run(session) -> None:
     trailing = [_drift_sample(2, decision - timedelta(hours=12 * index)) for index in range(12)]
     samples = baseline + trailing
     metrics: dict[str, float] = {"samples": float(len(samples))}
-    seed._persist_metrics(
-        session, samples=samples, decision_ts=decision, metrics=metrics
-    )
+    seed._persist_metrics(session, samples=samples, decision_ts=decision, metrics=metrics)
     session.commit()
     rows = session.scalars(
-        select(models.BacktestResult).where(
-            models.BacktestResult.metric_name == "forecast.samples"
-        )
+        select(models.BacktestResult).where(models.BacktestResult.metric_name == "forecast.samples")
     ).all()
     assert len(rows) == 1
     assert rows[0].metric_value == 24.0
@@ -327,9 +318,7 @@ def test_forecast_training_cadence_uses_persisted_run(session) -> None:
     )
     session.commit()
     assert forecast_due(session, now=now, settings=settings) is False
-    assert forecast_due(
-        session, now=now + timedelta(hours=1), settings=settings
-    ) is True
+    assert forecast_due(session, now=now + timedelta(hours=1), settings=settings) is True
 
 
 def test_forecast_feature_set_includes_velocity_and_rpc_health() -> None:
@@ -392,15 +381,11 @@ def test_forecast_matrix_carries_velocity_values_and_drift_baseline(session) -> 
 
     for asset in (flat, drop_a, drop_b, late):
         for hour in range(0, 25):
-            _seed_features(
-                session, asset, hour, crash=asset.symbol in ("DROP", "DROP2")
-            )
+            _seed_features(session, asset, hour, crash=asset.symbol in ("DROP", "DROP2"))
             if asset.symbol in ("DROP", "DROP2"):
                 # KOL shill + fast-growing repo/model: the dev-activity evidence
                 # that should make the hype-mechanics more separable.
-                _seed_velocity_features(
-                    session, asset, hour, kol=2.0, stars=20.0, downloads=500.0
-                )
+                _seed_velocity_features(session, asset, hour, kol=2.0, stars=20.0, downloads=500.0)
     session.commit()
 
     engine = ForecastEngine()
@@ -453,14 +438,11 @@ def test_forecast_matrix_carries_velocity_values_and_drift_baseline(session) -> 
     ]
     assert session.scalar(select(func.count()).select_from(models.Forecast)) == 0
     ab_metrics = session.scalars(
-        select(models.BacktestResult).where(
-            models.BacktestResult.run_id == ab_result["run_id"]
-        )
+        select(models.BacktestResult).where(models.BacktestResult.run_id == ab_result["run_id"])
     ).all()
     assert any(row.metric_name == "forecast_ab.full.precision_at_10" for row in ab_metrics)
     assert any(
-        row.metric_name == "forecast_ab.velocity_masked.calibration_error"
-        for row in ab_metrics
+        row.metric_name == "forecast_ab.velocity_masked.calibration_error" for row in ab_metrics
     )
     assert any(row.metric_name == "forecast_ab.delta.median_lead_time_hours" for row in ab_metrics)
 
@@ -556,9 +538,9 @@ def test_phase_conditioned_hazards(session) -> None:
     # so predict must fall back to the global aggregate fit.
     assert model.hazards_by_phase["parabolic"].mean_time_to_collapse is None
     assert model.hazard.mean_time_to_collapse is not None
-    assert (
-        model.peak_hazards_by_phase["ignition"].mean_time_to_collapse is None
-    ), "FAST never pumped -> no time-to-peak curve for the ignition bucket"
+    assert model.peak_hazards_by_phase["ignition"].mean_time_to_collapse is None, (
+        "FAST never pumped -> no time-to-peak curve for the ignition bucket"
+    )
 
     session.commit()
     predicted = engine._predict(session, model, decision)
@@ -625,9 +607,7 @@ def test_calibration_gap_warns_when_over_threshold(session, monkeypatch) -> None
     calls: list[dict[str, object]] = []
 
     def fake_notify(gap, blended, real, samples, *, threshold, settings=None):
-        calls.append(
-            {"gap": gap, "blended": blended, "real": real, "threshold": threshold}
-        )
+        calls.append({"gap": gap, "blended": blended, "real": real, "threshold": threshold})
         return True
 
     monkeypatch.setattr("ops.notifier.notify_calibration_bias", fake_notify)
@@ -782,8 +762,12 @@ def test_forecast_run_gates_when_real_metrics_untrustworthy(session, monkeypatch
     result = engine.run(session, decision_ts=T0 + timedelta(hours=48))
     session.commit()
     assert result["status"] == "gated"
-    assert {"real_test_samples", "calibration_error", "calibration_error_real",
-            "precision_at_10_real"} <= set(result["gate"])
+    assert {
+        "real_test_samples",
+        "calibration_error",
+        "calibration_error_real",
+        "precision_at_10_real",
+    } <= set(result["gate"])
     assert session.scalar(select(func.count()).select_from(models.Forecast)) == 0
     health = session.scalar(
         select(models.SystemHealth)

@@ -3,6 +3,7 @@
 Avoids circular imports: every view imports api_get/api_post from here
 instead of from ui.app directly.
 """
+
 from __future__ import annotations
 
 import os

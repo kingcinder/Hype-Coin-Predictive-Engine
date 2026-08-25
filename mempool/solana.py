@@ -91,9 +91,7 @@ class SolanaMempoolWatcher:
         if observed_at > window_end:
             return False
         recent = [
-            signature
-            for signature in signatures
-            if self._signature_time(signature) is not None
+            signature for signature in signatures if self._signature_time(signature) is not None
         ]
         if len(recent) < self.settings.mempool_burst_min_txs:
             return False
@@ -172,9 +170,7 @@ class SolanaMempoolWatcher:
             )
         )
 
-    def _new_signatures(
-        self, signatures: list[dict[str, Any]], seen: set[str]
-    ) -> list[str]:
+    def _new_signatures(self, signatures: list[dict[str, Any]], seen: set[str]) -> list[str]:
         output: list[str] = []
         for item in signatures:
             signature = str(item.get("signature") or "")

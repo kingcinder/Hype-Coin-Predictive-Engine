@@ -61,8 +61,7 @@ def _seed_evidence(
         row = store_raw_evidence(
             session,
             source=source,
-            payload=payload
-            or {"fixture": index, "name": f"ev-{batch}-{index}", "batch": batch},
+            payload=payload or {"fixture": index, "name": f"ev-{batch}-{index}", "batch": batch},
             observed_at=DECISION_TS - timedelta(days=days_ago, hours=index),
         )
         rows.append(row)
@@ -118,9 +117,7 @@ def test_compact_writes_partitioned_parquet_and_manifests(session, tmp_path) -> 
 
     settings = _settings(tmp_path)
     store = LocalArchiveStore(tmp_path)
-    result = RawEvidenceCompactor(store=store, settings=settings).compact(
-        session, DECISION_TS
-    )
+    result = RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
 
     assert result["compacted"] == 3
     assert result["partitions"] == 2  # june + april
@@ -208,9 +205,7 @@ def test_query_archive_exposes_lake_to_duckdb(session, tmp_path) -> None:
     store = LocalArchiveStore(tmp_path)
     RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
 
-    rows = query_archive(
-        "SELECT count(*) AS n FROM evidence", store=store, settings=settings
-    )
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
     assert rows == [{"n": 5}]
 
     by_source = query_archive(
@@ -242,9 +237,7 @@ def test_due_partitions_reports_only_aged_partitions(session, tmp_path) -> None:
     assert len(due) == 2
 
 
-def test_compact_partition_filter_compacts_only_due_partitions(
-    session, tmp_path
-) -> None:
+def test_compact_partition_filter_compacts_only_due_partitions(session, tmp_path) -> None:
     """Passing the per-partition schedule restricts compaction to exactly the
     due partitions; other aged partitions stay unarchived for a later pass."""
     _, source, april_rows = _seed_evidence(session, days_ago=77, count=1)
@@ -252,18 +245,14 @@ def test_compact_partition_filter_compacts_only_due_partitions(
 
     settings = _settings(tmp_path)
     compactor = RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings)
-    result = compactor.compact(
-        session, DECISION_TS, partition_filter={(source.id, 2026, 6)}
-    )
+    result = compactor.compact(session, DECISION_TS, partition_filter={(source.id, 2026, 6)})
 
     assert result["compacted"] == 1
     assert result["partitions"] == 1
     assert result["due_partitions"] == 1
     session.expire_all()
     # June evidence (11 days old, inside the retention window) was compacted.
-    assert (
-        session.get(models.RawEvidenceItem, june_rows[0].id).archived_at is not None
-    )
+    assert session.get(models.RawEvidenceItem, june_rows[0].id).archived_at is not None
     # April evidence is due but was not in the filter: left for a later pass.
     april = session.get(models.RawEvidenceItem, april_rows[0].id)
     assert april is not None

@@ -22,9 +22,7 @@ class SimilarSetup:
     score: models.Score | None
 
 
-def feature_vector(
-    session: Session, *, asset_id: int, decision_ts: datetime
-) -> dict[str, float]:
+def feature_vector(session: Session, *, asset_id: int, decision_ts: datetime) -> dict[str, float]:
     rows = session.scalars(
         select(models.Feature).where(
             models.Feature.asset_id == asset_id,
@@ -64,14 +62,10 @@ def similar_setups(
         return []
 
     feature_rows = session.scalars(
-        select(models.Feature)
-        .where(
+        select(models.Feature).where(
             models.Feature.decision_ts <= decision_ts,
             models.Feature.missing_flag.is_(False),
-            ~(
-                (models.Feature.asset_id == asset_id)
-                & (models.Feature.decision_ts == decision_ts)
-            ),
+            ~((models.Feature.asset_id == asset_id) & (models.Feature.decision_ts == decision_ts)),
         )
     ).all()
 

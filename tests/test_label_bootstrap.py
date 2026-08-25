@@ -4,6 +4,7 @@ Verifies that seed_labels_at_feature_timestamps generates labels at the
 exact timestamps where features exist, bridging the gap that prevented
 ML training.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -114,9 +115,7 @@ def test_seed_labels_generates_labels_at_feature_timestamps(session) -> None:
     # Should have generated labels at hours 11 and 13
     assert counts["decision_points"] == 2
     # Check labels exist at the feature timestamps
-    labels = session.scalars(
-        select(models.Label).where(models.Label.asset_id == asset.id)
-    ).all()
+    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
     assert len(labels) >= 4  # 2 timestamps × 2 label types (ignition + collapse)
     label_timestamps = {
         label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts for label in labels
@@ -175,9 +174,7 @@ def test_seed_labels_skips_forward_window_not_elapsed(session) -> None:
     session.commit()
 
     assert counts["decision_points"] == 0
-    labels = session.scalars(
-        select(models.Label).where(models.Label.asset_id == asset.id)
-    ).all()
+    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
     assert len(labels) == 0
 
 

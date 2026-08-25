@@ -28,6 +28,7 @@ def make_engine(database_url: str | None = None):
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
+
     return engine
 
 

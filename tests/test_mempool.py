@@ -62,18 +62,14 @@ def test_solana_mempool_detects_burst_and_is_idempotent(session, monkeypatch) ->
         source = session.scalar(select(models.Source).where(models.Source.name == "solana_rpc"))
         assert source is not None
         watcher = SolanaMempoolWatcher()
-        result = watcher.watch_asset(
-            session, asset=asset, source=source, decision_ts=NOW
-        )
+        result = watcher.watch_asset(session, asset=asset, source=source, decision_ts=NOW)
         session.commit()
         assert result["burst"] is True
         assert result["new_signatures"] == 20
         assert session.scalar(select(func.count()).select_from(models.IgnitionEvent)) == 1
 
         # second watch sees the same signatures -> watermark dedupes, no new event
-        result = watcher.watch_asset(
-            session, asset=asset, source=source, decision_ts=NOW
-        )
+        result = watcher.watch_asset(session, asset=asset, source=source, decision_ts=NOW)
         session.commit()
         assert result["new_signatures"] == 0
         assert session.scalar(select(func.count()).select_from(models.IgnitionEvent)) == 1

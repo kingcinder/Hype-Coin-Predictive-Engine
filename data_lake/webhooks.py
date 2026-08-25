@@ -9,6 +9,7 @@ Extends the existing ntfy.sh notifier with support for:
 Webhooks are registered in the database and dispatched after each scan
 when high-signal events are detected.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -339,9 +340,11 @@ def webhook_dispatch_history(
     limit: int = 50,
 ) -> list[models.WebhookDispatch]:
     """Get recent webhook dispatch history."""
-    stmt = select(models.WebhookDispatch).order_by(
-        models.WebhookDispatch.dispatched_at.desc()
-    ).limit(limit)
+    stmt = (
+        select(models.WebhookDispatch)
+        .order_by(models.WebhookDispatch.dispatched_at.desc())
+        .limit(limit)
+    )
     if webhook_id is not None:
         stmt = stmt.where(models.WebhookDispatch.webhook_config_id == webhook_id)
     return list(session.scalars(stmt).all())

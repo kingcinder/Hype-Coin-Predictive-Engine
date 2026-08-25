@@ -78,10 +78,7 @@ def detect_phase(evidence: PhaseEvidence) -> LifecyclePhase:
     ):
         return LifecyclePhase.DEAD
 
-    if (
-        evidence.one_hour_return is not None
-        and evidence.one_hour_return <= COLLAPSE_1H_RETURN_PCT
-    ):
+    if evidence.one_hour_return is not None and evidence.one_hour_return <= COLLAPSE_1H_RETURN_PCT:
         return LifecyclePhase.COLLAPSE
 
     if evidence.withdrawal_events >= 1:
@@ -102,10 +99,7 @@ def detect_phase(evidence: PhaseEvidence) -> LifecyclePhase:
     ):
         return LifecyclePhase.PARABOLIC
 
-    if (
-        evidence.buy_sell_ratio is not None
-        and evidence.buy_sell_ratio < SATURATION_BUY_SELL
-    ):
+    if evidence.buy_sell_ratio is not None and evidence.buy_sell_ratio < SATURATION_BUY_SELL:
         return LifecyclePhase.SATURATION
 
     if (
@@ -182,9 +176,7 @@ class LifecycleEngine:
         self, session: Session, asset: models.Asset, decision_ts: datetime
     ) -> PhaseEvidence | None:
         pair_ids = list(
-            session.scalars(
-                select(models.Pair.id).where(models.Pair.base_asset_id == asset.id)
-            )
+            session.scalars(select(models.Pair.id).where(models.Pair.base_asset_id == asset.id))
         )
         pool_ids = list(
             session.scalars(
@@ -212,26 +204,34 @@ class LifecycleEngine:
             elif event.event_type == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value:
                 withdrawal_events += 1
 
-        market_rows = list(
-            session.scalars(
-                select(models.MarketSnapshot)
-                .where(
-                    models.MarketSnapshot.pair_id.in_(pair_ids),
-                    models.MarketSnapshot.observed_at <= decision_ts,
+        market_rows = (
+            list(
+                session.scalars(
+                    select(models.MarketSnapshot)
+                    .where(
+                        models.MarketSnapshot.pair_id.in_(pair_ids),
+                        models.MarketSnapshot.observed_at <= decision_ts,
+                    )
+                    .order_by(models.MarketSnapshot.ts)
                 )
-                .order_by(models.MarketSnapshot.ts)
             )
-        ) if pair_ids else []
-        liquidity_rows = list(
-            session.scalars(
-                select(models.LiquiditySnapshot)
-                .where(
-                    models.LiquiditySnapshot.pool_id.in_(pool_ids),
-                    models.LiquiditySnapshot.observed_at <= decision_ts,
+            if pair_ids
+            else []
+        )
+        liquidity_rows = (
+            list(
+                session.scalars(
+                    select(models.LiquiditySnapshot)
+                    .where(
+                        models.LiquiditySnapshot.pool_id.in_(pool_ids),
+                        models.LiquiditySnapshot.observed_at <= decision_ts,
+                    )
+                    .order_by(models.LiquiditySnapshot.ts)
                 )
-                .order_by(models.LiquiditySnapshot.ts)
             )
-        ) if pool_ids else []
+            if pool_ids
+            else []
+        )
 
         narrative = session.scalar(
             select(models.SocialMention.id)
@@ -250,9 +250,7 @@ class LifecycleEngine:
         if pair_ids:
             created = [
                 ensure_utc(row.created_at_source)
-                for row in session.scalars(
-                    select(models.Pool).where(models.Pool.id.in_(pool_ids))
-                )
+                for row in session.scalars(select(models.Pool).where(models.Pool.id.in_(pool_ids)))
                 if row.created_at_source is not None
             ]
             if created:
@@ -271,8 +269,8 @@ class LifecycleEngine:
                     break
             if entry and entry.price_usd:
                 one_hour_return = (
-                    (float(latest_market.price_usd) / float(entry.price_usd) - 1.0) * 100.0
-                )
+                    float(latest_market.price_usd) / float(entry.price_usd) - 1.0
+                ) * 100.0
 
         volume_acceleration = None
         if latest_market is not None and latest_market.volume_usd:
@@ -465,6 +463,7 @@ class LifecycleEngine:
             f"liquidity_usd={details.get('liquidity_usd')}"
         )
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(
             session, AlertType.LIFECYCLE_TRANSITION.value, self.settings
         ):
@@ -481,7 +480,5 @@ class LifecycleEngine:
         )
 
 
-def run_lifecycle(
-    session: Session, *, decision_ts: datetime | None = None
-) -> dict[str, int]:
+def run_lifecycle(session: Session, *, decision_ts: datetime | None = None) -> dict[str, int]:
     return LifecycleEngine().scan(session, decision_ts=decision_ts)

@@ -3,6 +3,7 @@
 Provides price, volume, and token profile data as a fallback when
 DexScreener/GeckoTerminal are rate-limited or down. Free tier available.
 """
+
 from __future__ import annotations
 
 from typing import Any

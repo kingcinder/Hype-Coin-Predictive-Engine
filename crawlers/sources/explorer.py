@@ -4,6 +4,7 @@ Crawls block explorers (Etherscan, Solscan) for contract verification status,
 deployer history, token holder distribution, and suspicious contract flags
 that feed the risk engine and fingerprint system.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -48,22 +49,24 @@ class ExplorerCrawler(BaseCrawler):
                     },
                 ).json()
                 for contract in (data.get("result") or [])[:10]:
-                    items.append({
-                        "title": f"New contract: {contract.get('contractAddress', '')[:10]}...",
-                        "text": f"Contract deployed on {chain} by "
-                        f"{contract.get('contractCreator', '')[:10]}...",
-                        "url": f"https://{chain}.etherscan.io/address/"
-                        f"{contract.get('contractAddress', '')}",
-                        "published": utc_now(),
-                        "source_domain": f"{chain}.etherscan.io",
-                        "source_type": "on_chain",
-                        "metrics": {
-                            "chain": chain,
-                            "address": contract.get("contractAddress"),
-                            "creator": contract.get("contractCreator"),
-                            "tx_hash": contract.get("txHash"),
-                        },
-                    })
+                    items.append(
+                        {
+                            "title": f"New contract: {contract.get('contractAddress', '')[:10]}...",
+                            "text": f"Contract deployed on {chain} by "
+                            f"{contract.get('contractCreator', '')[:10]}...",
+                            "url": f"https://{chain}.etherscan.io/address/"
+                            f"{contract.get('contractAddress', '')}",
+                            "published": utc_now(),
+                            "source_domain": f"{chain}.etherscan.io",
+                            "source_type": "on_chain",
+                            "metrics": {
+                                "chain": chain,
+                                "address": contract.get("contractAddress"),
+                                "creator": contract.get("contractCreator"),
+                                "tx_hash": contract.get("txHash"),
+                            },
+                        }
+                    )
             return items
         except Exception:
             return []

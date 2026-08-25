@@ -65,25 +65,31 @@ class PrelaunchQueue:
     def _rank_asset(
         self, session: Session, asset: models.Asset, decision_ts: datetime
     ) -> models.PrelaunchCandidate | None:
-        mentions_24h = session.scalar(
-            select(func.count())
-            .select_from(models.SocialMention)
-            .where(
-                models.SocialMention.observed_at <= decision_ts,
-                models.SocialMention.ts > decision_ts - timedelta(hours=24),
-                (models.SocialMention.asset_id == asset.id)
-                | (models.SocialMention.topic.ilike(f"%{asset.symbol}%")),
+        mentions_24h = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.SocialMention)
+                .where(
+                    models.SocialMention.observed_at <= decision_ts,
+                    models.SocialMention.ts > decision_ts - timedelta(hours=24),
+                    (models.SocialMention.asset_id == asset.id)
+                    | (models.SocialMention.topic.ilike(f"%{asset.symbol}%")),
+                )
             )
-        ) or 0
-        total_mentions = session.scalar(
-            select(func.count())
-            .select_from(models.SocialMention)
-            .where(
-                models.SocialMention.observed_at <= decision_ts,
-                (models.SocialMention.asset_id == asset.id)
-                | (models.SocialMention.topic.ilike(f"%{asset.symbol}%")),
+            or 0
+        )
+        total_mentions = (
+            session.scalar(
+                select(func.count())
+                .select_from(models.SocialMention)
+                .where(
+                    models.SocialMention.observed_at <= decision_ts,
+                    (models.SocialMention.asset_id == asset.id)
+                    | (models.SocialMention.topic.ilike(f"%{asset.symbol}%")),
+                )
             )
-        ) or 0
+            or 0
+        )
         proximity_hours = self._catalyst_proximity(session, asset.id, decision_ts)
         recidivism = self._recidivism(session, asset.id, decision_ts)
         dev_present = 1.0 if (asset.website_url or asset.github_url) else 0.0
@@ -95,10 +101,7 @@ class PrelaunchQueue:
         dev_signal = 100.0 if dev_present else 30.0
         recidivism_boost = _clamp(recidivism * 0.5)
         priority = _clamp(
-            0.30 * narrative
-            + 0.25 * catalyst_boost
-            + 0.20 * dev_signal
-            + 0.25 * recidivism_boost
+            0.30 * narrative + 0.25 * catalyst_boost + 0.20 * dev_signal + 0.25 * recidivism_boost
         )
         drivers: dict[str, Any] = {
             "mentions_24h": mentions_24h,
@@ -161,6 +164,7 @@ class PrelaunchQueue:
         if existing:
             return
         from ops.alert_quality import alert_generation_allowed
+
         if not alert_generation_allowed(
             session, AlertType.PRELAUNCH_CANDIDATE.value, self.settings
         ):

@@ -6,6 +6,7 @@ Every item collected by a Night Crawler flows through this pipeline, which:
 3. Triggers webhook alerts for actionable findings
 4. Updates heuristics with outcome feedback
 """
+
 from __future__ import annotations
 
 import time
@@ -39,10 +40,9 @@ def run_nightcrawler_pipeline(
     try:
         # 1. Run all crawlers
         from crawlers.orchestrator import get_nightcrawler_orchestrator
+
         orchestrator = get_nightcrawler_orchestrator()
-        crawl_result = orchestrator.run_all(
-            session, decision_ts=decision_ts, force=force
-        )
+        crawl_result = orchestrator.run_all(session, decision_ts=decision_ts, force=force)
 
         # 2. Score and archive collected items
         pipeline_result = _score_and_archive(session, crawl_result, decision_ts)

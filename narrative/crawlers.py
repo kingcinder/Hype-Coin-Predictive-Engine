@@ -64,9 +64,7 @@ class RedditCrawler:
     def fetch(self) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
         for subreddit in self.subreddits:
-            data = self.http.get_json(
-                f"/r/{subreddit}/new.json", params={"limit": self.limit}
-            )
+            data = self.http.get_json(f"/r/{subreddit}/new.json", params={"limit": self.limit})
             for child in (data.get("data") or {}).get("children") or []:
                 post = child.get("data") or {}
                 title = str(post.get("title") or "").strip()
@@ -216,7 +214,11 @@ def normalize_telegram_message(message: Any, *, channel_handle: str) -> dict[str
     message_id = getattr(message, "id", None)
     date = _dt(getattr(message, "date", None))
     handle = channel_handle.lstrip("@")
-    url = f"https://t.me/{handle}/{message_id}" if message_id is not None else f"https://t.me/{handle}"
+    url = (
+        f"https://t.me/{handle}/{message_id}"
+        if message_id is not None
+        else f"https://t.me/{handle}"
+    )
     return {
         "title": text[:256],
         "text": text,

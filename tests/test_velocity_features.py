@@ -82,17 +82,13 @@ def test_velocity_features_from_crawler_metrics(session) -> None:
     store_raw_evidence(
         session,
         source=github,
-        payload={
-            "items": [{"url": repo_url, "title": "example/hype", "metrics": {"stars": 100}}]
-        },
+        payload={"items": [{"url": repo_url, "title": "example/hype", "metrics": {"stars": 100}}]},
         observed_at=decision_ts - timedelta(hours=36),
     )
     store_raw_evidence(
         session,
         source=github,
-        payload={
-            "items": [{"url": repo_url, "title": "example/hype", "metrics": {"stars": 130}}]
-        },
+        payload={"items": [{"url": repo_url, "title": "example/hype", "metrics": {"stars": 130}}]},
         observed_at=decision_ts,
     )
     # Two crawls of the same model 24h apart: 1000 downloads => 1000/day.

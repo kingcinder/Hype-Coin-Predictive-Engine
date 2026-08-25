@@ -27,9 +27,7 @@ def _feature(features: dict[str, float], name: str, default: float = 0.0) -> flo
         return default
 
 
-def mask_unreliable_forecast(
-    session, features: dict[str, float]
-) -> tuple[dict[str, float], bool]:
+def mask_unreliable_forecast(session, features: dict[str, float]) -> tuple[dict[str, float], bool]:
     """Remove the collapse forecast while calibration bias is red."""
     health = session.scalar(
         select(models.SystemHealth)
@@ -98,9 +96,7 @@ def assess_risk(features: dict[str, float]) -> RiskAssessment:
 
     if withdrawal_signal >= 1:
         risk_points += 25
-        reasons.append(
-            f"On-chain liquidity withdrawal detected: {withdrawal_signal:.0f} event(s)"
-        )
+        reasons.append(f"On-chain liquidity withdrawal detected: {withdrawal_signal:.0f} event(s)")
         if liquidity < settings.min_validated_liquidity_usd:
             hard_reject = True
             reasons.append("Liquidity withdrawal with a shallow book triggers hard reject")

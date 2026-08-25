@@ -37,9 +37,7 @@ def test_rewrite_env_pool_csvs_preserves_other_settings_and_order(tmp_path) -> N
         "SOLANA_RPC_POOL_CSV=old\n",
         encoding="utf-8",
     )
-    results = {
-        chain: PoolProbeResult(chain, (), (), ()) for chain in ("solana", "ethereum")
-    }
+    results = {chain: PoolProbeResult(chain, (), (), ()) for chain in ("solana", "ethereum")}
     results["solana"] = PoolProbeResult("solana", ("sol-new",), ("sol-new",), ())
     results["base"] = PoolProbeResult(
         "base",

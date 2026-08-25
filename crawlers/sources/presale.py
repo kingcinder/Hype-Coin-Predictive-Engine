@@ -4,6 +4,7 @@ Tracks token presales, IDOs, IEOs, and launchpad allocations across
 multiple platforms. Early presale signals often predict which tokens
 will be the next hype coins before they hit DEX trading.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -39,26 +40,30 @@ class PresaleCrawler(BaseCrawler):
             ).json()
             items = []
             for sale in (data.get("data") or [])[:30]:
-                items.append({
-                    "title": sale.get("name", ""),
-                    "text": f"{sale.get('name', '')} presale on {sale.get('platform', 'PinkSale')}",
-                    "url": f"https://pinksale.finance/launchpad/{sale.get('address', '')}",
-                    "published": utc_now(),
-                    "source_domain": "pinksale.finance",
-                    "source_type": "presale",
-                    "metrics": {
-                        "platform": "pinksale",
-                        "address": sale.get("address"),
-                        "token_name": sale.get("name"),
-                        "token_symbol": sale.get("symbol"),
-                        "chain": sale.get("chain"),
-                        "soft_cap": sale.get("softCap"),
-                        "hard_cap": sale.get("hardCap"),
-                        "start_time": sale.get("startTime"),
-                        "end_time": sale.get("endTime"),
-                        "presale_status": sale.get("status"),
-                    },
-                })
+                items.append(
+                    {
+                        "title": sale.get("name", ""),
+                        "text": (
+                            f"{sale.get('name', '')} presale on {sale.get('platform', 'PinkSale')}"
+                        ),
+                        "url": f"https://pinksale.finance/launchpad/{sale.get('address', '')}",
+                        "published": utc_now(),
+                        "source_domain": "pinksale.finance",
+                        "source_type": "presale",
+                        "metrics": {
+                            "platform": "pinksale",
+                            "address": sale.get("address"),
+                            "token_name": sale.get("name"),
+                            "token_symbol": sale.get("symbol"),
+                            "chain": sale.get("chain"),
+                            "soft_cap": sale.get("softCap"),
+                            "hard_cap": sale.get("hardCap"),
+                            "start_time": sale.get("startTime"),
+                            "end_time": sale.get("endTime"),
+                            "presale_status": sale.get("status"),
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
@@ -72,25 +77,27 @@ class PresaleCrawler(BaseCrawler):
             ).json()
             items = []
             for event in (data.get("data") or [])[:30]:
-                items.append({
-                    "title": event.get("name", ""),
-                    "text": f"{event.get('name', '')} {event.get('type', '').upper()} on "
-                    f"{event.get('platform', '')}",
-                    "url": f"https://cryptorank.io/event/{event.get('slug', '')}",
-                    "published": utc_now(),
-                    "source_domain": "cryptorank.io",
-                    "source_type": "presale",
-                    "metrics": {
-                        "platform": event.get("platform"),
-                        "event_type": event.get("type"),
-                        "chain": event.get("chain"),
-                        "start_date": event.get("startDate"),
-                        "end_date": event.get("endDate"),
-                        "token_name": event.get("name"),
-                        "token_symbol": event.get("symbol"),
-                        "total_raised": event.get("totalRaised"),
-                    },
-                })
+                items.append(
+                    {
+                        "title": event.get("name", ""),
+                        "text": f"{event.get('name', '')} {event.get('type', '').upper()} on "
+                        f"{event.get('platform', '')}",
+                        "url": f"https://cryptorank.io/event/{event.get('slug', '')}",
+                        "published": utc_now(),
+                        "source_domain": "cryptorank.io",
+                        "source_type": "presale",
+                        "metrics": {
+                            "platform": event.get("platform"),
+                            "event_type": event.get("type"),
+                            "chain": event.get("chain"),
+                            "start_date": event.get("startDate"),
+                            "end_date": event.get("endDate"),
+                            "token_name": event.get("name"),
+                            "token_symbol": event.get("symbol"),
+                            "total_raised": event.get("totalRaised"),
+                        },
+                    }
+                )
             return items
         except Exception:
             return []
