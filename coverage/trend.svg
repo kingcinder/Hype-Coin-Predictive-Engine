@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="520" height="140" viewBox="0 0 520 140">
   <rect width="100%" height="100%" fill="#1a1f2e"/>
-  <path d="M 24.0,97.6 L 260.0,97.6 L 496.0,97.6 L 496,116 L 24,116 Z" fill="rgba(0,212,255,0.12)" stroke="none"/>
-  <path d="M 24.0,97.6 L 260.0,97.6 L 496.0,97.6" fill="none" stroke="#00d4ff" stroke-width="2"/>
-  <circle cx="496.0" cy="97.6" r="3.5" fill="#00ff88"/>
-  <text x="466.0" y="89.6" font-size="11" font-weight="700" fill="#00ff88">67.1%</text>
-  <text x="24" y="24.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="47.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="70.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="93.0" font-size="9" fill="#8890a0">66%</text><text x="24" y="116.0" font-size="9" fill="#8890a0">66%</text>
+  <path d="M 24.0,102.9 L 181.3,102.9 L 338.7,102.9 L 496.0,37.1 L 496,116 L 24,116 Z" fill="rgba(0,212,255,0.12)" stroke="none"/>
+  <path d="M 24.0,102.9 L 181.3,102.9 L 338.7,102.9 L 496.0,37.1" fill="none" stroke="#00d4ff" stroke-width="2"/>
+  <circle cx="496.0" cy="37.1" r="3.5" fill="#00ff88"/>
+  <text x="466.0" y="29.1" font-size="11" font-weight="700" fill="#00ff88">68.1%</text>
+  <text x="24" y="24.0" font-size="9" fill="#8890a0">68%</text><text x="24" y="47.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="70.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="93.0" font-size="9" fill="#8890a0">67%</text><text x="24" y="116.0" font-size="9" fill="#8890a0">66%</text>
 </svg>
