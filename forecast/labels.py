@@ -111,33 +111,20 @@ class LabelEngine:
         decision_ts: datetime,
         source: str,
     ) -> bool:
-        row = session.scalar(
-            select(models.Label).where(
-                models.Label.asset_id == asset_id,
-                models.Label.ts == ts,
-                models.Label.label_type == label_type,
-            )
-        )
+        """Delegates to the module-level upsert to avoid duplication."""
         label_value = "1" if value >= 0.5 else "0"
-        if row:
-            row.label_value = label_value
-            row.observed_at = decision_ts
-            return False
-        session.add(
-            models.Label(
-                asset_id=asset_id,
-                ts=ts,
-                observed_at=decision_ts,
-                label_type=label_type,
-                label_value=label_value,
-                label_source=source,
-            )
+        return upsert_label(
+            session,
+            asset_id=asset_id,
+            ts=ts,
+            label_type=label_type,
+            label_value=label_value,
+            decision_ts=decision_ts,
+            source=source,
         )
-        session.flush()
-        return True
 
 
-def _upsert_label_standalone(
+def upsert_label(
     session: Session,
     *,
     asset_id: int,
@@ -147,7 +134,7 @@ def _upsert_label_standalone(
     decision_ts: datetime,
     source: str,
 ) -> bool:
-    """Idempotent label upsert — matches LabelEngine._upsert_label pattern."""
+    """Idempotent label upsert used by both LabelEngine and the bootstrap."""
     row = session.scalar(
         select(models.Label).where(
             models.Label.asset_id == asset_id,
@@ -232,7 +219,7 @@ def seed_labels_at_feature_timestamps(
                     models.Label.ts == feature_ts,
                 )
             )
-            if existing and existing > 0:
+            if existing is not None and existing > 0:
                 continue
             counts["decision_points"] += 1
 
@@ -271,11 +258,9 @@ def seed_labels_at_feature_timestamps(
             if not future_snaps:
                 continue
 
-            future_prices: list[float] = []
-            for snap in future_snaps:
-                p = snap.price_usd
-                if p is not None and p > 0:
-                    future_prices.append(float(p))
+            future_prices = [
+                float(p) for snap in future_snaps if (p := snap.price_usd) is not None and p > 0
+            ]
             if not future_prices:
                 continue
 
@@ -286,7 +271,7 @@ def seed_labels_at_feature_timestamps(
 
             # Write ignition label (upsert for idempotency)
             ignition_value = "1" if peak_pct >= ignition_threshold else "0"
-            if _upsert_label_standalone(
+            if upsert_label(
                 session,
                 asset_id=asset_id,
                 ts=feature_ts,
@@ -299,7 +284,7 @@ def seed_labels_at_feature_timestamps(
 
             # Write collapse label (upsert for idempotency)
             collapse_value = "1" if trough_pct <= collapse_threshold else "0"
-            if _upsert_label_standalone(
+            if upsert_label(
                 session,
                 asset_id=asset_id,
                 ts=feature_ts,
