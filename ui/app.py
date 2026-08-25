@@ -1884,13 +1884,72 @@ def render_active_view(view: str) -> None:
 # ── SSE-injected live banner (shown at top of every page) ─────────────────
 
 
+def _ws_bridge_js(api_base: str) -> str:
+    """Return JavaScript that maintains a persistent WebSocket connection to the
+    price stream and writes the latest price data into localStorage.
+
+    The WS URL uses ``ws://`` (loopback dev) — a reverse proxy in production
+    would terminate TLS and forward to the same port.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(api_base)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    ws_url = urlunparse((ws_scheme, parsed.netloc, "/ws/prices", "", "", ""))
+    return f"""
+    <script>
+    (function() {{
+      const KEY = 'serpent_prices';
+      const url = '{ws_url}';
+      let retryMs = 1000;
+      const MAX_RETRY = 30000;
+
+      function connect() {{
+        const ws = new WebSocket(url);
+        ws.onmessage = function(e) {{
+          try {{
+            const data = JSON.parse(e.data);
+            if (data.type === 'ping') return;
+            data._ts = Date.now();
+            localStorage.setItem(KEY, JSON.stringify(data));
+          }} catch(err) {{ console.error('WS parse error', err); }}
+        }};
+        ws.onerror = function() {{
+          ws.close();
+          retryMs = Math.min(retryMs * 2, MAX_RETRY);
+          setTimeout(connect, retryMs);
+        }};
+        ws.onclose = function() {{
+          retryMs = Math.min(retryMs * 2, MAX_RETRY);
+          setTimeout(connect, retryMs);
+        }};
+        ws.onopen = function() {{ retryMs = 1000; }};
+      }}
+      if (!window._serpentWSConnected) {{
+        window._serpentWSConnected = true;
+        connect();
+      }}
+    }})();
+    </script>
+    """
+
+
 def main() -> None:
-    st.set_page_config(page_title="Serpent Circle Hype-Coin Engine", layout="wide")
-    st.title("Serpent Circle Hype-Coin Engine")
+    st.set_page_config(
+        page_title="Serpent Circle Hype-Coin Engine",
+        page_icon="🐍",
+        layout="wide",
+    )
+    # ── Branding: inject dark-theme CSS + Serpent Circle palette ──────────
+    from ui.styles import load_branding
+
+    load_branding()
+    st.title("🐍 Serpent Circle Hype-Coin Engine")
     st.caption("Research-only local intelligence. Hype and risk stay separate.")
 
-    # Inject the persistent SSE JavaScript connection (reconnects automatically)
+    # Inject the persistent SSE + WebSocket JavaScript connections
     components.html(_sse_bridge_js(API_BASE_URL), height=0)
+    components.html(_ws_bridge_js(API_BASE_URL), height=0)
 
     view = st.sidebar.radio(
         "View",
