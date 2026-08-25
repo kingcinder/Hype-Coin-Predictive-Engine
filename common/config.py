@@ -275,6 +275,15 @@ class Settings(BaseSettings):
     risk_calibration_frequency_hours: float = 24.0
     risk_calibration_min_samples: int = 10
 
+    # local LLM integration (Ollama)
+    llm_enabled: bool = True
+    llm_ollama_url: str = "http://localhost:11434"
+    llm_model: str = "qwen2.5:0.5b"
+    llm_weight: float = 0.10  # ensemble weight for LLM layer
+    llm_max_tokens_per_call: int = 512
+    llm_batch_size: int = 10  # max tokens per batch predict call
+    llm_timeout_seconds: float = 30.0
+
     model_version: str = "mvp-rules-v1"
     fingerprint_model_version: str = "cooccurrence-v1"
     forecast_model_version: str = "gbm-hist-v1"

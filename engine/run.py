@@ -232,6 +232,13 @@ def main() -> None:
             close_nightcrawler_orchestrator()
         except Exception:
             pass
+        # Clean up LLM HTTP client
+        try:
+            from llm.engine import llm_engine
+
+            llm_engine.close()
+        except Exception:
+            pass
         if ui.poll() is None:
             ui.terminate()
             try:

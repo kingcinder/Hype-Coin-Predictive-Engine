@@ -15,7 +15,8 @@ from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
 from risk_engine.rules import mask_unreliable_forecast
 from scoring.ensemble import ensemble_engine
-from scoring.formulas import clamp, compute_scores
+from scoring.formulas import ScoreResult, clamp, compute_scores
+from scoring.llm_ensemble import apply_llm_adjustments
 from storage import models
 
 log = get_logger(__name__)
@@ -64,6 +65,7 @@ class ScoringEngine:
             feature_source=feature_source,
         )
         scores: list[models.Score] = []
+        result_by_asset: dict[int, ScoreResult] = {}  # per-asset ScoreResult for LLM re-upsert
         price_updates: list[PriceUpdate] = []
         ts_iso = decision_ts.isoformat()
         for asset_id, features in feature_map.items():
@@ -99,6 +101,7 @@ class ScoringEngine:
                 )
             except Exception:  # noqa: BLE001
                 pass  # ensemble is additive, never breaks scoring
+
             score = self._upsert_score(
                 session, asset_id=asset_id, decision_ts=decision_ts, result=result
             )
@@ -117,7 +120,71 @@ class ScoringEngine:
                 score=score,
                 decision_ts=decision_ts,
             )
+            result_by_asset[asset_id] = result
             scores.append(score)
+        # ── LLM batch layer: single Ollama call for all scored assets ──────
+        # Collects all tokens needing LLM prediction, calls batch_predict()
+        # once, then applies deltas in a second pass over scores.
+        if self.settings.llm_enabled and scores:
+            try:
+                from llm.engine import llm_engine
+
+                llm_tokens = []
+                score_by_asset: dict[int, models.Score] = {s.asset_id: s for s in scores}
+                for asset_id in feature_map:
+                    asset = session.get(models.Asset, asset_id)
+                    if not asset:
+                        continue
+                    raw = {name: feature.value for name, feature in feature_map[asset_id].items()}
+                    s = score_by_asset.get(asset_id)
+                    llm_tokens.append(
+                        {
+                            "asset_id": asset_id,
+                            "symbol": asset.symbol,
+                            "features": raw,
+                            "rule_hype": s.hype if s else 50.0,
+                            "rule_risk": s.risk if s else 25.0,
+                            "rule_confidence": s.confidence if s else 50.0,
+                        }
+                    )
+                llm_results = llm_engine.batch_predict(
+                    llm_tokens,
+                    max_tokens=self.settings.llm_batch_size,
+                )
+                for llm_pred in llm_results:
+                    s = score_by_asset.get(llm_pred.asset_id)
+                    if s is None or not (llm_pred.narrative_summary or llm_pred.risk_assessment):
+                        continue
+                    llm_adj = apply_llm_adjustments(
+                        base_hype=s.hype,
+                        base_risk=s.risk,
+                        base_confidence=s.confidence,
+                        llm_hype_delta=llm_pred.hype_delta,
+                        llm_risk_delta=llm_pred.risk_delta,
+                        llm_confidence_delta=llm_pred.confidence_delta,
+                        narrative_summary=llm_pred.narrative_summary,
+                        risk_assessment=llm_pred.risk_assessment,
+                        key_factors=llm_pred.key_factors,
+                        llm_weight=self.settings.llm_weight,
+                    )
+                    if llm_adj.applied:
+                        s.hype = llm_adj.hype
+                        s.risk = llm_adj.risk
+                        s.confidence = llm_adj.confidence
+                        s.research_priority = llm_adj.research_priority
+                        # Re-upsert explanation so LLM narrative is persisted
+                        # alongside the rule-based drivers.
+                        orig_result = result_by_asset.get(llm_pred.asset_id, result)
+                        self._upsert_explanation(
+                            session,
+                            score=s,
+                            result=orig_result,
+                            changed_features={},
+                        )
+                        session.flush()
+            except Exception:  # noqa: BLE001
+                pass  # LLM layer is additive, never breaks scoring
+
         # Batch-query latest market + liquidity snapshots for all scored assets
         # (2 queries total, not N+1), then build PriceUpdate objects.
         scored_ids = list(feature_map.keys())

@@ -1651,6 +1651,108 @@ def nightcrawler_activity(
     return activities
 
 
+# ── LLM Endpoints ──────────────────────────────────────────────────────────
+
+
+@app.get("/llm/health")
+def llm_health() -> dict:
+    """Check local LLM (Ollama) health and model availability."""
+    from llm.engine import llm_engine
+
+    health = llm_engine.check_health()
+    return {
+        "connected": health.connected,
+        "model": health.model,
+        "available": health.available,
+        "last_check": health.last_check,
+        "error": health.error,
+        "enabled": get_settings().llm_enabled,
+    }
+
+
+@app.post("/llm/predict/{asset_id}")
+def llm_predict_token(asset_id: int, session: DbSession) -> dict:
+    """Get an LLM-enhanced prediction for a single token."""
+    from llm.engine import llm_engine
+
+    asset = session.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {asset_id}")
+    # Get latest features
+    latest_ts = session.scalar(
+        select(func.max(models.Feature.decision_ts)).where(models.Feature.asset_id == asset_id)
+    )
+    if not latest_ts:
+        raise HTTPException(status_code=404, detail=f"no features for asset {asset_id}")
+    features = {
+        row.feature_name: row.feature_value
+        for row in session.scalars(
+            select(models.Feature).where(
+                models.Feature.asset_id == asset_id,
+                models.Feature.decision_ts == latest_ts,
+            )
+        )
+    }
+    # Get latest score for rule-based values
+    score = session.scalar(
+        select(models.Score)
+        .where(models.Score.asset_id == asset_id)
+        .order_by(desc(models.Score.decision_ts))
+        .limit(1)
+    )
+    pred = llm_engine.predict(
+        asset_id=asset_id,
+        symbol=asset.symbol,
+        features=features,
+        rule_hype=score.hype if score else 50.0,
+        rule_risk=score.risk if score else 25.0,
+        rule_confidence=score.confidence if score else 50.0,
+    )
+    return {
+        "asset_id": pred.asset_id,
+        "symbol": pred.symbol,
+        "narrative_summary": pred.narrative_summary,
+        "risk_assessment": pred.risk_assessment,
+        "confidence_delta": pred.confidence_delta,
+        "hype_delta": pred.hype_delta,
+        "risk_delta": pred.risk_delta,
+        "key_factors": pred.key_factors,
+        "llm_model": pred.llm_model,
+        "latency_ms": pred.latency_ms,
+    }
+
+
+@app.get("/llm/narrative/{asset_id}")
+def llm_narrative_analysis(asset_id: int, session: DbSession) -> dict:
+    """Get a narrative analysis from the local LLM for a token."""
+    from llm.engine import llm_engine
+
+    asset = session.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail=f"asset not found: {asset_id}")
+    latest_ts = session.scalar(
+        select(func.max(models.Feature.decision_ts)).where(models.Feature.asset_id == asset_id)
+    )
+    features = {}
+    if latest_ts:
+        features = {
+            row.feature_name: row.feature_value
+            for row in session.scalars(
+                select(models.Feature).where(
+                    models.Feature.asset_id == asset_id,
+                    models.Feature.decision_ts == latest_ts,
+                )
+            )
+        }
+    narrative = llm_engine.narrative_and_risk(asset.symbol, features)
+    return {
+        "asset_id": asset_id,
+        "symbol": asset.symbol,
+        "narrative_analysis": narrative[0],
+        "risk_assessment": narrative[1],
+    }
+
+
 @app.post("/engine/nightcrawlers", response_model=TriggerResponse)
 def engine_trigger_nightcrawlers() -> TriggerResponse:
     """Trigger a Night Crawler pass: crawl all sources, score signals, feed data lake."""
