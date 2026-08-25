@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace as _replace
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -89,8 +90,6 @@ class ScoringEngine:
                     ml_risk=clamp(ml_score * 100) if ml_score is not None else None,
                     heuristic_score=h_score if h_score is not None else None,
                 )
-                from dataclasses import replace as _replace
-
                 result = _replace(
                     result,
                     hype=ensemble.hype,

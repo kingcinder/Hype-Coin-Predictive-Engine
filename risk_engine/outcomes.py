@@ -229,4 +229,25 @@ def evaluate_outcomes(
         total_collapsed=report.total_collapsed,
         overall_precision=round(report.overall_precision, 4),
     )
+
+    # Feed evaluated outcomes into ensemble so adaptive weights learn
+    # from ACTUAL delayed outcomes, not synthetic predictions.
+    try:
+        from scoring.ensemble import ensemble_engine
+
+        for band_name, band_outcome in report.bands.items():
+            if band_outcome.total_flagged == 0:
+                continue
+            # Bands with high precision (many collapses) confirm "negative"
+            # prediction was correct; low precision means rule was wrong.
+            actual = "negative" if band_outcome.precision >= 0.5 else "positive"
+            for _ in range(min(band_outcome.total_flagged, 20)):
+                ensemble_engine.record_outcome(
+                    scorer_name="rule",
+                    predicted_band=band_name,
+                    actual_outcome=actual,
+                )
+    except Exception:  # noqa: BLE001
+        pass  # ensemble feedback must never break outcome evaluation
+
     return report
