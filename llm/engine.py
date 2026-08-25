@@ -92,8 +92,12 @@ class LLMPredictionEngine:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._base_url = OLLAMA_DEFAULT_URL
-        self._model = OLLAMA_DEFAULT_MODEL
+        # Wire through Settings so a containerized deployment can point the
+        # engine at an Ollama service (LLM_OLLAMA_URL) instead of localhost.
+        self._base_url = (
+            getattr(self.settings, "llm_ollama_url", None) or OLLAMA_DEFAULT_URL
+        ).rstrip("/")
+        self._model = getattr(self.settings, "llm_model", None) or OLLAMA_DEFAULT_MODEL
         self._health = LLMHealth()
         self._client: httpx.Client | None = None
         self._last_prompt_cache: dict[str, str] = {}

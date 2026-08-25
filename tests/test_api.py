@@ -92,7 +92,9 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         top = client.get("/scores/top").json()
         assert isinstance(top, list)
         hot = client.get("/tokens/hot", params={"include_black": True}).json()
-        assert hot[0]["symbol"] == "HYPE"
+        hot_symbols = {item["symbol"] for item in hot}
+        assert "HYPE" in hot_symbols
+        assert "SIM" in hot_symbols
         detail = client.get(f"/tokens/{asset.id}").json()
         assert detail["latest_score"]["asset_id"] == asset.id
         risk = client.get(f"/risk/{asset.id}").json()
@@ -565,6 +567,88 @@ def test_parity_latest_endpoint(session) -> None:
         assert body["error_count"] == 1
         assert body["tolerance"] == pytest.approx(0.001)
         assert body["compare_hours_ago"] == get_settings().parity_compare_hours_ago
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_backtest_run_api_accepts_lake_source(session, monkeypatch) -> None:
+    """POST /backtest/run accepts the lake feature source and rejects invalid ones.
+
+    The endpoint validates the source before spawning the worker thread, so a
+    bogus source must 422 without touching the DB.  The lake source is
+    accepted and threaded through to the runner in the background thread.
+    """
+    from backtest.runner import run_backtest as real_run_backtest  # noqa: F401
+
+    captured: dict[str, object] = {}
+
+    def fake_run_backtest(
+        session_,
+        *,
+        start,
+        end=None,
+        top_k=10,
+        forward_hours=24,
+        feature_source="sql",
+    ):
+        captured["feature_source"] = feature_source
+        run = models.BacktestRun(
+            cutoff_start=start,
+            cutoff_end=end or start,
+            config_json={"feature_source": feature_source},
+            git_sha=None,
+            model_version="test-v1",
+            status="completed",
+        )
+        session_.add(run)
+        session_.flush()
+        return run
+
+    class _FakeSessionLocal:
+        def __enter__(self):
+            return session
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr("backtest.runner.run_backtest", fake_run_backtest)
+    monkeypatch.setattr("storage.database.SessionLocal", _FakeSessionLocal)
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        start = datetime(2026, 5, 1, 10, 0, tzinfo=UTC)
+        end = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        response = client.post(
+            "/backtest/run",
+            json={
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "top_k": 5,
+                "forward_hours": 1,
+                "feature_source": "lake",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "accepted"
+        assert "lake" in body["message"]
+        # The background thread runs asynchronously; wait for it to record.
+        import time as _time
+
+        deadline = _time.monotonic() + 5
+        while "feature_source" not in captured and _time.monotonic() < deadline:
+            _time.sleep(0.02)
+        assert captured.get("feature_source") == "lake"
+        # Invalid feature source is rejected without spawning the thread.
+        bad = client.post(
+            "/backtest/run",
+            json={"start": start.isoformat(), "feature_source": "postgres"},
+        )
+        assert bad.status_code == 422
     finally:
         app.dependency_overrides.clear()
 

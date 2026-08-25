@@ -29,18 +29,31 @@ from storage.repository import record_health, upsert_forecast
 
 log = get_logger(__name__)
 
-# The forecast model trains on the full persisted point-in-time feature set.
-# This includes the narrative dev-activity proxies that feed the hype and
-# catalyst scores: kol_velocity (distinct KOL channels mentioning the token in
-# the trailing 24h), github_star_velocity, and hf_download_velocity (per-day
-# star/download growth from the raw-evidence crawl history). It also includes
-# rpc_pool_health, the effective live health of the asset's chain RPC pool, so
-# degraded data access pulls probabilities toward an honest 50/50 baseline.
-# lifecycle_phase (0=seeding..4=collapse, 5=terminal) — the asset's position in
-# the hype-lifecycle state machine at the label's decision time — which the
-# survival layer conditions on so hazards are phase-dependent. Missing features
-# at a label's decision time enter the matrix as 0.0 — never fabricated.
-FORECAST_FEATURE_NAMES: tuple[str, ...] = FEATURE_NAMES
+# The forecast model trains on the persisted point-in-time feature set —
+# EXCEPT collapse_probability_24h, which is the model's OWN prior output
+# (features/factory.py::_forecast_probability reads the latest Forecast row
+# and persists it as a feature).  Feeding it back into training would let the
+# model learn "my last collapse call" — a feedback loop that hides the real
+# signal and is a textbook target leak.  It stays in the scoring feature set
+# (the ensemble legitimately consumes it as the ML layer signal) but must
+# never enter the training matrix.
+#
+# The remaining names include the narrative dev-activity proxies that feed the
+# hype and catalyst scores: kol_velocity (distinct KOL channels mentioning the
+# token in the trailing 24h), github_star_velocity, and hf_download_velocity
+# (per-day star/download growth from the raw-evidence crawl history). It also
+# includes rpc_pool_health, the effective health of the asset's chain RPC pool
+# from persisted point-in-time snapshots, so degraded data access pulls
+# probabilities toward an honest 50/50 baseline.  lifecycle_phase
+# (0=seeding..4=collapse, 5=terminal) — the asset's position in the
+# hype-lifecycle state machine at the label's decision time — which the
+# survival layer conditions on so hazards are phase-dependent. Missing
+# features at a label's decision time enter the matrix as 0.0 — never
+# fabricated.
+_LEAKAGE_FEATURES: frozenset[str] = frozenset({"collapse_probability_24h"})
+FORECAST_FEATURE_NAMES: tuple[str, ...] = tuple(
+    name for name in FEATURE_NAMES if name not in _LEAKAGE_FEATURES
+)
 VELOCITY_FEATURE_NAMES: tuple[str, ...] = (
     "kol_velocity",
     "github_star_velocity",
@@ -390,6 +403,52 @@ class ForecastEngine:
                 "gate": readout,
             }
         predicted = self._predict(session, model, decision_ts)
+
+        # Model persistence: save trained model to disk and compare with
+        # previous version.  If the new model is significantly worse, log
+        # a warning (rollback is operator-initiated to avoid accidental data
+        # loss from automated flip-flopping).
+        try:
+            from forecast.persistence import (
+                compare_models,
+                get_model_versions,
+                save_model,
+            )
+
+            save_model(
+                model,
+                version=self.settings.forecast_model_version,
+                metrics=self._last_metrics,
+            )
+            # Compare with the previous version's metrics
+            prev_versions = get_model_versions()
+            if len(prev_versions) >= 2:
+                prev_metrics = prev_versions[1].get("metrics", {})
+                if prev_metrics:
+                    comparison = compare_models(self._last_metrics, prev_metrics)
+                    if comparison["verdict"] == "rollback":
+                        log.warning(
+                            "forecast_model_regression",
+                            reasons=comparison["reasons"],
+                            regressions=comparison["regressions"],
+                        )
+                        record_health(
+                            session,
+                            component="forecast",
+                            state="yellow",
+                            message=(
+                                f"model regression detected: {'; '.join(comparison['reasons'])}"
+                            ),
+                        )
+                    else:
+                        log.info(
+                            "forecast_model_version_compared",
+                            verdict=comparison["verdict"],
+                            improvements=comparison["improvements"],
+                        )
+        except Exception:  # noqa: BLE001
+            pass  # persistence is best-effort, never blocks training
+
         record_health(
             session,
             component="forecast",
@@ -549,7 +608,7 @@ class ForecastEngine:
             decision_ts=decision_ts,
         )
         for key, value in drift["measures"].items():
-            if isinstance(value, (int, float)):
+            if isinstance(value, int | float):
                 metrics[f"drift.{key}"] = float(value)
         metrics["drift.status"] = {
             "insufficient_trailing": -1.0,
@@ -559,6 +618,7 @@ class ForecastEngine:
         }[drift["status"]]
         self._last_metrics = dict(metrics)
         self._persist_metrics(session, samples=samples, decision_ts=decision_ts, metrics=metrics)
+
         return ForecastModel(
             ignition=ignition_model,
             collapse=collapse_model,

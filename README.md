@@ -1,5 +1,13 @@
 # Serpent Circle Hype-Coin Predictive Engine
 
+[![CI](https://github.com/kingcinder/Hype-Coin-Predictive-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/kingcinder/Hype-Coin-Predictive-Engine/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/kingcinder/Hype-Coin-Predictive-Engine/branch/main/graph/badge.svg)](https://codecov.io/gh/kingcinder/Hype-Coin-Predictive-Engine)
+[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)
+
+Test coverage trajectory (backend core, weekly):
+
+![Coverage trend](coverage/trend.svg)
+
 Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It separates hype from structural danger and stores point-in-time evidence so scans can be replayed without future leakage.
 
 This is not an auto-trader, wallet, custody system, or guaranteed-profit bot.
@@ -197,45 +205,36 @@ Register HTTP endpoints to receive real-time alerts:
 | **Feed Health** | RPC pool status and component health |
 | **Backtest & Drift** | Historical backtest results |
 
-## Production installation (systemd/Linux)
+## Installation
 
-The supported production deployment is a dedicated `serpent` system user with a
-Python virtualenv and four systemd units (API, worker, UI, and retention timer).
-Do not run the application as root. On a host with Git and Python 3.12:
+One command installs Serpent Circle as a system service:
 
 ```bash
-sudo REPO_URL=https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git \
-  bash deploy/install.sh
-sudoedit /opt/serpent/.env
-sudo systemctl restart serpent-api serpent-worker serpent-ui
+git clone https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
+cd Hype-Coin-Predictive-Engine-main
+sudo bash packaging/install.sh
 ```
 
-For an existing installation, update only by fast-forwarding the canonical
-`main` branch, applying migrations, and restarting services:
+After install, manage with:
 
 ```bash
-sudo bash /opt/serpent/deploy/update.sh
+sudo serpent start       # start the engine
+sudo serpent stop        # stop it
+sudo serpent restart     # restart it
+sudo serpent status      # check if it's running
+sudo serpent logs        # watch live logs
+sudo serpent update      # pull latest + restart
+sudo serpent uninstall   # remove (keeps data)
 ```
 
-To remove services while retaining the database and Parquet lake:
+Open **http://localhost:8501** for the GUI, **http://localhost:8000/health** for the API.
 
-```bash
-sudo bash /opt/serpent/deploy/uninstall.sh
-```
-
-To remove application data too, explicitly opt in:
-
-```bash
-sudo REMOVE_DATA=true bash /opt/serpent/deploy/uninstall.sh
-```
-
-Check deployment health with `systemctl status serpent-api serpent-worker
-serpent-ui serpent-retention.timer` and `journalctl -u serpent-worker -f`.
+See **[INSTALL.md](INSTALL.md)** for full instructions, configuration, troubleshooting, and the uninstaller.
 
 ## Development
 
 ```bash
-# Install
+# Install dev dependencies (pinned dev lock included)
 python -m pip install -e ".[dev]"
 
 # Run engine (all-in-one)
@@ -244,12 +243,22 @@ python -m engine
 # Run tests
 python -m pytest tests/ -x -q
 
+# Run tests with coverage (backend core only; ui/tests/scripts excluded)
+python -m pytest tests/ -q --cov=. --cov-report=term-missing
+
 # Lint + typecheck
 ruff check .
 mypy api/ common/ engine/ crawlers/ data_lake/ ui/
 
 # Format
 ruff format .
+
+# Pre-commit hooks (ruff format + lint on every commit)
+pre-commit install
+
+# Refresh the coverage trend chart + history (committed to coverage/)
+python -m pytest tests/ -q --cov=. --cov-report=xml
+python scripts/coverage_history.py
 ```
 
 ## Configuration
@@ -264,9 +273,6 @@ Key environment variables (set in `.env`):
 | `DATA_LAKE_ENABLED` | True | Enable Data Lake management |
 | `WEBHOOK_ENABLED` | True | Enable webhook dispatch |
 | `FORECAST_TRAIN_FREQUENCY_HOURS` | 24 | Hours between forecast retraining |
-| `PARITY_FREQUENCY_HOURS` | 24 | Hours between lake-vs-SQL parity checks (`make parity`) |
-| `PARITY_COMPARE_HOURS_AGO` | 96 | Decision-time horizon for the parity comparison (clamped to the archive window) |
-| `PARITY_HISTORY_RETENTION_DAYS` | 90 | How long per-mismatch divergence history is kept for review |
 | `UI_REFRESH_SECONDS` | 30 | GUI auto-refresh interval |
 
 ## License

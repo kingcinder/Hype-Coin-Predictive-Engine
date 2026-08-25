@@ -1,0 +1,83 @@
+# Production hardening overlay — apply on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Hardens the single-container stack: read-only root filesystem (only the
+# named volumes and tmpfs are writable), dropped Linux capabilities, resource
+# limits, bounded log rotation, and secrets via a dedicated env file.  The
+# backup sidecar is kept but given the same resource/security posture.
+#
+# Requires a .env.prod file (see INSTALL.md) holding secrets such as
+# HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, FARCASTER_API_KEY, etc.
+
+services:
+  engine:
+    env_file:
+      - .env
+      # Secrets file — optional; create .env.prod for API keys and
+      # credentials (HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, ...).
+      - path: .env.prod
+        required: false
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.streamlit
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2.0
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  ollama:
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backup:
+    env_file:
+      - .env
+      - path: .env.prod
+        required: false
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 0.5
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"

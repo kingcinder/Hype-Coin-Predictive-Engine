@@ -5,6 +5,8 @@ Revises: 0010_liquidity_removal_events
 Create Date: 2026-08-20
 """
 
+from __future__ import annotations
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -15,6 +17,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = set(inspector.get_table_names())
+    if "scan_results" in tables:
+        return
     op.create_table(
         "scan_results",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -44,4 +51,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = set(inspector.get_table_names())
+    if "scan_results" not in tables:
+        return
+    op.drop_index("ix_scan_results_ts", table_name="scan_results")
     op.drop_table("scan_results")

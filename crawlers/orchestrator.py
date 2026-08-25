@@ -19,14 +19,20 @@ from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from crawlers.base import BaseCrawler
 from crawlers.heuristics import HeuristicsEngine
+from crawlers.sources.cmc import CMCCrawler
 from crawlers.sources.coingecko import CoinGeckoCrawler
+from crawlers.sources.coinpaprika import CoinPaprikaCrawler
 from crawlers.sources.defillama import DeFiLlamaCrawler
 from crawlers.sources.explorer import ExplorerCrawler
 from crawlers.sources.farcaster import FarcasterCrawler
+from crawlers.sources.gas_tracker import GasTrackerCrawler
+from crawlers.sources.github_trending import GitHubTrendingCrawler
 from crawlers.sources.nitter import NitterCrawler
 from crawlers.sources.presale import PresaleCrawler
 from crawlers.sources.pump_fun import PumpFunCrawler
 from crawlers.sources.whale_tracker import WhaleTrackerCrawler
+from crawlers.sources.x_trends import XTrendsCrawler
+from engine.activity_stream import broadcast_activity, compute_activity_signal_score
 from storage.repository import get_or_create_source, record_health, store_raw_evidence
 
 log = get_logger(__name__)
@@ -52,6 +58,8 @@ class NightCrawlerOrchestrator:
     def _init_crawlers(self) -> None:
         """Initialize all available crawlers."""
         self._crawlers["coingecko"] = CoinGeckoCrawler()
+        if self.settings.nightcrawler_cmc_enabled:
+            self._crawlers["coinmarketcap"] = CMCCrawler()
         self._crawlers["pump_fun"] = PumpFunCrawler()
         self._crawlers["defillama"] = DeFiLlamaCrawler()
         self._crawlers["whale_tracker"] = WhaleTrackerCrawler()
@@ -60,10 +68,29 @@ class NightCrawlerOrchestrator:
         )
         self._crawlers["nitter"] = NitterCrawler()
         self._crawlers["presale"] = PresaleCrawler()
+        if self.settings.nightcrawler_gas_tracker_enabled:
+            self._crawlers["gas_tracker"] = GasTrackerCrawler(
+                etherscan_api_key=self.settings.etherscan_api_key,
+                include_solana=self.settings.gas_tracker_solana_enabled,
+            )
+        if self.settings.nightcrawler_coinpaprika_enabled:
+            self._crawlers["coinpaprika"] = CoinPaprikaCrawler()
+        if self.settings.nightcrawler_github_trending_enabled:
+            self._crawlers["github_trending"] = GitHubTrendingCrawler(
+                search_query=self.settings.github_trending_search_query,
+                token=self.settings.github_token,
+            )
+        if self.settings.nightcrawler_x_trends_enabled:
+            self._crawlers["x_trends"] = XTrendsCrawler(
+                keywords=self.settings.x_trends_crypto_keywords_csv.split(",")
+            )
         if self.settings.nightcrawler_farcaster_enabled:
             farcaster_queries = self.settings.farcaster_search_queries_csv.split(",")
             self._crawlers["farcaster"] = FarcasterCrawler(
-                search_queries=[q.strip() for q in farcaster_queries if q.strip()]
+                search_queries=[q.strip() for q in farcaster_queries if q.strip()],
+                api_key=self.settings.farcaster_api_key,
+                tracked_fids=self.settings.farcaster_tracked_fids,
+                tracked_channels=self.settings.farcaster_tracked_channels,
             )
 
     def run_all(
@@ -117,6 +144,22 @@ class NightCrawlerOrchestrator:
                         observed_at=decision_ts,
                         raw_path=f"nightcrawler:{name}:{decision_ts.isoformat()}",
                     )
+                    # Broadcast to WebSocket clients for live feed updates
+                    try:
+                        sig_score, sig_engagement, sig_mentions = compute_activity_signal_score(
+                            items
+                        )
+                        broadcast_activity(
+                            source=name,
+                            items=items,
+                            item_count=len(items),
+                            signal_score=sig_score,
+                            token_mentions=sig_mentions[:5],
+                            engagement=sig_engagement,
+                            observed_at=str(decision_ts)[:19],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # never let broadcast failures block the crawler
 
                 results[name] = {
                     "status": "ok",

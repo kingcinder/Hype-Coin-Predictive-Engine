@@ -40,6 +40,17 @@ def _forecast_job() -> None:
         log.info("forecast_training_run", result=result)
 
 
+def _backtest_autopilot_job() -> None:
+    """Scheduled walk-forward backtest with drift detection and alerting."""
+    from ops.backtest_drift import run_backtest_autopilot
+    from storage.database import SessionLocal
+
+    with SessionLocal() as session:
+        result = run_backtest_autopilot(session)
+        session.commit()
+    log.info("backtest_autopilot_run", result=result)
+
+
 def main() -> None:
     settings = get_settings()
     ensure_background_probe()
@@ -59,6 +70,19 @@ def main() -> None:
         log.info(
             "forecast_training_scheduled",
             frequency_hours=settings.forecast_train_frequency_hours,
+        )
+    if settings.backtest_autopilot_enabled:
+        scheduler.add_job(
+            _backtest_autopilot_job,
+            "interval",
+            hours=settings.backtest_autopilot_interval_hours,
+            id="backtest_autopilot",
+            coalesce=True,
+            max_instances=1,
+        )
+        log.info(
+            "backtest_autopilot_scheduled",
+            interval_hours=settings.backtest_autopilot_interval_hours,
         )
     if settings.retention_autopilot_enabled and settings.archive_enabled:
         scheduler.add_job(

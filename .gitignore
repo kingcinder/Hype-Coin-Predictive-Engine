@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 *.pyc
 *.pyo
@@ -23,3 +25,11 @@ dist/
 build/
 .idea/
 .vscode/
+
+# Runtime artifacts (never commit)
+engine.log
+*.log
+models/
+# Freebuff app metadata (its local DB, run docs, logs) — never commit
+.freebuff/
+coverage/history.json.new

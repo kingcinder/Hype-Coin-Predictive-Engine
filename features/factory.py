@@ -8,14 +8,13 @@ from statistics import median
 from typing import Any, overload
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import Text, func, select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.enums import IgnitionEventType, LifecyclePhase
 from common.time import ensure_utc, utc_now
 from features.definitions import FEATURE_NAMES
-from ingestion.rpc_pool import get_rpc_pool
 from pump_physics.engine import phase_rank
 from storage import models
 from storage.repository import upsert_feature
@@ -62,6 +61,12 @@ def _freshness(observed_at: datetime | None, decision_ts: datetime) -> float:
         return 0.0
     age = max(0.0, (ensure_utc(decision_ts) - ensure_utc(observed_at)).total_seconds())
     return max(0.0, min(1.0, 1.0 - age / 86_400.0))
+
+
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so a URL containing ``%`` or ``_`` cannot
+    widen (or narrow) the ``LIKE '%...%'`` pattern."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _latest_snapshot_before(rows: Sequence[Any], cutoff: datetime):
@@ -143,7 +148,13 @@ def compute_market_block(
             [pair.created_at_source for pair in pairs if pair.created_at_source]
             or [asset.first_seen_at]
         )
-        pair_age = max(0.0, (decision_ts - ensure_utc(first_pair_time)).total_seconds() / 60.0)
+        # Point-in-time guard: a pair created AFTER the decision time did not
+        # exist yet at the decision — the age must read as missing, not clamp
+        # to 0.0 (which would silently report "newborn" for a pair that was
+        # not even deployed). The lake path reports missing in this case, so
+        # this guard keeps the SQL and lake read paths in parity.
+        if first_pair_time is not None and ensure_utc(first_pair_time) <= ensure_utc(decision_ts):
+            pair_age = max(0.0, (decision_ts - ensure_utc(first_pair_time)).total_seconds() / 60.0)
 
     venue_agreement = _venue_agreement(market_rows, decision_ts)
     volatility = _volatility(market_rows)
@@ -277,7 +288,7 @@ class FeatureFactory:
         kol_velocity, star_velocity, download_velocity = self._velocity_features(
             session, asset, decision_ts
         )
-        rpc_pool_health = self._rpc_pool_health(session, asset)
+        rpc_pool_health = self._rpc_pool_health(session, asset, decision_ts)
         collapse_probability = self._forecast_probability(session, asset.id, decision_ts)
 
         lifecycle_phase = self._lifecycle_phase(session, asset.id, decision_ts)
@@ -307,11 +318,24 @@ class FeatureFactory:
                 1 if mention_velocity is not None else 0,
                 0.8 if mention_velocity is not None else 0.0,
             ),
-            _feature("website_presence", 1.0 if asset.website_url else 0.0, 1, 1.0),
-            _feature("github_presence_public", 1.0 if asset.github_url else 0.0, 1, 1.0),
+            _feature(
+                "website_presence",
+                self._url_evidenced_before(session, asset.website_url, decision_ts),
+                1,
+                1.0,
+            ),
+            _feature(
+                "github_presence_public",
+                self._url_evidenced_before(session, asset.github_url, decision_ts),
+                1,
+                1.0,
+            ),
             _feature("suspicious_contract_flags", flags, 1, 1.0),
             _feature(
-                "deployer_history_available", self._deployer_history(session, asset.id), 1, 1.0
+                "deployer_history_available",
+                self._deployer_history(session, asset.id, decision_ts),
+                1,
+                1.0,
             ),
             _feature(
                 "narrative_acceleration",
@@ -460,7 +484,13 @@ class FeatureFactory:
             or 0
         )
 
-    def _deployer_history(self, session: Session, asset_id: int) -> float:
+    def _deployer_history(self, session: Session, asset_id: int, decision_ts: datetime) -> float:
+        """Count contracts with a known deployer observed at or before decision time.
+
+        Gated on ``Contract.observed_at <= decision_ts`` so a contract that
+        was only inspected after the decision time cannot leak into a
+        historical feature snapshot.
+        """
         return float(
             session.scalar(
                 select(func.count())
@@ -468,10 +498,58 @@ class FeatureFactory:
                 .where(
                     models.Contract.asset_id == asset_id,
                     models.Contract.deployer_wallet.is_not(None),
+                    models.Contract.observed_at <= decision_ts,
                 )
             )
             or 0
         )
+
+    def _url_evidenced_before(
+        self, session: Session, url: str | None, decision_ts: datetime
+    ) -> float:
+        """Point-in-time website/github presence: 1.0 only when crawler evidence
+        referencing the URL was observed at or before the decision time.
+
+        The asset row's ``website_url``/``github_url`` reflect *current* state
+        — a URL discovered by a Night Crawler last week would wrongly count
+        for a decision a month ago.  Evidence-gating on ``observed_at <=
+        decision_ts`` keeps the feature honest for historical snapshots: a URL
+        with no prior evidence reads as absent (0.0) rather than leaking the
+        live value.
+
+        Evidence sources: a ``SocialMention.raw_ref`` that contains the URL,
+        or a ``RawEvidenceItem.payload`` whose JSON text mentions it (crawlers
+        store the repo/website URLs inside the payload — the ``url_hash``
+        column is a digest of the URL, not the URL itself, so it cannot be
+        searched with LIKE).  LIKE metacharacters in the URL are escaped so a
+        ``%`` or ``_`` in a link cannot widen the match.
+        """
+        if not url:
+            return 0.0
+        needle = _like_escape(url.lower())
+        mention = session.scalar(
+            select(func.count())
+            .select_from(models.SocialMention)
+            .where(
+                models.SocialMention.observed_at <= decision_ts,
+                models.SocialMention.raw_ref.is_not(None),
+                func.lower(models.SocialMention.raw_ref).like(f"%{needle}%", escape="\\"),
+            )
+        )
+        if mention:
+            return 1.0
+        evidence = session.scalar(
+            select(func.count())
+            .select_from(models.RawEvidenceItem)
+            .where(
+                models.RawEvidenceItem.observed_at <= decision_ts,
+                models.RawEvidenceItem.payload.is_not(None),
+                func.lower(func.cast(models.RawEvidenceItem.payload, Text)).like(
+                    f"%{needle}%", escape="\\"
+                ),
+            )
+        )
+        return 1.0 if evidence else 0.0
 
     def _ignition_features(
         self, session: Session, asset_id: int, decision_ts: datetime
@@ -705,7 +783,7 @@ class FeatureFactory:
                         continue
                     metrics = entry.get("metrics")
                     value = metrics.get(metric_key) if isinstance(metrics, dict) else None
-                    if not isinstance(value, (int, float)):
+                    if not isinstance(value, int | float):
                         continue
                     numeric = float(value)
                     observations.setdefault(url, []).append((observed, numeric))
@@ -746,8 +824,18 @@ class FeatureFactory:
         except ValueError:
             return None
 
-    def _rpc_pool_health(self, session: Session, asset: models.Asset) -> float:
-        """Return effective live health for the asset's chain in ``[0, 1]``."""
+    def _rpc_pool_health(
+        self, session: Session, asset: models.Asset, decision_ts: datetime
+    ) -> float:
+        """Point-in-time chain RPC health from persisted snapshots in ``[0, 1]``.
+
+        Reads the latest ``RpcPoolSnapshot`` rows observed at or before the
+        decision time instead of the live in-process pool — the live pool
+        reflects current process memory, which would leak the present into
+        historical feature snapshots (and every backtest).  With no snapshot
+        yet recorded, a neutral 1.0 is returned (healthy baseline, matching
+        the ``_feature_default`` for this name).
+        """
         settings = get_settings()
         if not settings.rpc_pool_enabled:
             return 1.0
@@ -755,12 +843,25 @@ class FeatureFactory:
         if chain is None:
             return 1.0
         chain_slug = chain.slug
-        states = get_rpc_pool(chain_slug).snapshot()
+        latest_ts = session.scalar(
+            select(func.max(models.RpcPoolSnapshot.ts)).where(
+                models.RpcPoolSnapshot.chain_slug == chain_slug,
+                models.RpcPoolSnapshot.ts <= decision_ts,
+            )
+        )
+        if latest_ts is None:
+            return 1.0
+        states = session.scalars(
+            select(models.RpcPoolSnapshot).where(
+                models.RpcPoolSnapshot.chain_slug == chain_slug,
+                models.RpcPoolSnapshot.ts == latest_ts,
+            )
+        ).all()
         if not states:
-            return 0.0
-        return sum(
-            0.0 if state.down else max(0.0, min(1.0, state.health)) for state in states
-        ) / len(states)
+            return 1.0
+        return sum(0.0 if row.down else max(0.0, min(1.0, row.health)) for row in states) / len(
+            states
+        )
 
     def _forecast_probability(
         self, session: Session, asset_id: int, decision_ts: datetime

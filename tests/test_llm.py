@@ -120,8 +120,13 @@ class TestLLMPredictionEngine:
 
     def test_predict_returns_neutral_on_no_connection(self) -> None:
         engine = LLMPredictionEngine()
-        # Ensure health check fails (no Ollama running)
+        # Force the health to be disconnected and recent so check_health is skipped
         engine._health = LLMHealth(connected=False, available=False, last_check=999999.0)
+        # Close any existing client and replace with one that always fails
+        engine.close()
+        import httpx
+
+        engine._client = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.1)
         result = engine.predict(
             asset_id=1,
             symbol="TEST",
@@ -135,6 +140,7 @@ class TestLLMPredictionEngine:
         assert result.risk_delta == 0.0
         assert result.asset_id == 1
         assert result.symbol == "TEST"
+        engine.close()
 
     def test_parse_json_response(self) -> None:
         engine = LLMPredictionEngine()
@@ -193,6 +199,12 @@ class TestLLMPredictionEngine:
     def test_narrative_and_risk_returns_tuple(self) -> None:
         engine = LLMPredictionEngine()
         engine._health = LLMHealth(connected=False, available=False, last_check=999999.0)
+        # Close any existing client and replace with one that always fails
+        engine.close()
+        import httpx
+
+        engine._client = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.1)
         narrative, risk = engine.narrative_and_risk("TEST", {"momentum": 50.0})
         assert narrative == ""
         assert risk == ""
+        engine.close()

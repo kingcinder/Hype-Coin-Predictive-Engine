@@ -47,6 +47,13 @@ class RiskOutcomeReport:
     overall_precision: float = 0.0
     total_flagged: int = 0
     total_collapsed: int = 0
+    # ML-specific band outcomes, keyed by the band the ML scorer predicted
+    # (from RiskOutcome.details["ml_risk_band"]).  These feed the calibrator's
+    # ML probability thresholds so the ML scorer calibrates independently of
+    # the rule engine.
+    ml_bands: dict[str, BandOutcome] = field(default_factory=dict)
+    ml_total_flagged: int = 0
+    ml_total_collapsed: int = 0
 
 
 def _latest_lifecycle_phase(session: Session, asset_id: int) -> str | None:
@@ -113,11 +120,23 @@ def record_risk_outcome(
     risk_band: str,
     score_id: int,
     decision_ts: datetime,
+    ml_risk_band: str | None = None,
+    heuristic_band: str | None = None,
 ) -> None:
     """Record a single risk outcome observation.
 
     Called after scoring to snapshot the token's state at scoring time
     so it can be evaluated later when the forward window elapses.
+
+    ``ml_risk_band`` is the ML-specific risk band prediction (from
+    ``collapse_probability_24h``).  When provided, the ML scorer gets
+    independent feedback instead of duplicating the rule scorer's band.
+
+    ``heuristic_band`` is the heuristic-layer risk band prediction (from the
+    crawler ignition/signal score).  When provided, the heuristic scorer gets
+    its own independent feedback, so all three ensemble layers (rule, ml,
+    heuristic) are stored separately in ``details`` and calibrated
+    separately in ``evaluate_outcomes``.
     """
     existing = session.scalar(
         select(models.RiskOutcome).where(
@@ -133,6 +152,12 @@ def record_risk_outcome(
             score_id=score_id,
             scored_at=ensure_utc(decision_ts),
             lifecycle_phase_at_score=(_latest_lifecycle_phase(session, asset_id) or "unknown"),
+            details={
+                "ml_risk_band": ml_risk_band,
+                "ml_prediction": ml_risk_band is not None,
+                "heuristic_band": heuristic_band,
+                "heuristic_prediction": heuristic_band is not None,
+            },
         )
     )
     session.flush()
@@ -222,31 +247,141 @@ def evaluate_outcomes(
         for band_outcome in report.bands.values():
             band_outcome.recall = band_outcome.collapsed / total_collapsed_all
 
+    # ── ML-specific band outcomes ────────────────────────────────────────
+    # Group evaluated outcomes by the band the ML scorer predicted (stored in
+    # details at scoring time).  Only rows where the ML scorer actually made
+    # an independent prediction (ml_prediction=True) count, so the ML
+    # thresholds learn from the ML signal, not rule-band duplicates.
+    ml_outcomes = session.scalars(
+        select(models.RiskOutcome).where(
+            models.RiskOutcome.evaluated_at.is_not(None),
+        )
+    ).all()
+    ml_by_band: dict[str, list[models.RiskOutcome]] = {}
+    for outcome in ml_outcomes:
+        details = outcome.details or {}
+        if not details.get("ml_prediction"):
+            continue
+        ml_band = details.get("ml_risk_band")
+        if not ml_band:
+            continue
+        ml_by_band.setdefault(ml_band, []).append(outcome)
+
+    for band_name, band_outcomes in ml_by_band.items():
+        total = len(band_outcomes)
+        collapsed = sum(1 for o in band_outcomes if o.collapsed)
+        rugged = sum(1 for o in band_outcomes if o.rugged)
+        survived = sum(1 for o in band_outcomes if o.survived)
+        unknown = total - collapsed - rugged - survived
+        report.ml_bands[band_name] = BandOutcome(
+            band=RiskBand(band_name),
+            total_flagged=total,
+            collapsed=collapsed,
+            rugged=rugged,
+            survived=survived,
+            unknown=unknown,
+            precision=collapsed / total if total > 0 else 0.0,
+        )
+        report.ml_total_flagged += total
+        report.ml_total_collapsed += collapsed
+
     log.info(
         "risk_outcome_evaluation",
         evaluated=evaluated,
         total_flagged=report.total_flagged,
         total_collapsed=report.total_collapsed,
         overall_precision=round(report.overall_precision, 4),
+        ml_total_flagged=report.ml_total_flagged,
     )
 
-    # Feed evaluated outcomes into ensemble so adaptive weights learn
-    # from ACTUAL delayed outcomes, not synthetic predictions.
+    # Feed per-token evaluated outcomes into ensemble so adaptive weights
+    # learn from ACTUAL individual token results, not band-level aggregates.
     try:
         from scoring.ensemble import ensemble_engine
 
-        for band_name, band_outcome in report.bands.items():
-            if band_outcome.total_flagged == 0:
-                continue
-            # Bands with high precision (many collapses) confirm "negative"
-            # prediction was correct; low precision means rule was wrong.
-            actual = "negative" if band_outcome.precision >= 0.5 else "positive"
-            for _ in range(min(band_outcome.total_flagged, 20)):
-                ensemble_engine.record_outcome(
-                    scorer_name="rule",
-                    predicted_band=band_name,
-                    actual_outcome=actual,
+        # Per-token feedback: iterate individual outcomes, not band aggregates.
+        # Only feed outcomes that haven't been sent to the ensemble yet
+        # (ensemble_fed_at is NULL = not yet fed).
+        recent_outcomes = session.scalars(
+            select(models.RiskOutcome).where(
+                models.RiskOutcome.evaluated_at.is_not(None),
+                models.RiskOutcome.evaluated_at >= decision_ts - window,
+                models.RiskOutcome.ensemble_fed_at.is_(None),
+            )
+        ).all()
+        fed_count = 0
+        max_feed = 100  # cap per evaluation pass to avoid ensemble overload
+        settings = get_settings()
+        for row in recent_outcomes:
+            if fed_count >= max_feed:
+                break
+            # Determine actual outcome from this individual token's result
+            if row.collapsed or row.rugged:
+                actual = "negative"
+            elif row.survived:
+                actual = "positive"
+            else:
+                # Unknown lifecycle — use price change as fallback signal
+                if (
+                    row.price_change_pct is not None
+                    and row.price_change_pct < settings.risk_outcome_price_drop_threshold
+                ):
+                    actual = "negative"
+                elif (
+                    row.price_change_pct is not None
+                    and row.price_change_pct > settings.risk_outcome_price_gain_threshold
+                ):
+                    actual = "positive"
+                else:
+                    continue  # skip truly unknown outcomes
+
+            # Feed the outcome to ALL scorers (rule, ml, heuristic) in one
+            # batch call — each scorer's prediction was stored separately in
+            # RiskOutcome.details at scoring time, so each ensemble layer
+            # calibrates independently on the same observed outcome.
+            # Gate each scorer on its own *_prediction flag so the rule band
+            # fallback can never be attributed to a layer that made no
+            # independent prediction (that would train ML/heuristic on the
+            # rule scorer's signal).
+            details = row.details or {}
+            ml_band = details.get("ml_risk_band") if details.get("ml_prediction") else None
+            heuristic_band = (
+                details.get("heuristic_band") if details.get("heuristic_prediction") else None
+            )
+            # Confidence-weight the feedback: the ensemble counts a
+            # high-confidence prediction's outcome more than a low-confidence
+            # guess, so reliable scorers' weights adapt faster.
+            score_row = session.get(models.Score, row.score_id)
+            confidence = float(score_row.confidence) if score_row is not None else None
+            entries = [
+                {
+                    "scorer_name": "rule",
+                    "predicted_band": row.risk_band,
+                    "actual_outcome": actual,
+                    "confidence": confidence,
+                }
+            ]
+            if ml_band:
+                entries.append(
+                    {
+                        "scorer_name": "ml",
+                        "predicted_band": ml_band,
+                        "actual_outcome": actual,
+                        "confidence": confidence,
+                    }
                 )
+            if heuristic_band:
+                entries.append(
+                    {
+                        "scorer_name": "heuristic",
+                        "predicted_band": heuristic_band,
+                        "actual_outcome": actual,
+                        "confidence": confidence,
+                    }
+                )
+            ensemble_engine.record_outcomes(entries)
+            row.ensemble_fed_at = decision_ts
+            fed_count += 1
     except Exception:  # noqa: BLE001
         pass  # ensemble feedback must never break outcome evaluation
 

@@ -1,0 +1,60 @@
+# Codecov configuration — Serpent Circle Hype-Coin Engine
+#
+# Coverage gates are enforced at two levels:
+#   - project: overall coverage must not drop below the threshold (a PR that
+#     meaningfully reduces coverage fails).
+#   - patch: the lines touched by a PR must stay covered — new code without
+#     tests is flagged immediately on the diff.
+#
+# The `core` flag covers the engine/API backends; `ui` is tracked separately
+# (Streamlit views are excluded from the project number via pyproject.toml's
+# [tool.coverage.run] omit list, so this flag only records their trend).
+
+coverage:
+  status:
+    project:
+      default:
+        target: 65%
+        threshold: 1%        # allow +/-1% noise between runs
+        flags:
+          - core
+    patch:
+      default:
+        target: 70%          # new/changed lines should be mostly covered
+        threshold: 5%
+
+flags:
+  core:
+    paths:
+      - api/
+      - common/
+      - engine/
+      - forecast/
+      - ingestion/
+      - scoring/
+      - risk_engine/
+      - storage/
+      - crawlers/
+      - data_lake/
+      - mempool/
+      - narrative/
+      - catalyst/
+      - radar/
+      - fingerprint/
+      - features/
+      - backtest/
+      - pump_physics/
+      - ops/
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  show_carryforward_flags: true
+
+ignore:
+  - "tests/**"
+  - "scripts/**"
+  - "ui/**"
+  - "packaging/**"
+  - "coverage/**"

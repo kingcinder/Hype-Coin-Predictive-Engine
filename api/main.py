@@ -9,6 +9,7 @@ from datetime import time as dt_time
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
@@ -28,9 +29,11 @@ from api.schemas import (
     CatalystRow,
     EngineScanProgressRow,
     EngineStatusResponse,
+    EnsembleStateRow,
     FeatureRow,
     FingerprintRow,
     ForecastRow,
+    FusionSignalRow,
     HealthComponent,
     HealthResponse,
     IgnitionEventRow,
@@ -45,11 +48,13 @@ from api.schemas import (
     PrelaunchRow,
     RetentionGrowthRow,
     RetentionRunRow,
+    RiskCalibrationRow,
     RiskResponse,
     RpcPoolChainRow,
     RpcPoolEndpointRow,
     RpcPoolProbeRow,
     ScanResultRow,
+    ScorerAccuracyRow,
     SeedResponse,
     SimilarSetupRow,
     TokenDetail,
@@ -61,6 +66,7 @@ from common.config import get_settings
 from common.enums import AlertState
 from common.logging import get_logger
 from common.time import utc_now
+from engine.activity_stream import activity_stream_broker, compute_activity_signal_score
 from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
@@ -76,6 +82,26 @@ app = FastAPI(
     title="Serpent Circle Hype-Coin Predictive Engine",
     version="0.1.0",
     description="Research-only crypto intelligence API with separated hype and risk scores.",
+)
+
+# The Streamlit GUI (typically :8501) calls this API cross-origin from the
+# browser for both httpx JSON calls and the SSE live-status bridge. Without
+# CORS the browser silently kills the EventSource connection, which breaks
+# the Engine Control real-time panel. Local origins only — this is a
+# single-user desktop tool, not a public API.
+_CORS_ORIGINS = [
+    "http://localhost:8501",
+    "http://127.0.0.1:8501",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 DbSession = Annotated[Session, Depends(get_session)]
@@ -441,6 +467,116 @@ def alert_quality_trend(
             )
         )
     return AlertQualityTrendResponse(weeks=output)
+
+
+@app.get("/risk/calibration", response_model=RiskCalibrationRow)
+def risk_calibration(session: DbSession) -> RiskCalibrationRow:
+    """Current adaptive risk calibration: rule thresholds + ML band boundaries.
+
+    The ML probability boundaries (yellow/orange/red) are learned directly
+    from ML scorer outcomes; BLACK is structurally fixed at 0.75 and never
+    calibrated.  When no calibration has run yet, defaults are returned so
+    the GUI can show what the engine is currently using.
+    """
+    from risk_engine.calibrator import _get_active_calibration
+
+    cal = _get_active_calibration(session)
+    if cal is None:
+        return RiskCalibrationRow()
+    return RiskCalibrationRow(
+        version=cal.version,
+        calibrated_at=cal.calibrated_at,
+        sample_size=cal.sample_size,
+        yellow_threshold=cal.yellow_threshold,
+        orange_threshold=cal.orange_threshold,
+        red_threshold=cal.red_threshold,
+        ml_yellow_threshold=cal.ml_yellow_threshold,
+        ml_orange_threshold=cal.ml_orange_threshold,
+        ml_red_threshold=cal.ml_red_threshold,
+        band_precisions=cal.band_precisions,
+        ml_band_precisions=cal.ml_band_precisions,
+    )
+
+
+@app.get("/ensemble/state", response_model=EnsembleStateRow)
+def ensemble_state(session: DbSession) -> EnsembleStateRow:
+    """Persisted adaptive ensemble state for the observability dashboard.
+
+    Returns the current rule/ml/heuristic weights, per-scorer accuracy
+    ledgers (with confidence calibration buckets), and the weight-history
+    series so the GUI can chart weight evolution over time.  Empty/defaults
+    when no scoring has persisted state yet.
+    """
+    state = session.scalar(select(models.EnsembleState).limit(1))
+    if state is None:
+        return EnsembleStateRow()
+
+    # Calibration buckets live at ``state.calibration_buckets[scorer_name]``
+    # (persisted as ``{bucket: [count, correct]}`` by the ensemble engine);
+    # per-scorer accuracy rows expose them for the reliability diagram.
+    bucket_map = state.calibration_buckets or {}
+    scorers: list[ScorerAccuracyRow] = []
+    for name, acc in sorted((state.scorer_accuracy or {}).items()):
+        correct = float(acc.get("correct_predictions", 0) or 0)
+        total = float(acc.get("total_predictions", 0) or 0)
+        scorers.append(
+            ScorerAccuracyRow(
+                scorer_name=name,
+                correct_predictions=correct,
+                total_predictions=total,
+                accuracy=correct / total if total else 0.5,
+                calibration_buckets=bucket_map.get(name) or {},
+            )
+        )
+    return EnsembleStateRow(
+        current_weights=state.current_weights or {},
+        scorer_accuracy=scorers,
+        weight_history=list(state.weight_history or [])[-100:],
+        calibration_buckets=bucket_map,
+        total_predictions=state.total_predictions or 0,
+        last_recalibrated_at=state.last_recalibrated_at,
+        updated_at=state.updated_at,
+    )
+
+
+@app.get("/fusion/recent", response_model=list[FusionSignalRow])
+def fusion_recent(session: DbSession, limit: int = 50) -> list[FusionSignalRow]:
+    """Most recent cross-source fusion results per asset.
+
+    Rows record how many independent crawler sources corroborated each
+    asset and the fused confidence boost applied.  The GUI charts fusion
+    activity per asset in the ensemble observability section.
+    """
+    rows = session.scalars(
+        select(models.CrossSourceSignal)
+        .order_by(desc(models.CrossSourceSignal.observed_at))
+        .limit(limit)
+    ).all()
+    # Batch-load assets once instead of one query per row (N+1).
+    asset_ids = {row.asset_id for row in rows}
+    symbols: dict[int, str | None] = {}
+    if asset_ids:
+        symbols = {
+            asset_id: symbol
+            for asset_id, symbol in session.execute(
+                select(models.Asset.id, models.Asset.symbol).where(models.Asset.id.in_(asset_ids))
+            ).all()
+        }
+    out: list[FusionSignalRow] = []
+    for row in rows:
+        out.append(
+            FusionSignalRow(
+                asset_id=row.asset_id,
+                symbol=symbols.get(row.asset_id),
+                source_count=row.source_count,
+                sources=list(row.sources or []),
+                fusion_score=row.fusion_score,
+                confidence_boost=row.confidence_boost,
+                signal_agreement=row.signal_agreement,
+                observed_at=row.observed_at,
+            )
+        )
+    return out
 
 
 @app.get("/risk/{asset_id}", response_model=RiskResponse)
@@ -1376,6 +1512,37 @@ def ws_price_client_count() -> dict:
     return {"connected_clients": price_stream_broker.connected_count}
 
 
+# -- Activity Stream WebSocket -----------------------------------------------
+
+
+@app.websocket("/ws/nightcrawlers/activity")
+async def ws_activity_stream(websocket: WebSocket) -> None:
+    """WebSocket endpoint for live crawler activity updates.
+
+    Clients receive JSON messages with activity events as they arrive.
+    Format: {"type":"activity","source":"coingecko",...}
+    """
+    await websocket.accept()
+    queue = activity_stream_broker.connect()
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                await websocket.send_json(event)
+            except TimeoutError:
+                await websocket.send_json({"type": "ping"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        activity_stream_broker.disconnect(queue)
+
+
+@app.get("/ws/activity/count")
+def ws_activity_client_count() -> dict:
+    """Return the number of connected WebSocket activity clients."""
+    return {"connected_clients": activity_stream_broker.connected_count}
+
+
 # ── SSE Stream ──────────────────────────────────────────────────────────────
 
 
@@ -1571,6 +1738,114 @@ def webhook_dispatches(
     ]
 
 
+@app.get("/nightcrawlers/leaderboard")
+def nightcrawler_leaderboard(
+    session: DbSession,
+    days: Annotated[int, Query(ge=1, le=90)] = 30,
+) -> dict:
+    """Crawler performance leaderboard: SNR per source with weekly trend.
+
+    Returns each source ranked by signal-to-noise ratio over the lookback
+    window, plus a ``sparkline`` array of weekly SNR values for the GUI
+    to render as an inline trend chart.
+    """
+    cutoff = utc_now() - timedelta(days=days)
+
+    # Fetch all nightcrawler raw evidence in the window
+    rows = session.scalars(
+        select(models.RawEvidenceItem)
+        .join(models.Source, models.Source.id == models.RawEvidenceItem.source_id)
+        .where(
+            models.Source.name.like("nightcrawler:%"),
+            models.RawEvidenceItem.observed_at >= cutoff,
+        )
+        .order_by(models.RawEvidenceItem.observed_at)
+    ).all()
+
+    # Bucket items by source and ISO-week
+    source_buckets: dict[str, dict[str, dict[str, int]]] = defaultdict(
+        lambda: defaultdict(lambda: {"total": 0, "actionable": 0})
+    )
+    source_totals: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "actionable": 0})
+
+    for row in rows:
+        source = session.get(models.Source, row.source_id)
+        name = source.name.removeprefix("nightcrawler:") if source else "unknown"
+        payload = row.payload or {}
+        items = payload.get("items", [])
+        count = payload.get("count", len(items))
+
+        # Determine if this batch is actionable (has signal)
+        signal_score, total_engagement, token_mentions = compute_activity_signal_score(items)
+        has_signal = signal_score >= 10 or bool(token_mentions)
+
+        # ISO-week bucket key
+        observed = row.observed_at or utc_now()
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=UTC)
+        week_key = observed.astimezone(UTC).strftime("%Y-W%U")
+
+        bucket = source_buckets[name][week_key]
+        bucket["total"] += count
+        if has_signal:
+            bucket["actionable"] += count
+
+        source_totals[name]["total"] += count
+        if has_signal:
+            source_totals[name]["actionable"] += count
+
+    # Also pull crawler health stats from the orchestrator
+    from crawlers.orchestrator import get_nightcrawler_orchestrator
+
+    status = get_nightcrawler_orchestrator().get_status()
+
+    # Build leaderboard entries
+    entries: list[dict] = []
+    for name, totals in source_totals.items():
+        total = totals["total"]
+        actionable = totals["actionable"]
+        snr = (actionable / total) if total > 0 else 0.0
+
+        # Build sparkline: weekly SNR values in chronological order
+        weeks_sorted = sorted(source_buckets[name].keys())
+        sparkline = []
+        for wk in weeks_sorted:
+            wb = source_buckets[name][wk]
+            w_total = wb["total"]
+            w_actionable = wb["actionable"]
+            sparkline.append(round((w_actionable / w_total) * 100, 1) if w_total > 0 else 0.0)
+
+        health = status.get(name, {})
+        entries.append(
+            {
+                "source": name,
+                "total_items": total,
+                "actionable_items": actionable,
+                "snr": round(snr, 3),
+                "snr_pct": round(snr * 100, 1),
+                "reliability": health.get("reliability", 0.0),
+                "error_rate": health.get("error_rate", 0.0),
+                "total_runs": health.get("total_runs", 0),
+                "frequency_multiplier": health.get("frequency_multiplier", 1.0),
+                "sparkline": sparkline,
+                "weeks_with_data": len(sparkline),
+            }
+        )
+
+    # Sort by SNR descending
+    entries.sort(key=lambda e: e["snr"], reverse=True)
+
+    # Assign rank
+    for i, entry in enumerate(entries):
+        entry["rank"] = i + 1
+
+    return {
+        "lookback_days": days,
+        "total_sources": len(entries),
+        "entries": entries,
+    }
+
+
 @app.get("/nightcrawlers/status")
 def nightcrawler_status() -> dict:
     """Status of all Night Crawler crawlers."""
@@ -1614,25 +1889,13 @@ def nightcrawler_activity(
             items = payload.get("items", [])
             count = payload.get("count", len(items))
 
-            # Compute signal score from engagement + token mentions
-            total_engagement = 0
-            seen_tokens: set[str] = set()
-            token_mentions: list[str] = []
+            signal_score, total_engagement, token_mentions = compute_activity_signal_score(items)
             platform = ""
-            for item in items[:20]:
-                metrics = item.get("metrics", {})
-                total_engagement += metrics.get("engagement_score", 0)
-                total_engagement += metrics.get("likes", 0)
-                total_engagement += metrics.get("recasts", 0) * 2
-                total_engagement += metrics.get("replies", 0)
-                for mention in metrics.get("token_mentions", []):
-                    if mention not in seen_tokens:
-                        seen_tokens.add(mention)
-                        token_mentions.append(mention)
-                if not platform:
-                    platform = metrics.get("platform", "")
-
-            signal_score = min(100, total_engagement * 2 + len(token_mentions) * 10)
+            for item in items[:5]:
+                p = item.get("metrics", {}).get("platform", "")
+                if p:
+                    platform = p
+                    break
 
             activities.append(
                 {
@@ -1784,6 +2047,42 @@ def engine_trigger_nightcrawlers() -> TriggerResponse:
 
     threading.Thread(target=_run, name="api-nightcrawler", daemon=True).start()
     return TriggerResponse(status="accepted", message="Night Crawler pipeline started")
+
+
+@app.get("/llm/calibration")
+def llm_calibration_status(session: DbSession) -> dict:
+    """Current LLM adaptive weight calibration state."""
+    from scoring.llm_calibration import llm_calibrator
+
+    snap = llm_calibrator.get_snapshot(session)
+    return {
+        "current_weight": snap.current_weight,
+        "previous_weight": snap.previous_weight,
+        "total_predictions": snap.total_predictions,
+        "total_improved": snap.total_improved,
+        "total_degraded": snap.total_degraded,
+        "improvement_rate": snap.improvement_rate,
+        "last_calibration_ts": str(snap.last_calibration_ts) if snap.last_calibration_ts else None,
+        "weight_history": snap.weight_history[-20:],
+        "enabled": get_settings().llm_calibration_enabled,
+        "min_samples": get_settings().llm_calibration_min_samples,
+        "window_hours": get_settings().llm_calibration_window_hours,
+    }
+
+
+@app.post("/llm/calibration/run")
+def llm_calibration_run(session: DbSession) -> dict:
+    """Manually trigger an LLM calibration pass."""
+    from scoring.llm_calibration import llm_calibrator
+
+    evaluated = llm_calibrator.evaluate_predictions(session)
+    new_weight = llm_calibrator.calibrate(session)
+    session.commit()
+    return {
+        "evaluated": evaluated,
+        "new_weight": new_weight,
+        "status": "ok",
+    }
 
 
 @app.post("/engine/data-lake", response_model=TriggerResponse)

@@ -168,6 +168,24 @@ class RiskResponse(BaseModel):
     hard_reject: bool
 
 
+class RiskCalibrationRow(BaseModel):
+    """Current adaptive risk calibration: rule score thresholds plus the
+    ML-specific collapse-probability band boundaries learned from outcomes."""
+
+    version: str | None = None
+    calibrated_at: datetime | None = None
+    sample_size: int = 0
+    yellow_threshold: float | None = None
+    orange_threshold: float | None = None
+    red_threshold: float | None = None
+    ml_yellow_threshold: float = 0.10
+    ml_orange_threshold: float = 0.30
+    ml_red_threshold: float = 0.50
+    ml_black_threshold: float = 0.75  # fixed, never calibrated
+    band_precisions: dict[str, float] = {}
+    ml_band_precisions: dict[str, float] = {}
+
+
 class BacktestResultRow(BaseModel):
     run_id: int
     status: str
@@ -544,3 +562,39 @@ class WebhookDispatchRow(BaseModel):
     status_code: int | None
     error_message: str | None
     duration_ms: float | None
+
+
+class ScorerAccuracyRow(BaseModel):
+    """One scorer's accuracy ledger from the adaptive ensemble."""
+
+    scorer_name: str
+    correct_predictions: float
+    total_predictions: float
+    accuracy: float = 0.5  # neutral prior when no predictions yet
+    calibration_buckets: dict[str, Any] = {}
+
+
+class EnsembleStateRow(BaseModel):
+    """Persisted adaptive ensemble state: weights, per-scorer accuracy,
+    weight history (for the evolution chart), and calibration buckets."""
+
+    current_weights: dict[str, float] = {}
+    scorer_accuracy: list[ScorerAccuracyRow] = []
+    weight_history: list[dict[str, Any]] = []
+    calibration_buckets: dict[str, Any] = {}
+    total_predictions: int = 0
+    last_recalibrated_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class FusionSignalRow(BaseModel):
+    """Cross-source signal fusion result for one asset."""
+
+    asset_id: int
+    symbol: str | None = None
+    source_count: int
+    sources: list[str]
+    fusion_score: float
+    confidence_boost: float
+    signal_agreement: float
+    observed_at: datetime

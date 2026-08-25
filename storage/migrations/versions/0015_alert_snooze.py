@@ -12,8 +12,22 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("alerts", sa.Column("snoozed_until", sa.DateTime(timezone=True), nullable=True))
+    bind = op.get_bind()
+    tables = set(sa.inspect(bind).get_table_names())
+    if "alerts" not in tables:
+        return
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("alerts")}
+    if "snoozed_until" not in columns:
+        op.add_column(
+            "alerts", sa.Column("snoozed_until", sa.DateTime(timezone=True), nullable=True)
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("alerts", "snoozed_until")
+    bind = op.get_bind()
+    tables = set(sa.inspect(bind).get_table_names())
+    if "alerts" not in tables:
+        return
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("alerts")}
+    if "snoozed_until" in columns:
+        op.drop_column("alerts", "snoozed_until")

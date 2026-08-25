@@ -27,14 +27,41 @@ from common.logging import get_logger
 log = get_logger(__name__)
 
 
+def _run_migrations() -> None:
+    """Apply the alembic migration chain to the database on every boot.
+
+    ``Base.metadata.create_all`` only creates missing *tables* — it never alters
+    existing tables when models gain columns.  The live drift (migration 0019's
+    ML probability thresholds missing from ``risk_calibrations``/``risk_outcomes``)
+    happened exactly because the engine booted with create_all only.  Every
+    migration in the chain is existence-guarded, so ``upgrade head`` is
+    idempotent: fresh DBs build the full schema, existing DBs get only the
+    pending column/table additions.
+    """
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        project_root = Path(__file__).resolve().parents[1]
+        cfg = Config(str(project_root / "storage" / "alembic.ini"))
+        cfg.set_main_option("script_location", str(project_root / "storage" / "migrations"))
+        command.upgrade(cfg, "head")
+        log.info("engine_migrations_applied")
+    except Exception as exc:  # noqa: BLE001 - never block engine boot on migration issues.
+        log.warning("engine_migrations_failed", error=str(exc))
+
+
 def _bootstrap() -> None:
-    """Idempotent zero-container bootstrap: SQLite schema + reference rows + archive dir."""
+    """Idempotent zero-container bootstrap: migrations + schema + reference rows."""
     from common.config import get_settings
     from storage.database import Base, SessionLocal, engine
     from storage.seed import seed_reference_data
 
     settings = get_settings()
     Path(settings.archive_local_dir).mkdir(parents=True, exist_ok=True)
+    # Migrations first — create_all is only a safety net for anything the models
+    # define that the chain does not (it cannot add columns to existing tables).
+    _run_migrations()
     Base.metadata.create_all(bind=engine)
     seed_reference_data()
     with SessionLocal() as session:

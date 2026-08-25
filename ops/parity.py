@@ -112,6 +112,12 @@ def compare_asset(
         lake_values = LakeFeatureFactory(settings=settings or get_settings()).build_for_asset(
             asset_address=asset.address, decision_ts=decision_ts
         )
+    # Residual ``pair_age_minutes`` mismatches of the shape ``sql=<value>
+    # lake=missing`` are expected on legacy archives: the lake path can only
+    # reconstruct pair age from archived ``pool_created_at`` payloads, which
+    # older evidence predates.  That is data coverage, not logic divergence —
+    # the SQL path (``compute_market_block``) now reports missing for pairs
+    # created after the decision time, matching the lake's semantics.
     mismatches: list[ParityMismatch] = []
     for name in LAKE_FEATURE_NAMES:
         sql_feature = sql_values[name]

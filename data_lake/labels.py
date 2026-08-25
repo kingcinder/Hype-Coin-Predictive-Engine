@@ -14,6 +14,7 @@ This should increase label count from 4 to 30+ quickly.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -32,7 +33,14 @@ LABEL_COLLAPSE = "collapse"
 
 
 def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: datetime) -> float | None:
-    """Linearly interpolate price at target_ts from surrounding snapshots."""
+    """Interpolate price at target_ts from surrounding snapshots.
+
+    Interpolates in log space (geometric mean of the bracket) rather than
+    arithmetic price space: prices move multiplicatively, so log-space
+    interpolation is unbiased for return-derived labels.  Arithmetic
+    interpolation overstates the midpoint between a high and a low price,
+    biasing peak/trough labels.
+    """
     if not snapshots:
         return None
 
@@ -48,7 +56,7 @@ def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: dateti
             if after is None or snap_ts < ensure_utc(after.ts):
                 after = snap
 
-    # If we have both, interpolate
+    # If we have both, interpolate in log space
     if before is not None and after is not None and before.id != after.id:
         t0 = ensure_utc(before.ts).timestamp()
         t1 = ensure_utc(after.ts).timestamp()
@@ -57,6 +65,8 @@ def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: dateti
             frac = (t_target - t0) / (t1 - t0)
             price0 = float(before.price_usd)
             price1 = float(after.price_usd)
+            if price0 > 0 and price1 > 0:
+                return math.exp(math.log(price0) + frac * (math.log(price1) - math.log(price0)))
             return price0 + frac * (price1 - price0)
 
     # If only before, use it
@@ -107,12 +117,15 @@ def generate_dense_labels(
         if not pair_ids:
             continue
 
-        # Get ALL market snapshots for this asset (any pair)
+        # Get ALL market snapshots for this asset (any pair), gated on
+        # observed_at so snapshots ingested after the decision time cannot
+        # leak into the interpolated labels.
         all_snapshots = list(
             session.scalars(
                 select(models.MarketSnapshot)
                 .where(
                     models.MarketSnapshot.pair_id.in_(pair_ids),
+                    models.MarketSnapshot.observed_at <= decision_ts,
                     models.MarketSnapshot.price_usd.is_not(None),
                     models.MarketSnapshot.price_usd > 0,
                 )

@@ -840,6 +840,12 @@ class RiskOutcome(Base):
     collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rugged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     survived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Per-token ensemble feedback tracking — set when this outcome is
+    # fed to the ensemble engine so it is never double-counted.
+    ensemble_fed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ML-specific prediction snapshot (ml_risk_band, ml_prediction) so the
+    # ML scorer calibrates independently of the rule engine.
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
@@ -859,11 +865,135 @@ class RiskCalibration(Base):
     yellow_threshold: Mapped[float] = mapped_column(Float, nullable=False)
     orange_threshold: Mapped[float] = mapped_column(Float, nullable=False)
     red_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    # ML-specific collapse-probability thresholds (0.0-1.0 scale), learned
+    # directly from ML scorer outcomes (RiskOutcome.details["ml_risk_band"])
+    # rather than bridged from rule-engine score thresholds.  Defaults match
+    # the pre-calibration hardcoded probability band boundaries.
     # Per-reason weight adjustments learned from outcomes
     reason_weights: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    ml_yellow_threshold: Mapped[float] = mapped_column(Float, default=0.10, nullable=False)
+    ml_orange_threshold: Mapped[float] = mapped_column(Float, default=0.30, nullable=False)
+    ml_red_threshold: Mapped[float] = mapped_column(Float, default=0.50, nullable=False)
     # Precision metrics from the calibration window
     band_precisions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # Precision metrics for the ML-specific bands
+    ml_band_precisions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class LLMCalibrationRecord(Base):
+    """Tracks individual LLM prediction outcomes for adaptive weight calibration.
+
+    Each row records one LLM prediction: what it predicted, what actually
+    happened, and whether the LLM delta improved or degraded scoring accuracy.
+    The calibrator aggregates these over a rolling window to adjust the
+    ensemble weight dynamically.
+    """
+
+    __tablename__ = "llm_calibration_records"
+    __table_args__ = (
+        Index("ix_llm_cal_asset_ts", "asset_id", "prediction_ts"),
+        Index("ix_llm_cal_prediction_ts", "prediction_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    score_id: Mapped[int | None] = mapped_column(ForeignKey("scores.id"))
+    prediction_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # LLM deltas applied
+    hype_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    llm_weight_at_time: Mapped[float] = mapped_column(Float, nullable=False)
+    # Base (rule-only) scores at prediction time
+    base_hype: Mapped[float] = mapped_column(Float, nullable=False)
+    base_risk: Mapped[float] = mapped_column(Float, nullable=False)
+    base_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    # Final (LLM-adjusted) scores
+    final_hype: Mapped[float] = mapped_column(Float, nullable=False)
+    final_risk: Mapped[float] = mapped_column(Float, nullable=False)
+    final_confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    # Outcome: populated after observation window
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actual_risk_band: Mapped[str | None] = mapped_column(String(16))
+    price_change_pct: Mapped[float | None] = mapped_column(Float)
+    collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Did LLM delta improve accuracy? (evaluated vs base-only prediction)
+    llm_improved: Mapped[bool | None] = mapped_column(Boolean)
+    evaluation_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class LLMCalibrationState(Base):
+    """Persists the current adaptive LLM weight and calibration history."""
+
+    __tablename__ = "llm_calibration_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    current_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    previous_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    weight_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    total_predictions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_improved: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_degraded: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_calibration_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class EnsembleState(Base):
+    """Persists the adaptive ensemble weights and scorer accuracy history.
+
+    Without this, ensemble weights reset to defaults (0.50/0.30/0.20) on
+    every process restart.  This model stores the learned weights and
+    per-scorer accuracy so the ensemble survives restarts and accumulates
+    knowledge across scoring passes.
+    """
+
+    __tablename__ = "ensemble_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    current_weights: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
+    scorer_accuracy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    calibration_buckets: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    weight_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    total_predictions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_recalibrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class CrossSourceSignal(Base):
+    """Records cross-source signal fusion results per asset.
+
+    When multiple crawlers independently detect the same asset, this
+    table records the fused confidence boost.  High corroboration
+    across independent sources increases the ensemble's confidence
+    in the signal.
+    """
+
+    __tablename__ = "cross_source_signals"
+    __table_args__ = (
+        Index("ix_cross_source_signals_asset_ts", "asset_id", "observed_at"),
+        Index("ix_cross_source_signals_source_count", "source_count"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sources: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    fusion_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence_boost: Mapped[float] = mapped_column(Float, nullable=False)
+    signal_agreement: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

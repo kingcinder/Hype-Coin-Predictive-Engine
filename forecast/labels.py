@@ -223,13 +223,16 @@ def seed_labels_at_feature_timestamps(
                 continue
             counts["decision_points"] += 1
 
-            # Find the entry price: latest market snapshot at or before feature_ts
+            # Find the entry price: latest market snapshot at or before feature_ts.
+            # Gated on observed_at <= decision_ts so a snapshot ingested after
+            # the label-generation run cannot leak into a historical decision.
             entry_snap = session.scalar(
                 select(models.MarketSnapshot)
                 .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
                 .where(
                     models.Pair.base_asset_id == asset_id,
                     models.MarketSnapshot.ts <= feature_ts,
+                    models.MarketSnapshot.observed_at <= decision_ts,
                     models.MarketSnapshot.price_usd.is_not(None),
                     models.MarketSnapshot.price_usd > 0,
                 )
@@ -243,7 +246,8 @@ def seed_labels_at_feature_timestamps(
                 continue
             entry_price = float(price_val)
 
-            # Find future prices within the forward window
+            # Find future prices within the forward window — again gated on
+            # observed_at so backfilled snapshots stay out of the outcome.
             future_snaps = session.scalars(
                 select(models.MarketSnapshot)
                 .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
@@ -251,6 +255,7 @@ def seed_labels_at_feature_timestamps(
                     models.Pair.base_asset_id == asset_id,
                     models.MarketSnapshot.ts > feature_ts,
                     models.MarketSnapshot.ts <= feature_ts + window,
+                    models.MarketSnapshot.observed_at <= decision_ts,
                     models.MarketSnapshot.price_usd.is_not(None),
                     models.MarketSnapshot.price_usd > 0,
                 )

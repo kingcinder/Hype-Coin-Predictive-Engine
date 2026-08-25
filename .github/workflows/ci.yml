@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Required status checks for branch protection (GitHub Settings > Branches):
+#   "Lint & Format", "Type Check (mypy)", "Tests", "Docker build"
+# Every job below must pass before a PR can merge — enabling the protection
+# rule is the final, repo-owner step (Settings cannot be set from a file).
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff format check
+        run: ruff format --check .
+      - name: Ruff lint check
+        run: ruff check .
+
+  typecheck:
+    name: Type Check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run mypy
+        run: mypy api/ common/ engine/ crawlers/ data_lake/ ui/
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Run pytest with coverage
+        run: python -m pytest tests/ -x -q --cov=. --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: core
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: serpent-hype-coin-engine:ci
+      - name: Verify image metadata
+        run: docker image inspect serpent-hype-coin-engine:ci --format "Image {{.Id}} built OK"

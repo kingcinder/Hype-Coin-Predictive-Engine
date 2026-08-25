@@ -10,9 +10,7 @@ import re
 
 # Token mention patterns: $TICKER, 0x addresses, Solana base58 addresses
 TOKEN_PATTERN = re.compile(
-    r"\$([A-Z]{2,10})\b|"
-    r"(0x[a-fA-F0-9]{40})|"
-    r"([1-9A-HJ-NP-Za-km-z]{32,44})"
+    r"\$([A-Z]{2,10})\b|" r"(0x[a-fA-F0-9]{40})|" r"([1-9A-HJ-NP-Za-km-z]{32,44})"
 )
 
 

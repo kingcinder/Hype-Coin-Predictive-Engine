@@ -33,6 +33,7 @@ dependencies = [
   "boto3>=1.34",
   "streamlit>=1.37",
   "plotly>=5.23",
+  "psutil>=5.9",
   "feedparser>=6.0",
 ]
 
@@ -40,7 +41,7 @@ dependencies = [
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.23",
-  "pytest-cov>=5.0",
+  "pytest-cov==7.1.0",
   "respx>=0.21",
   "freezegun>=1.5",
   "moto[s3]>=5.0",
@@ -62,6 +63,30 @@ include = ["api*", "backtest*", "catalyst*", "common*", "crawlers*", "data_lake*
 testpaths = ["tests"]
 addopts = "-q"
 
+[tool.coverage.run]
+# Measure the engine, not the chrome: the Streamlit GUI views, the test suite
+# itself, and the one-off scripts are excluded so the reported percentage
+# reflects the backend code the tests actually exercise.
+omit = [
+  "ui/*",
+  "tests/*",
+  "scripts/*",
+  "crawlers/cli.py",
+  "packaging/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Keep the bar honest: a PR that drops overall coverage below 65% fails CI.
+fail_under = 65
+skip_covered = false
+# Exclude one-liner exception shims from coverage the same way ruff is told
+# about them.
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "# pragma: no cover",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -69,6 +94,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"ui/theme.py" = ["E501"]
+# The SVG template f-strings intentionally exceed the line length.
+"scripts/coverage_history.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

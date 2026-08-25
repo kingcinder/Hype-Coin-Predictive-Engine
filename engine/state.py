@@ -169,7 +169,7 @@ class EngineState:
                 if key in value:
                     return int(value[key])
             # narrative — sum all numeric values
-            numeric_sum = sum(v for v in value.values() if isinstance(v, (int, float)))
+            numeric_sum = sum(v for v in value.values() if isinstance(v, int | float))
             if numeric_sum > 0:
                 return int(numeric_sum)
             return default

@@ -225,7 +225,26 @@ class Settings(BaseSettings):
     nightcrawler_explorer_enabled: bool = True
     nightcrawler_nitter_enabled: bool = True
     nightcrawler_presale_enabled: bool = True
+    nightcrawler_cmc_enabled: bool = True
+    cmc_api_key: str | None = None
     nightcrawler_farcaster_enabled: bool = True
+    # Phase 8 fleet expansion: gas tracker, CoinPaprika, GitHub trending, X trends
+    nightcrawler_gas_tracker_enabled: bool = True
+    gas_tracker_solana_enabled: bool = True
+    nightcrawler_coinpaprika_enabled: bool = True
+    nightcrawler_github_trending_enabled: bool = True
+    github_trending_search_query: str = "crypto token memecoin created:>30d"
+    # Optional GitHub token raises the search API rate limit from 10 to 5000 req/h.
+    github_token: str | None = None
+    nightcrawler_x_trends_enabled: bool = True
+    x_trends_crypto_keywords_csv: str = (
+        "BTC,crypto,bitcoin,ethereum,solana,token,memecoin,airdrop,presale,nft,defi,altcoin"
+    )
+    farcaster_api_key: str | None = None
+    farcaster_tracked_fids_csv: str = "365,fid:warpcast,fid:dwrk9611,fid:danielleecroft"
+    farcaster_tracked_channels_csv: str = (
+        "crypto,base,solana,meme-coins,nft,dao,defi,devs,token-launch,airdrops"
+    )
     farcaster_search_queries_csv: str = (
         "token launch,new memecoin,presale live,dev activity,"
         "smart contract deploy,liquidity pool create,airdrop claim,"
@@ -247,6 +266,12 @@ class Settings(BaseSettings):
     forecast_drift_max_cal_error: float = 0.25
     forecast_drift_precision_fraction: float = 0.6
     forecast_drift_severe_precision: float = 0.2
+
+    # Model persistence & comparison thresholds
+    model_compare_precision_delta: float = 0.05
+    model_compare_cal_delta: float = 0.05
+    model_compare_severe_delta: float = 0.1
+    model_max_versions: int = 5
     # Calibration-bias guard: when the real-only test calibration error
     # exceeds the blended (dense-label-inclusive) one by this much, emit a
     # notifier warning — dense-label interpolation may be masking true model
@@ -270,8 +295,26 @@ class Settings(BaseSettings):
     alert_quality_noise_floor: float = 0.25
     alert_quality_min_ratings: int = 5
 
+    # Scheduled backtest autopilot: walk-forward run + drift detection every
+    # 24h.  Compares headline metrics (precision@10, median forward return,
+    # collapse rate) against the previous completed run and records a
+    # ``backtest_drift`` SystemHealth component on meaningful degradation.
+    backtest_autopilot_enabled: bool = True
+    backtest_autopilot_interval_hours: float = 24.0
+    backtest_lookback_days: int = 30
+    backtest_autopilot_top_k: int = 10
+    backtest_autopilot_forward_hours: int = 24
+    backtest_autopilot_feature_source: str = "sql"
+    backtest_drift_precision_margin: float = 0.15  # precision@10 drop vs previous run
+    backtest_drift_return_floor: float = -10.0  # median forward return below this = drift
+    backtest_drift_collapse_rise: float = 0.15  # collapse-rate spike vs previous run
+
     # Risk outcome tracking: observation window for evaluating flagged tokens
     risk_outcome_window_hours: float = 48.0
+    # Price-change thresholds for the unknown-outcome fallback in ensemble
+    # feedback: below drop = collapsed-like, above gain = survived-like.
+    risk_outcome_price_drop_threshold: float = -0.5  # 50% drop
+    risk_outcome_price_gain_threshold: float = 0.2  # 20% gain
     risk_calibration_frequency_hours: float = 24.0
     risk_calibration_min_samples: int = 10
 
@@ -284,10 +327,24 @@ class Settings(BaseSettings):
     llm_batch_size: int = 10  # max tokens per batch predict call
     llm_timeout_seconds: float = 30.0
 
+    # Adaptive LLM weight calibration: adjusts llm_weight dynamically based
+    # on whether LLM predictions improve or degrade scoring accuracy over time.
+    llm_calibration_enabled: bool = True
+    llm_calibration_min_samples: int = 10  # min predictions before adjusting
+    llm_calibration_window_hours: float = 168.0  # 7-day rolling window
+    llm_calibration_step: float = 0.01  # weight adjustment per calibration pass
+    llm_calibration_floor: float = 0.0  # minimum allowed LLM weight
+    llm_calibration_ceiling: float = 0.30  # maximum allowed LLM weight
+    llm_calibration_eval_hours: float = 48.0  # hours after prediction to evaluate
+
     model_version: str = "mvp-rules-v1"
     fingerprint_model_version: str = "cooccurrence-v1"
     forecast_model_version: str = "gbm-hist-v1"
     lifecycle_model_version: str = "lifecycle-rules-v1"
+    # Where trained forecast model artifacts are persisted. Containerized
+    # deployments override this to a path inside the data volume so models
+    # survive container recreation (forecast/persistence.py reads it).
+    model_artifact_dir: str = "models/forecast"
 
     @property
     def evm_factories(self) -> list[tuple[str, str]]:
@@ -360,6 +417,46 @@ class Settings(BaseSettings):
             if "archive_backend" not in self.model_fields_set:
                 self.archive_backend = "local"
         return self
+
+    @property
+    def farcaster_tracked_fids(self) -> list[str]:
+        """Parsed list of FIDs to track.
+
+        Entries may be bare numeric FIDs (``"365"``) or prefixed
+        ``"fid:<label>"`` which is stripped to just the number.
+        """
+        out: list[str] = []
+        for part in self.farcaster_tracked_fids_csv.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            # Accept "fid:label" syntax — extract the numeric part
+            if part.startswith("fid:"):
+                part = part[4:].strip()
+            if part:
+                out.append(part)
+        return out
+
+    @property
+    def farcaster_tracked_channels(self) -> list[str]:
+        """Parsed list of Farcaster channel slugs to monitor.
+
+        Entries may be bare slugs (``"crypto"``), prefixed with
+        ``"channel:label"`` (stripped to just the slug), or use the
+        ``/channel`` notation (leading slash removed).  All slugs are
+        lowercased for consistency.
+        """
+        out: list[str] = []
+        for part in self.farcaster_tracked_channels_csv.split(","):
+            part = part.strip().lower()
+            if not part:
+                continue
+            if part.startswith("channel:"):
+                part = part[8:].strip()
+            part = part.strip("/")
+            if part:
+                out.append(part)
+        return out
 
     @property
     def rss_feed_urls(self) -> list[str]:

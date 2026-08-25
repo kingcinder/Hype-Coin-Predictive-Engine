@@ -8,7 +8,7 @@ relaxed; orange bands that miss collapses get tightened.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import select
@@ -27,11 +27,27 @@ DEFAULT_YELLOW = 25.0
 DEFAULT_ORANGE = 50.0
 DEFAULT_RED = 75.0
 
+# Default ML-specific collapse-probability thresholds (0.0-1.0 scale),
+# learned directly from ML scorer outcomes instead of bridged from the
+# rule-engine score thresholds.
+DEFAULT_ML_YELLOW = 0.10
+DEFAULT_ML_ORANGE = 0.30
+DEFAULT_ML_RED = 0.50
+
 # Minimum samples before we trust calibration data
 MIN_CALIBRATION_SAMPLES = 10
 
 # Maximum adjustment per calibration cycle (prevent wild swings)
 MAX_THRESHOLD_DRIFT = 15.0
+
+# Same drift cap for the ML probability thresholds (0-1 scale)
+MAX_ML_THRESHOLD_DRIFT = 0.15
+
+# Hard ceiling for the ML red threshold.  The band mapper checks BLACK
+# (0.75) before RED, so a calibrated red >= 0.75 would make the RED band
+# unreachable.  Keeping red <= 0.70 preserves a guaranteed RED range below
+# BLACK (mirrors the old score-bridge cap of 0.70).
+MAX_ML_RED_THRESHOLD = 0.70
 
 # Learning rate: how much to move toward the ideal per cycle
 LEARNING_RATE = 0.3
@@ -49,6 +65,12 @@ class CalibrationResult:
     band_precisions: dict[str, float]
     sample_size: int
     adjusted: bool
+    # ML-specific probability thresholds (0.0-1.0), learned from ML outcomes
+    ml_yellow_threshold: float = DEFAULT_ML_YELLOW
+    ml_orange_threshold: float = DEFAULT_ML_ORANGE
+    ml_red_threshold: float = DEFAULT_ML_RED
+    ml_band_precisions: dict[str, float] = field(default_factory=dict)
+    ml_adjusted: bool = False
 
 
 def _get_active_calibration(session: Session) -> models.RiskCalibration | None:
@@ -85,11 +107,39 @@ def get_reason_weights(session: Session) -> dict[str, float]:
     return cal.reason_weights
 
 
-def _ideal_thresholds_for_band(band: BandOutcome, current_threshold: float) -> float:
+def get_current_ml_thresholds(session: Session) -> tuple[float, float, float]:
+    """Return the current ML-specific collapse-probability thresholds.
+
+    These are on the 0.0–1.0 probability scale and are learned directly from
+    ML scorer outcomes (RiskOutcome.details["ml_risk_band"]).  Falls back to
+    the hardcoded probability defaults when no calibration exists yet.
+    """
+    cal = _get_active_calibration(session)
+    if cal is None:
+        return DEFAULT_ML_YELLOW, DEFAULT_ML_ORANGE, DEFAULT_ML_RED
+    return (
+        cal.ml_yellow_threshold,
+        cal.ml_orange_threshold,
+        cal.ml_red_threshold,
+    )
+
+
+def _ideal_thresholds_for_band(
+    band: BandOutcome,
+    current_threshold: float,
+    *,
+    scale_max: float = 100.0,
+    step: float = 10.0,
+) -> float:
     """Compute the ideal threshold for a band based on its precision.
 
     A band with high precision (>0.7) is doing well — keep or tighten slightly.
     A band with low precision (<0.3) has too many false positives — relax it.
+
+    ``scale_max`` bounds the result (100.0 for the rule score scale, 1.0 for
+    the ML probability scale) and ``step`` scales the adjustment magnitude
+    (10.0 score points vs 0.10 probability points), so the same precision
+    heuristic drives both the rule and ML threshold updates.
     """
     if band.total_flagged < MIN_CALIBRATION_SAMPLES:
         return current_threshold
@@ -98,15 +148,15 @@ def _ideal_thresholds_for_band(band: BandOutcome, current_threshold: float) -> f
 
     if precision >= 0.7:
         # Good precision: tighten slightly (raise threshold) to be more selective
-        ideal = current_threshold + (precision - 0.5) * 10.0
+        ideal = current_threshold + (precision - 0.5) * step
     elif precision >= 0.4:
         # Acceptable: small adjustment toward ideal
-        ideal = current_threshold + (precision - 0.5) * 5.0
+        ideal = current_threshold + (precision - 0.5) * step * 0.5
     else:
         # Poor precision: relax (lower threshold) to reduce false positives
-        ideal = current_threshold - (0.5 - precision) * 15.0
+        ideal = current_threshold - (0.5 - precision) * step * 1.5
 
-    return max(0.0, min(100.0, ideal))
+    return max(0.0, min(scale_max, ideal))
 
 
 def _compute_reason_weights(
@@ -254,11 +304,74 @@ def run_calibration(
                 adjusted = True
                 red = round(new_red, 2)
 
+    # Step 2b: Adjust ML-specific probability thresholds from ML outcomes.
+    # The ML scorer calibrates on its own signal (RiskOutcome.details
+    # ["ml_risk_band"]), so it is not bridged from the rule-engine score
+    # thresholds above.
+    ml_yellow, ml_orange, ml_red = get_current_ml_thresholds(session)
+    ml_adjusted = False
+    if report.ml_total_flagged >= MIN_CALIBRATION_SAMPLES:
+        ml_yellow_band = report.ml_bands.get(RiskBand.YELLOW.value)
+        ml_orange_band = report.ml_bands.get(RiskBand.ORANGE.value)
+        ml_red_band = report.ml_bands.get(RiskBand.RED.value)
+
+        if ml_yellow_band and ml_yellow_band.total_flagged >= MIN_CALIBRATION_SAMPLES:
+            ideal = _ideal_thresholds_for_band(ml_yellow_band, ml_yellow, scale_max=1.0, step=0.10)
+            new = ml_yellow + LEARNING_RATE * (ideal - ml_yellow)
+            new = max(
+                0.0,
+                min(
+                    ml_yellow + MAX_ML_THRESHOLD_DRIFT,
+                    max(ml_yellow - MAX_ML_THRESHOLD_DRIFT, new),
+                ),
+            )
+            # Keep yellow strictly below orange's ceiling so the ordering
+            # gaps (0.05) always hold once red is capped at 0.70.
+            new = min(new, MAX_ML_RED_THRESHOLD - 0.10)
+            if abs(new - ml_yellow) > 0.005:
+                ml_adjusted = True
+                ml_yellow = round(new, 4)
+
+        if ml_orange_band and ml_orange_band.total_flagged >= MIN_CALIBRATION_SAMPLES:
+            ideal = _ideal_thresholds_for_band(ml_orange_band, ml_orange, scale_max=1.0, step=0.10)
+            new = ml_orange + LEARNING_RATE * (ideal - ml_orange)
+            new = max(
+                ml_yellow + 0.05,  # must stay above yellow
+                min(
+                    ml_orange + MAX_ML_THRESHOLD_DRIFT,
+                    max(ml_orange - MAX_ML_THRESHOLD_DRIFT, new),
+                ),
+            )
+            # Never allow orange to drift into red's reserved range so the
+            # red > orange + 0.05 gap survives the 0.70 red cap.
+            new = min(new, MAX_ML_RED_THRESHOLD - 0.05)
+            if abs(new - ml_orange) > 0.005:
+                ml_adjusted = True
+                ml_orange = round(new, 4)
+
+        if ml_red_band and ml_red_band.total_flagged >= MIN_CALIBRATION_SAMPLES:
+            ideal = _ideal_thresholds_for_band(ml_red_band, ml_red, scale_max=1.0, step=0.10)
+            new = ml_red + LEARNING_RATE * (ideal - ml_red)
+            new = max(
+                ml_orange + 0.05,  # must stay above orange
+                min(
+                    ml_red + MAX_ML_THRESHOLD_DRIFT,
+                    max(ml_red - MAX_ML_THRESHOLD_DRIFT, new),
+                ),
+            )
+            # Never allow the ML red boundary to swallow BLACK (checked first
+            # in band_from_collapse_probability).
+            new = min(new, MAX_ML_RED_THRESHOLD)
+            if abs(new - ml_red) > 0.005:
+                ml_adjusted = True
+                ml_red = round(new, 4)
+
     # Step 3: Compute reason weights
     reason_weights = _compute_reason_weights(session, report)
 
     # Step 4: Collect band precisions
     band_precisions = {band: outcome.precision for band, outcome in report.bands.items()}
+    ml_band_precisions = {band: outcome.precision for band, outcome in report.ml_bands.items()}
 
     # Step 5: Persist calibration
     # Deactivate previous calibration
@@ -273,8 +386,12 @@ def run_calibration(
         yellow_threshold=yellow,
         orange_threshold=orange,
         red_threshold=red,
+        ml_yellow_threshold=ml_yellow,
+        ml_orange_threshold=ml_orange,
+        ml_red_threshold=ml_red,
         reason_weights=reason_weights,
         band_precisions=band_precisions,
+        ml_band_precisions=ml_band_precisions,
         active=True,
     )
     session.add(cal)
@@ -283,16 +400,17 @@ def run_calibration(
     # Record health
     from storage.repository import record_health
 
-    state = "ok" if adjusted else "yellow"
+    state = "ok" if (adjusted or ml_adjusted) else "yellow"
     record_health(
         session,
         component="risk_calibration",
         state=state,
         message=(
             f"thresholds: Y={yellow:.1f} O={orange:.1f} R={red:.1f} | "
+            f"ml: Y={ml_yellow:.3f} O={ml_orange:.3f} R={ml_red:.3f} | "
             f"sample_size={report.total_flagged} | "
             f"overall_precision={report.overall_precision:.3f} | "
-            f"adjusted={adjusted}"
+            f"adjusted={adjusted} ml_adjusted={ml_adjusted}"
         ),
     )
 
@@ -302,9 +420,14 @@ def run_calibration(
         yellow=yellow,
         orange=orange,
         red=red,
+        ml_yellow=ml_yellow,
+        ml_orange=ml_orange,
+        ml_red=ml_red,
         sample_size=report.total_flagged,
+        ml_sample_size=report.ml_total_flagged,
         overall_precision=round(report.overall_precision, 4),
         adjusted=adjusted,
+        ml_adjusted=ml_adjusted,
     )
 
     return CalibrationResult(
@@ -316,4 +439,9 @@ def run_calibration(
         band_precisions=band_precisions,
         sample_size=report.total_flagged,
         adjusted=adjusted,
+        ml_yellow_threshold=ml_yellow,
+        ml_orange_threshold=ml_orange,
+        ml_red_threshold=ml_red,
+        ml_band_precisions=ml_band_precisions,
+        ml_adjusted=ml_adjusted,
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -36,6 +37,26 @@ engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+@contextmanager
+def session_scope() -> Generator[Session, None, None]:
+    """Explicit context-manager session for ``with session_scope() as s:`` callers.
+
+    FastAPI's ``Depends`` requires ``get_session`` to stay a *bare* generator
+    (FastAPI drives ``next()``/``throw()`` on the generator object itself — a
+    ``@contextmanager`` wrapper breaks every DB endpoint with
+    ``TypeError: '_GeneratorContextManager' object is not an iterator``).
+    Non-FastAPI code that wants ``with`` syntax must use this dedicated
+    context manager instead of wrapping ``get_session``.
+    """
+    with SessionLocal() as session:
+        yield session
+
+
 def get_session() -> Generator[Session, None, None]:
+    """FastAPI dependency: yield a session, closed on request teardown.
+
+    Intentionally a bare generator — ``Depends`` drives it directly. Use
+    ``session_scope()`` for ``with``-style call sites.
+    """
     with SessionLocal() as session:
         yield session

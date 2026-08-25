@@ -22,23 +22,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "parity_mismatches",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("run_ts", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("decision_ts", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("asset_id", sa.Integer(), sa.ForeignKey("assets.id"), nullable=True),
-        sa.Column("symbol", sa.String(64), nullable=True),
-        sa.Column("feature_name", sa.String(128), nullable=False),
-        sa.Column("sql_value", sa.Float(), nullable=True),
-        sa.Column("lake_value", sa.Float(), nullable=True),
-        sa.Column("sql_missing", sa.Boolean(), nullable=False, server_default="0"),
-        sa.Column("lake_missing", sa.Boolean(), nullable=False, server_default="0"),
-        sa.Column("state", sa.String(16), nullable=False, server_default="red"),
-    )
-    op.create_index("ix_parity_mismatch_run_ts", "parity_mismatches", ["run_ts"])
-    op.create_index("ix_parity_mismatch_decision_ts", "parity_mismatches", ["decision_ts"])
+    tables = set(sa.inspect(op.get_bind()).get_table_names())
+    if "parity_mismatches" not in tables:
+        op.create_table(
+            "parity_mismatches",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("run_ts", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("decision_ts", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("asset_id", sa.Integer(), sa.ForeignKey("assets.id"), nullable=True),
+            sa.Column("symbol", sa.String(64), nullable=True),
+            sa.Column("feature_name", sa.String(128), nullable=False),
+            sa.Column("sql_value", sa.Float(), nullable=True),
+            sa.Column("lake_value", sa.Float(), nullable=True),
+            sa.Column("sql_missing", sa.Boolean(), nullable=False, server_default="0"),
+            sa.Column("lake_missing", sa.Boolean(), nullable=False, server_default="0"),
+            sa.Column("state", sa.String(16), nullable=False, server_default="red"),
+        )
+        op.create_index("ix_parity_mismatch_run_ts", "parity_mismatches", ["run_ts"])
+        op.create_index("ix_parity_mismatch_decision_ts", "parity_mismatches", ["decision_ts"])
 
 
 def downgrade() -> None:
-    op.drop_table("parity_mismatches")
+    tables = set(sa.inspect(op.get_bind()).get_table_names())
+    if "parity_mismatches" in tables:
+        op.drop_table("parity_mismatches")

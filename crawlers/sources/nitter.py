@@ -66,102 +66,11 @@ class NitterCrawler(BaseCrawler):
                 response = self.client.get(url, params={"f": "tweets", "q": term})
                 if response.status_code != 200:
                     continue
-                return self._parse_rss(response.text, term)
+                return parse_nitter_rss(response.text, term)
             except Exception as exc:  # noqa: BLE001
                 log.debug("nitter_rss_error", instance=instance, term=term, error=str(exc))
                 continue
         return []
-
-    def _parse_rss(self, xml_text: str, search_term: str) -> list[dict[str, Any]]:
-        """Parse Nitter RSS/Atom feed into structured items."""
-        items: list[dict[str, Any]] = []
-        try:
-            root = ET.fromstring(xml_text)
-        except ET.ParseError:
-            # Try to fix common XML issues
-            xml_text = xml_text.replace("&", "&amp;")
-            try:
-                root = ET.fromstring(xml_text)
-            except ET.ParseError:
-                return []
-
-        # Handle both RSS 2.0 (<channel><item>) and Atom (<entry>)
-
-        # RSS 2.0 format
-        for item_el in root.iter("item"):
-            entry = self._parse_rss_item(item_el, search_term)
-            if entry:
-                items.append(entry)
-
-        # Atom format
-        for entry_el in root.iter("{http://www.w3.org/2005/Atom}entry"):
-            entry = self._parse_atom_entry(entry_el, search_term)
-            if entry:
-                items.append(entry)
-
-        return items[:15]  # Cap per search term
-
-    def _parse_rss_item(self, el: ET.Element, search_term: str) -> dict[str, Any] | None:
-        """Parse a single RSS 2.0 <item> element."""
-        title = _text(el, "title")
-        description = _text(el, "description")
-        link = _text(el, "link")
-        pub_date = _text(el, "pubDate")
-
-        text = _strip_html(description or title or "")
-        if not text or len(text) < 20:
-            return None
-
-        token_mentions = _extract_token_mentions(text)
-        if not token_mentions:
-            return None
-
-        return {
-            "title": text[:128],
-            "text": text[:512],
-            "url": link or "",
-            "published": _parse_pub_date(pub_date),
-            "source_domain": "twitter.com",
-            "source_type": "social",
-            "metrics": {
-                "search_term": search_term,
-                "token_mentions": token_mentions,
-                "platform": "twitter",
-                "has_url": bool(link),
-            },
-        }
-
-    def _parse_atom_entry(self, el: ET.Element, search_term: str) -> dict[str, Any] | None:
-        """Parse a single Atom <entry> element."""
-        title = _text(el, "{http://www.w3.org/2005/Atom}title")
-        summary = _text(el, "{http://www.w3.org/2005/Atom}summary")
-        content = _text(el, "{http://www.w3.org/2005/Atom}content")
-        link_el = el.find("{http://www.w3.org/2005/Atom}link")
-        link = link_el.get("href", "") if link_el is not None else ""
-        published = _text(el, "{http://www.w3.org/2005/Atom}published")
-
-        text = _strip_html(content or summary or title or "")
-        if not text or len(text) < 20:
-            return None
-
-        token_mentions = _extract_token_mentions(text)
-        if not token_mentions:
-            return None
-
-        return {
-            "title": text[:128],
-            "text": text[:512],
-            "url": link,
-            "published": _parse_pub_date(published),
-            "source_domain": "twitter.com",
-            "source_type": "social",
-            "metrics": {
-                "search_term": search_term,
-                "token_mentions": token_mentions,
-                "platform": "twitter",
-                "has_url": bool(link),
-            },
-        }
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -193,3 +102,101 @@ def _parse_pub_date(date_str: str | None) -> Any:
         return parsedate_to_datetime(date_str)
     except Exception:  # noqa: BLE001
         return utc_now()
+
+
+def _parse_rss_item(el: ET.Element, search_term: str) -> dict[str, Any] | None:
+    """Parse a single RSS 2.0 <item> element."""
+    title = _text(el, "title")
+    description = _text(el, "description")
+    link = _text(el, "link")
+    pub_date = _text(el, "pubDate")
+
+    text = _strip_html(description or title or "")
+    if not text or len(text) < 20:
+        return None
+
+    token_mentions = _extract_token_mentions(text)
+    if not token_mentions:
+        return None
+
+    return {
+        "title": text[:128],
+        "text": text[:512],
+        "url": link or "",
+        "published": _parse_pub_date(pub_date),
+        "source_domain": "twitter.com",
+        "source_type": "social",
+        "metrics": {
+            "search_term": search_term,
+            "token_mentions": token_mentions,
+            "platform": "twitter",
+            "has_url": bool(link),
+        },
+    }
+
+
+def _parse_atom_entry(el: ET.Element, search_term: str) -> dict[str, Any] | None:
+    """Parse a single Atom <entry> element."""
+    title = _text(el, "{http://www.w3.org/2005/Atom}title")
+    summary = _text(el, "{http://www.w3.org/2005/Atom}summary")
+    content = _text(el, "{http://www.w3.org/2005/Atom}content")
+    link_el = el.find("{http://www.w3.org/2005/Atom}link")
+    link = link_el.get("href", "") if link_el is not None else ""
+    published = _text(el, "{http://www.w3.org/2005/Atom}published")
+
+    text = _strip_html(content or summary or title or "")
+    if not text or len(text) < 20:
+        return None
+
+    token_mentions = _extract_token_mentions(text)
+    if not token_mentions:
+        return None
+
+    return {
+        "title": text[:128],
+        "text": text[:512],
+        "url": link,
+        "published": _parse_pub_date(published),
+        "source_domain": "twitter.com",
+        "source_type": "social",
+        "metrics": {
+            "search_term": search_term,
+            "token_mentions": token_mentions,
+            "platform": "twitter",
+            "has_url": bool(link),
+        },
+    }
+
+
+def parse_nitter_rss(xml_text: str, search_term: str) -> list[dict[str, Any]]:
+    """Parse Nitter RSS/Atom feed into structured items.
+
+    Module-level so other crawlers (e.g. x_trends) can reuse the parsing
+    without constructing a NitterCrawler instance.
+    """
+    items: list[dict[str, Any]] = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        # Try to fix common XML issues
+        xml_text = xml_text.replace("&", "&amp;")
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return []
+
+    # Handle both RSS 2.0 (<channel><item>) and Atom (<entry>)
+
+    # RSS 2.0 format
+    for item_el in root.iter("item"):
+        entry = _parse_rss_item(item_el, search_term)
+        if entry:
+            items.append(entry)
+
+    # Atom format
+    for entry_el in root.iter("{http://www.w3.org/2005/Atom}entry"):
+        entry = _parse_atom_entry(entry_el, search_term)
+        if entry:
+            items.append(entry)
+
+    return items[:15]  # Cap per search term

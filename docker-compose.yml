@@ -1,90 +1,135 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-serpent}
-      POSTGRES_USER: ${POSTGRES_USER:-serpent}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-serpent}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-serpent} -d ${POSTGRES_DB:-serpent}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio-data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  migrate:
+  # ── Full-stack engine (single container mode) ──────────────────────────
+  engine:
     build: .
     env_file: .env
-    command: alembic -c storage/alembic.ini upgrade head
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  api:
-    build: .
-    env_file: .env
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      ENV: local-single
+      # SQLite must live in the persistent data volume, not the container
+      # rootfs, or the DB is lost on every container recreation.
+      DATABASE_URL: sqlite:////app/data/serpent.db
+      # Trained forecast models also persist in the data volume.
+      MODEL_ARTIFACT_DIR: /app/data/models
+      # Ollama runs as its own container on the compose network.
+      LLM_OLLAMA_URL: http://ollama:11434
     ports:
       - "8000:8000"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-
-  worker:
-    build: .
-    env_file: .env
-    command: python -m ingestion.worker --loop
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-
-  ui:
-    build: .
-    env_file: .env
-    command: streamlit run ui/app.py --server.address=0.0.0.0 --server.port=8501
-    ports:
       - "8501:8501"
+    volumes:
+      - serpent-data:/app/data
+    restart: unless-stopped
     depends_on:
-      api:
-        condition: service_started
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  # ── Local LLM (Ollama) — supports the LLM ensemble layer ──────────────
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      # "ollama list" succeeds once the server is accepting requests.
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+    # Pull the default model on first boot so the engine finds it ready.
+    # (Downloads qwen2.5:0.5b once into the volume; override with
+    # OLLAMA_MODEL / MODEL env on the compose command if desired.)
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        sleep 3
+        ollama pull $${OLLAMA_MODEL:-qwen2.5:0.5b} || true
+        wait
+
+  # ── Backup sidecar: SQLite + archive snapshots, 7-day retention ───────
+  backup:
+    build: .
+    command: python scripts/backup.py --loop
+    environment:
+      BACKUP_DB_PATH: /app/data/serpent.db
+      BACKUP_ARCHIVE_DIR: /app/data/archive
+      BACKUP_DIR: /app/backups
+      BACKUP_RETENTION_DAYS: "7"
+      BACKUP_INTERVAL_HOURS: "24"
+    volumes:
+      - serpent-data:/app/data
+      - serpent-backups:/app/backups
+    restart: unless-stopped
+    depends_on:
+      engine:
+        condition: service_healthy
+
+  # ── Split-services mode (uncomment to run API, GUI, worker separately) ─
+  # api:
+  #   build: .
+  #   env_file: .env
+  #   command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - serpent-data:/app/data
+  #   restart: unless-stopped
+  #   depends_on:
+  #     ollama:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     start_period: 15s
+  #     retries: 3
+  #
+  # gui:
+  #   build: .
+  #   env_file: .env
+  #   command: streamlit run ui/app.py --server.address=0.0.0.0 --server.port=8501
+  #   ports:
+  #     - "8501:8501"
+  #   volumes:
+  #     - serpent-data:/app/data
+  #   restart: unless-stopped
+  #   depends_on:
+  #     api:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     start_period: 15s
+  #     retries: 3
+  #
+  # worker:
+  #   build: .
+  #   env_file: .env
+  #   command: python -m ingestion.worker --loop
+  #   volumes:
+  #     - serpent-data:/app/data
+  #   restart: unless-stopped
+  #   depends_on:
+  #     api:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health').raise_for_status()"]
+  #     interval: 60s
+  #     timeout: 10s
+  #     start_period: 30s
+  #     retries: 3
 
 volumes:
-  postgres-data:
-  minio-data:
-
+  serpent-data:
+    driver: local
+  serpent-backups:
+    driver: local
+  ollama-models:
+    driver: local

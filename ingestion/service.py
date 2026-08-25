@@ -93,7 +93,7 @@ def _int_from_result(value: Any) -> int:
         if "partitions" in value:
             return int(value["partitions"])
         # narrative: sum all numeric values (source counts)
-        numeric_sum = sum(v for v in value.values() if isinstance(v, (int, float)))
+        numeric_sum = sum(v for v in value.values() if isinstance(v, int | float))
         if numeric_sum > 0:
             return int(numeric_sum)
         # fallback: try 'count' key

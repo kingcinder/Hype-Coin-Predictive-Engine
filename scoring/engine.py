@@ -13,13 +13,29 @@ from common.time import utc_now
 from engine.price_stream import PriceUpdate, broadcast_price
 from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
-from risk_engine.rules import mask_unreliable_forecast
+from risk_engine.rules import band_from_collapse_probability, mask_unreliable_forecast
 from scoring.ensemble import ensemble_engine
 from scoring.formulas import ScoreResult, clamp, compute_scores
+from scoring.llm_calibration import llm_calibrator
 from scoring.llm_ensemble import apply_llm_adjustments
 from storage import models
 
 log = get_logger(__name__)
+
+
+def _heuristic_band_from_score(h_score: float | None) -> str | None:
+    """Map the heuristic layer's ignition signal to a risk-band prediction.
+
+    A high ignition signal (crawler evidence of a live pump) predicts the
+    token has survivable momentum — a positive outcome — so the heuristic
+    scorer's band reads GREEN; a low/absent signal predicts the negative
+    case.  Stored in ``RiskOutcome.details["heuristic_band"]`` so the
+    heuristic ensemble layer calibrates on its OWN prediction, separately
+    from the rule and ML bands.
+    """
+    if h_score is None:
+        return None
+    return "GREEN" if float(h_score) >= 0.5 else "RED"
 
 
 class ScoringEngine:
@@ -82,10 +98,27 @@ class ScoringEngine:
             try:
                 ml_score = raw.get("collapse_probability_24h")
                 h_score = raw.get("ignition_signal")
+
+                # Cross-source signal fusion: boost confidence when
+                # multiple independent crawlers corroborate the signal.
+                fusion_boost = 0.0
+                try:
+                    from scoring.cross_source_fusion import (
+                        fuse_signals,
+                        persist_fusion,
+                    )
+
+                    fusion = fuse_signals(session, asset_id)
+                    fusion_boost = fusion.confidence_boost
+                    if fusion.source_count >= 2:
+                        persist_fusion(session, fusion)
+                except Exception:  # noqa: BLE001
+                    pass  # fusion is additive, never breaks scoring
+
                 ensemble = ensemble_engine.blend(
                     rule_hype=result.hype,
                     rule_risk=result.risk,
-                    rule_confidence=result.confidence,
+                    rule_confidence=min(100.0, result.confidence + fusion_boost),
                     rule_research_priority=result.research_priority,
                     rule_risk_band=result.risk_band.value,
                     ml_hype=clamp(100.0 - ml_score * 100) if ml_score is not None else None,
@@ -114,11 +147,25 @@ class ScoringEngine:
                 ),
             )
             self._maybe_create_alert(session, score=score, result=result)
+            # Derive the ML-specific risk band from the collapse probability
+            # so the ML scorer gets independent outcome feedback.
+            ml_risk_band: str | None = None
+            ml_collapse_prob = raw.get("collapse_probability_24h")
+            if ml_collapse_prob is not None:
+                try:
+                    ml_risk_band = band_from_collapse_probability(
+                        float(ml_collapse_prob),
+                        session=session,
+                    ).value
+                except (TypeError, ValueError):
+                    pass
             self._record_risk_outcome(
                 session,
                 asset_id=asset_id,
                 score=score,
                 decision_ts=decision_ts,
+                ml_risk_band=ml_risk_band,
+                heuristic_band=_heuristic_band_from_score(raw.get("ignition_signal")),
             )
             result_by_asset[asset_id] = result
             scores.append(score)
@@ -155,6 +202,7 @@ class ScoringEngine:
                     s = score_by_asset.get(llm_pred.asset_id)
                     if s is None or not (llm_pred.narrative_summary or llm_pred.risk_assessment):
                         continue
+                    adaptive_weight = llm_calibrator.get_weight(session)
                     llm_adj = apply_llm_adjustments(
                         base_hype=s.hype,
                         base_risk=s.risk,
@@ -165,7 +213,7 @@ class ScoringEngine:
                         narrative_summary=llm_pred.narrative_summary,
                         risk_assessment=llm_pred.risk_assessment,
                         key_factors=llm_pred.key_factors,
-                        llm_weight=self.settings.llm_weight,
+                        llm_weight=adaptive_weight,
                     )
                     if llm_adj.applied:
                         s.hype = llm_adj.hype
@@ -175,15 +223,49 @@ class ScoringEngine:
                         # Re-upsert explanation so LLM narrative is persisted
                         # alongside the rule-based drivers.
                         orig_result = result_by_asset.get(llm_pred.asset_id, result)
+                        # Preserve existing changed_features from the rule-based pass
+                        existing_expl = session.scalar(
+                            select(models.ScoreExplanation).where(
+                                models.ScoreExplanation.score_id == s.id
+                            )
+                        )
                         self._upsert_explanation(
                             session,
                             score=s,
                             result=orig_result,
-                            changed_features={},
+                            changed_features=(
+                                existing_expl.changed_features if existing_expl else {}
+                            ),
+                        )
+                        # Record prediction for adaptive calibration
+                        base_risk_val = result_by_asset.get(llm_pred.asset_id, result).risk
+                        base_hype_val = result_by_asset.get(llm_pred.asset_id, result).hype
+                        base_conf_val = result_by_asset.get(llm_pred.asset_id, result).confidence
+                        llm_calibrator.record_prediction(
+                            session,
+                            asset_id=llm_pred.asset_id,
+                            score_id=s.id,
+                            model_name=llm_pred.llm_model,
+                            hype_delta=llm_pred.hype_delta,
+                            risk_delta=llm_pred.risk_delta,
+                            confidence_delta=llm_pred.confidence_delta,
+                            llm_weight=adaptive_weight,
+                            base_hype=base_hype_val,
+                            base_risk=base_risk_val,
+                            base_confidence=base_conf_val,
+                            final_hype=s.hype,
+                            final_risk=s.risk,
+                            final_confidence=s.confidence,
                         )
                         session.flush()
             except Exception:  # noqa: BLE001
                 pass  # LLM layer is additive, never breaks scoring
+
+        # Run LLM calibration after scoring (evaluates outcomes, adjusts weight)
+        try:
+            llm_calibrator.calibrate(session)
+        except Exception:  # noqa: BLE001
+            pass
 
         # Batch-query latest market + liquidity snapshots for all scored assets
         # (2 queries total, not N+1), then build PriceUpdate objects.
@@ -441,11 +523,17 @@ class ScoringEngine:
         asset_id: int,
         score: models.Score,
         decision_ts: datetime,
+        ml_risk_band: str | None = None,
+        heuristic_band: str | None = None,
     ) -> None:
         """Record a risk outcome for adaptive calibration.
 
         Only records outcomes for non-GREEN bands so the calibrator has
         meaningful signal to learn from (GREEN tokens are expected to be safe).
+        ``ml_risk_band`` is the ML-specific band from the forecast model and
+        ``heuristic_band`` is the heuristic-layer band from the crawler
+        ignition signal — when provided, those scorers receive independent
+        outcome feedback stored separately in ``RiskOutcome.details``.
         """
         if score.risk_band == RiskBand.GREEN.value:
             return
@@ -458,6 +546,8 @@ class ScoringEngine:
                 risk_band=score.risk_band,
                 score_id=score.id,
                 decision_ts=decision_ts,
+                ml_risk_band=ml_risk_band,
+                heuristic_band=heuristic_band,
             )
         except Exception as exc:  # noqa: BLE001 - outcome recording must not break scoring.
             log.warning("risk_outcome_recording_failed", error=str(exc), asset_id=asset_id)

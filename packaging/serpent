@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# serpent — CLI for managing the Serpent Circle Hype-Coin Predictive Engine
+#
+# This file is the source-of-truth for the CLI shim. The installer copies it
+# to /usr/local/bin/serpent. Update this file to change CLI behavior.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+PREFIX="${SERPENT_PREFIX:-/opt/serpent}"
+SERVICE="serpent.service"
+
+usage() {
+  cat <<EOF
+Serpent Circle — Hype-Coin Predictive Engine
+
+Usage: serpent <command>
+
+Commands:
+  start       Start the engine (API + GUI + Worker + Crawlers)
+  stop        Stop the engine
+  restart     Restart the engine
+  status      Show service status
+  logs        Follow live logs (Ctrl+C to stop)
+  logs-recent Show last 50 lines of logs
+  update      Pull latest code, run migrations, restart
+  uninstall   Remove services and CLI (keeps data by default)
+  version     Show installed version
+  open        Open the GUI in your default browser
+
+Options:
+  --remove-data   Use with 'uninstall' to also delete the database
+                  and all collected data (irreversible!)
+
+Examples:
+  serpent start
+  serpent status
+  serpent logs
+  serpent update
+  serpent uninstall --remove-data
+EOF
+}
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "❌ This command requires root. Use: sudo serpent $1" >&2
+    exit 1
+  fi
+}
+
+# Parse --remove-data flag early (before require_root in uninstall)
+REMOVE_DATA=false
+for _arg in "$@"; do
+  [[ "$_arg" == "--remove-data" ]] && REMOVE_DATA=true
+done
+
+case "${1:-help}" in
+  start)
+    require_root start
+    systemctl start "$SERVICE"
+    echo "✅ Serpent Circle engine started"
+    echo "   GUI: http://localhost:8501"
+    echo "   API: http://localhost:8000/health"
+    ;;
+  stop)
+    require_root stop
+    systemctl stop "$SERVICE"
+    echo "✅ Serpent Circle engine stopped"
+    ;;
+  restart)
+    require_root restart
+    systemctl restart "$SERVICE"
+    echo "✅ Serpent Circle engine restarted"
+    ;;
+  status)
+    systemctl --no-pager status "$SERVICE" 2>/dev/null || true
+    echo ""
+    echo "── Endpoints ──"
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      echo "  GUI : http://localhost:8501"
+      echo "  API : http://localhost:8000/health"
+      if curl -sf http://localhost:8000/health >/dev/null 2>&1; then
+        echo "  Health: ✅ responding"
+      else
+        echo "  Health: ⚠️  not responding yet (may still be starting)"
+      fi
+    else
+      echo "  Service is not running"
+    fi
+    ;;
+  logs)
+    journalctl -u "$SERVICE" -f --no-pager
+    ;;
+  logs-recent)
+    journalctl -u "$SERVICE" -n 50 --no-pager
+    ;;
+  update)
+    require_root update
+    if [[ ! -d "$PREFIX/.git" ]]; then
+      echo "❌ Not an installed instance at $PREFIX" >&2
+      exit 1
+    fi
+    BRANCH=$(cat "$PREFIX/.serpent-branch" 2>/dev/null || echo "main")
+    echo "── Pulling latest from branch: $BRANCH"
+    cd "$PREFIX"
+    git fetch origin "$BRANCH"
+    git checkout "$BRANCH"
+    git pull --ff-only origin "$BRANCH"
+    echo "── Updating dependencies..."
+    "$PREFIX/.venv/bin/pip" install -e "$PREFIX" -q 2>/dev/null
+    echo "── Running migrations..."
+    "$PREFIX/.venv/bin/alembic" -c storage/alembic.ini upgrade head 2>/dev/null || \
+      "$PREFIX/.venv/bin/python" -c "
+from storage.database import Base, engine
+from storage import models
+Base.metadata.create_all(bind=engine)
+" 2>/dev/null || true
+    echo "── Restarting service..."
+    systemctl daemon-reload
+    systemctl restart "$SERVICE"
+    echo "✅ Updated and restarted"
+    ;;
+  uninstall)
+    require_root uninstall
+    if [[ "$REMOVE_DATA" == "true" ]]; then
+      echo ""
+      echo "⚠️  WARNING: This will permanently delete:"
+      echo "   - All databases and Parquet archives at $PREFIX"
+      echo "   - All configuration files"
+      echo "   - The entire installation directory"
+      echo ""
+      read -r -p "Are you sure? Type 'yes' to confirm: " confirm
+      if [[ "$confirm" != "yes" ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+    fi
+    echo "── Stopping and disabling service..."
+    systemctl disable --now "$SERVICE" 2>/dev/null || true
+    rm -f /etc/systemd/system/$SERVICE
+    systemctl daemon-reload
+    rm -f /usr/local/bin/serpent
+    if [[ "$REMOVE_DATA" == "true" ]]; then
+      echo "── Removing all data..."
+      rm -rf -- "$PREFIX"
+      echo "✅ Removed services, CLI, and all data at $PREFIX"
+    else
+      echo "✅ Removed service and CLI"
+      echo "   Data retained at $PREFIX (database + archive)"
+      echo "   To remove data too: sudo serpent uninstall --remove-data"
+    fi
+    ;;
+  version)
+    if [[ -f "$PREFIX/pyproject.toml" ]]; then
+      grep -oP 'version = "\K[^"]+' "$PREFIX/pyproject.toml" 2>/dev/null || echo "unknown"
+    else
+      echo "not installed"
+    fi
+    ;;
+  open)
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      xdg-open http://localhost:8501 2>/dev/null || \
+      sensible-browser http://localhost:8501 2>/dev/null || \
+      echo "Open http://localhost:8501 in your browser"
+    else
+      echo "⚠️  Engine is not running. Start it first: sudo serpent start"
+      echo "   Then open: http://localhost:8501"
+    fi
+    ;;
+  help|--help|-h)
+    usage
+    ;;
+  *)
+    echo "❌ Unknown command: $1" >&2
+    echo "   Run 'serpent help' for usage" >&2
+    exit 1
+    ;;
+esac

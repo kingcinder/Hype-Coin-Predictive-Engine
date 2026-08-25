@@ -97,12 +97,16 @@ class BaseCrawler(ABC):
         self._seen_hashes: set[str] = set()
         self._client: httpx.Client | None = None
 
+    def _create_client_headers(self) -> dict[str, str]:
+        """Return HTTP headers for the client. Subclasses can override to add custom headers."""
+        return {"User-Agent": "serpent-nightcrawler/1.0"}
+
     @property
     def client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
                 timeout=self.timeout_seconds,
-                headers={"User-Agent": "serpent-nightcrawler/1.0"},
+                headers=self._create_client_headers(),
                 follow_redirects=True,
             )
         return self._client

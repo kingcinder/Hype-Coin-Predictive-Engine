@@ -6,9 +6,15 @@ from typing import Any
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-import streamlit.components.v1 as components
 
-from ui.api_client import API_BASE_URL, api_get, api_post  # noqa: F401
+from ui.api_client import (
+    api_get,
+    api_get_silent,
+    api_post,
+    api_status,  # noqa: F401
+)
+from ui.live import engine_snapshot, start_engine_subscriber
+from ui.theme import apply_dark_theme, inject_theme
 
 try:
     NARRATIVE_DEV_ACTIVITY_REFRESH_SECONDS = max(
@@ -23,59 +29,225 @@ except ValueError:
     UI_REFRESH_SECONDS = 30
 
 
-def _sse_bridge_js(api_base: str) -> str:
-    """Return JavaScript that maintains a persistent SSE connection to the engine
-    stream and writes the latest state into localStorage so Streamlit can read
-    it without making a new HTTP request on every rerun."""
-    return f"""
-    <script>
-    (function() {{
-      const KEY = 'serpent_engine_sse';
-      const api = '{api_base}';
-      let retryMs = 1000;
-      const MAX_RETRY = 30000;
+def _app_version() -> str:
+    """Read the package version from pyproject.toml (single source of truth)."""
+    try:
+        import tomllib
 
-      function connect() {{
-        const es = new EventSource(api + '/engine/stream');
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(project_root, "pyproject.toml"), "rb") as handle:
+            return tomllib.load(handle).get("project", {}).get("version", "0.0.0")
+    except Exception:  # noqa: BLE001 - fall back to a static default.
+        return "0.0.0"
 
-        es.onmessage = function(e) {{
-          try {{
-            const data = JSON.parse(e.data);
-            data._ts = Date.now();
-            localStorage.setItem(KEY, JSON.stringify(data));
-          }} catch(err) {{ console.error('SSE parse error', err); }}
-        }};
 
-        // Named events also carry the full state snapshot
-        ['init','scanning','scan_progress','forecasting','retention','completed',
-         'error','bootstrapping'].forEach(function(evt) {{
-          es.addEventListener(evt, function(e) {{
-            try {{
-              const data = JSON.parse(e.data);
-              data._event = evt;
-              data._ts = Date.now();
-              localStorage.setItem(KEY, JSON.stringify(data));
-            }} catch(err) {{ console.error('SSE parse error', err); }}
-          }});
-        }});
+APP_VERSION = _app_version()
 
-        es.onerror = function() {{
-          es.close();
-          retryMs = Math.min(retryMs * 2, MAX_RETRY);
-          setTimeout(connect, retryMs);
-        }};
+# ── Sidebar navigation: grouped sections with icons ────────────────────────
+NAV_SECTIONS: list[tuple[str, list[str]]] = [
+    (
+        "Overview",
+        ["Command Center", "Engine Control", "Health & Diagnostics"],
+    ),
+    (
+        "Intelligence",
+        [
+            "Top Hype Tokens",
+            "Top Research Candidates",
+            "Risk Console",
+            "Forecast",
+            "Confidence Dashboard",
+        ],
+    ),
+    (
+        "Token Deep Dive",
+        [
+            "Token Detail Page",
+            "Why It Ranked",
+            "What Changed",
+            "Historical Similar Setups",
+        ],
+    ),
+    (
+        "Radar",
+        [
+            "Ignition Radar",
+            "Prelaunch Queue",
+            "Narrative Radar",
+            "Catalyst Timetable",
+            "Syndicate Fingerprint",
+            "Lifecycle Radar",
+            "Narrative Dev-Activity",
+        ],
+    ),
+    ("Crawlers", ["Night Crawlers"]),
+    (
+        "Operations",
+        [
+            "Data Lake",
+            "Webhook Manager",
+            "RPC Pool Status",
+            "Archive & Retention",
+            "Backtest & Drift",
+            "Feed Health",
+            "Live Ops Console",
+            "Alerts",
+        ],
+    ),
+]
 
-        es.onopen = function() {{ retryMs = 1000; }};
-      }}
+VIEW_ICONS: dict[str, str] = {
+    "Command Center": "🛰️",
+    "Engine Control": "🎛️",
+    "Health & Diagnostics": "🩺",
+    "Top Hype Tokens": "🔥",
+    "Top Research Candidates": "🎯",
+    "Risk Console": "⚠️",
+    "Forecast": "🔮",
+    "Confidence Dashboard": "📈",
+    "Token Detail Page": "🔎",
+    "Why It Ranked": "🧠",
+    "What Changed": "🔄",
+    "Historical Similar Setups": "🕰️",
+    "Ignition Radar": "⚡",
+    "Prelaunch Queue": "🚀",
+    "Narrative Radar": "📡",
+    "Catalyst Timetable": "🗓️",
+    "Syndicate Fingerprint": "🕵️",
+    "Lifecycle Radar": "♻️",
+    "Narrative Dev-Activity": "👥",
+    "Night Crawlers": "🕷️",
+    "Data Lake": "🗄️",
+    "Webhook Manager": "🔗",
+    "RPC Pool Status": "🌐",
+    "Archive & Retention": "📦",
+    "Backtest & Drift": "🧪",
+    "Feed Health": "❤️",
+    "Live Ops Console": "🖥️",
+    "Alerts": "🔔",
+}
 
-      // Only connect once per page load
-      if (!window._serpentSSEConnected) {{
-        window._serpentSSEConnected = true;
-        connect();
-      }}
-    }})();
-    </script>
+# ── Risk-band display badges ───────────────────────────────────────────────
+BAND_EMOJI: dict[str, str] = {
+    "BLACK": "⬛",
+    "RED": "🟥",
+    "ORANGE": "🟧",
+    "YELLOW": "🟨",
+    "GREEN": "🟩",
+}
+
+
+def _band_cell(band: Any) -> str:
+    """Render a risk band as an emoji badge + label for table display."""
+    emoji = BAND_EMOJI.get(str(band), "")
+    return f"{emoji} {band}".strip() if emoji else str(band)
+
+
+def _fmt_bytes(n: float) -> str:
+    """Human-readable byte size for the system resource strip."""
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TiB"
+
+
+@st.fragment(run_every=3)
+def render_engine_banner() -> None:
+    """Persistent live engine-status banner at the top of every view.
+
+    Reads the server-side SSE snapshot (``ui.live``) so the phase, iteration,
+    and pulsing scan indicator update the instant the engine pushes a change
+    — no polling round-trips and no iframe bridge.  Falls back to a silent
+    ``/engine/status`` probe until the SSE connection warms up.
     """
+    engine = engine_snapshot() or api_get_silent("/engine/status") or {}
+    status = engine.get("status", "unknown")
+    scan = engine.get("scan") or {}
+    phase = scan.get("phase", "idle")
+    iteration = scan.get("iteration", 0)
+    phase_message = scan.get("phase_message", "")
+    error = scan.get("error_message")
+    uptime = engine.get("uptime_sec")
+
+    phase_colors = {
+        "idle": "#00ff88",
+        "completed": "#00ff88",
+        "scanning": "#00d4ff",
+        "forecasting": "#00d4ff",
+        "retention": "#00d4ff",
+        "bootstrapping": "#ffaa00",
+        "error": "#ff4444",
+    }
+    color = phase_colors.get(phase, "#8890a0")
+    pulsing = phase in ("scanning", "forecasting", "retention", "bootstrapping")
+    anim = "animation:glowPulse 1.2s ease-in-out infinite;" if pulsing else ""
+    uptime_txt = f"{int(uptime // 3600)}h {int(uptime % 3600 // 60)}m" if uptime else "—"
+    message = phase_message or error or ("idle — waiting for next scan" if phase == "idle" else "")
+    pill_cls = "ok" if status not in ("error", "stopped") else "error"
+    st.markdown(
+        f'<div class="sc-banner" style="display:flex;align-items:center;gap:12px;'
+        f"padding:8px 14px;margin-bottom:10px;border:1px solid {color};"
+        f'border-radius:10px;background:rgba(0,0,0,0.25);">'
+        f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+        f'background:{color};{anim}"></span>'
+        f'<b style="color:{color};letter-spacing:0.08em;">{phase.upper()}</b>'
+        f'<span style="color:#8890a0;font-size:0.8rem;">iter {iteration}</span>'
+        f'<span style="color:#8890a0;font-size:0.8rem;">uptime {uptime_txt}</span>'
+        f'<span style="color:#e0e0e0;font-size:0.8rem;flex:1;">{message}</span>'
+        f'<span class="sc-pill sc-pill-{pill_cls}">{status.upper()}</span>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+@st.fragment(run_every=UI_REFRESH_SECONDS)
+def render_system_strip() -> None:
+    """Dark-themed persistent system resource strip shown across all views.
+
+    Distinct from the engine banner: DB size, process memory/CPU, uptime,
+    and LLM status — the resource health of the process serving the GUI.
+    """
+    import os
+
+    import psutil
+
+    process = psutil.Process()
+    mem = process.memory_info()
+    db_size = 0
+    for candidate in ("serpent.db", "/app/data/serpent.db"):
+        if os.path.exists(candidate):
+            db_size = os.path.getsize(candidate)
+            break
+    llm = api_get_silent("/llm/health") or {}
+    engine = engine_snapshot() or api_get_silent("/engine/status") or {}
+    uptime = engine.get("uptime_sec")
+    uptime_txt = f"{int(uptime // 3600)}h {int(uptime % 3600 // 60)}m" if uptime else "—"
+    if llm.get("connected"):
+        llm_txt = "CONNECTED"
+    elif not llm.get("enabled", True):
+        llm_txt = "DISABLED"
+    else:
+        llm_txt = "OFFLINE"
+    cells = [
+        ("DB", _fmt_bytes(db_size)),
+        ("MEM", _fmt_bytes(mem.rss)),
+        ("CPU", f"{process.cpu_percent(interval=None):.0f}%"),
+        ("UPTIME", uptime_txt),
+        ("LLM", llm_txt),
+    ]
+    html = (
+        '<div style="display:flex;flex-wrap:wrap;gap:10px;padding:6px 14px;'
+        "margin-bottom:14px;border:1px solid #2a3050;border-radius:10px;"
+        'background:rgba(26,31,46,0.6);">'
+    )
+    for label, value in cells:
+        html += (
+            f'<span style="font-size:0.7rem;letter-spacing:0.1em;color:#8890a0;">'
+            f"{label}&nbsp;<b style='color:#00ff88;'>{value}</b></span>"
+        )
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def score_frame(path: str, *, include_black: bool = False, limit: int = 25) -> pd.DataFrame:
@@ -101,7 +273,10 @@ def score_table(df: pd.DataFrame) -> None:
         "uncertainty",
         "research_priority",
     ]
-    st.dataframe(df[columns], use_container_width=True, hide_index=True)
+    display = df[columns].copy()
+    if "risk_band" in display.columns:
+        display["risk_band"] = display["risk_band"].map(_band_cell)
+    st.dataframe(display, width="stretch", hide_index=True)
 
 
 def heat_graph(df: pd.DataFrame) -> None:
@@ -129,7 +304,8 @@ def heat_graph(df: pd.DataFrame) -> None:
         },
     )
     fig.update_layout(height=460, margin=dict(l=20, r=20, t=30, b=20))
-    st.plotly_chart(fig, use_container_width=True)
+    apply_dark_theme(fig)
+    st.plotly_chart(fig, width="stretch")
 
 
 def token_selector(df: pd.DataFrame) -> int | None:
@@ -187,7 +363,7 @@ def render_token_detail(asset_id: int | None) -> None:
     if features.empty:
         st.info("No feature snapshot exists for this token.")
     else:
-        st.dataframe(features, use_container_width=True, hide_index=True)
+        st.dataframe(features, width="stretch", hide_index=True)
 
     st.markdown("**What Changed**")
     changed = explanation.get("changed_features") or {}
@@ -202,7 +378,7 @@ def render_token_detail(asset_id: int | None) -> None:
             }
             for name, values in changed.items()
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     else:
         st.info("No previous comparable score snapshot exists yet.")
 
@@ -236,8 +412,10 @@ def risk_console() -> None:
         filtered["risk_band"], categories=risk_order, ordered=True
     )
     filtered = filtered.sort_values(["risk_band", "risk"], ascending=[True, False])
+    display = filtered.copy()
+    display["risk_band"] = display["risk_band"].map(_band_cell)
     st.dataframe(
-        filtered[
+        display[
             [
                 "asset_id",
                 "chain",
@@ -249,7 +427,7 @@ def risk_console() -> None:
                 "confidence",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     asset_id = token_selector(filtered)
@@ -281,21 +459,21 @@ def alerts_view() -> None:
             if cols[3].button(
                 "Snooze 4h",
                 key=f"snooze_{alert['id']}",
-                use_container_width=True,
+                width="stretch",
             ):
                 api_post(f"/alerts/{alert['id']}/snooze", json={"hours": 4})
                 st.rerun()
             if cols[3].button(
                 "✓ Useful",
                 key=f"ack_useful_{alert['id']}",
-                use_container_width=True,
+                width="stretch",
             ):
                 api_post(f"/alerts/{alert['id']}/ack", json={"quality": "useful"})
                 st.rerun()
             if cols[4].button(
                 "✗ Noise",
                 key=f"ack_noise_{alert['id']}",
-                use_container_width=True,
+                width="stretch",
             ):
                 api_post(f"/alerts/{alert['id']}/ack", json={"quality": "noise"})
                 st.rerun()
@@ -306,7 +484,7 @@ def alerts_view() -> None:
         pd.DataFrame(data)[
             ["created_at", "alert_type", "symbol", "state", "ack_quality", "message"]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -327,7 +505,7 @@ def alerts_view() -> None:
             pd.DataFrame(ledger["recent"])[
                 ["acked_at", "alert_type", "symbol", "ack_quality", "message"]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -346,7 +524,7 @@ def alerts_view() -> None:
         chart_df = trend_df.pivot(
             index="week_start", columns="alert_type", values="useful_rate"
         ).sort_index()
-        st.line_chart(chart_df, use_container_width=True)
+        st.line_chart(chart_df, width="stretch")
         st.dataframe(
             trend_df[
                 [
@@ -359,7 +537,7 @@ def alerts_view() -> None:
                     "total_acked",
                 ]
             ].sort_values(["week_start", "alert_type"], ascending=[False, True]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -474,7 +652,7 @@ def live_ops_console() -> None:
         alerts_df = pd.DataFrame(recent_alerts)
         st.dataframe(
             alerts_df[["created_at", "alert_type", "symbol", "state", "message"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -495,7 +673,7 @@ def historical_setups() -> None:
             "This view fills in as repeated scans accumulate."
         )
         return
-    st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(data), width="stretch", hide_index=True)
 
 
 def ignition_radar() -> None:
@@ -510,7 +688,7 @@ def ignition_radar() -> None:
     )
     st.dataframe(
         df[["ts", "event_type", "symbol", "chain", "confidence"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     if df.empty:
@@ -551,7 +729,7 @@ def syndicate_fingerprint() -> None:
                 "decision_ts",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     if not df.empty:
@@ -580,7 +758,7 @@ def prelaunch_queue() -> None:
     st.caption("Tokens ranked before their pool exists — the radar is already watching them at t0.")
     st.dataframe(
         df[["symbol", "chain", "priority_score", "decision_ts"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     if not df.empty:
@@ -604,7 +782,7 @@ def narrative_radar() -> None:
     st.caption("Mention clusters grouped by shared vocabulary (hand-built minhash, offline).")
     st.dataframe(
         df[["last_seen_at", "mention_count", "seed_topic"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -621,7 +799,7 @@ def catalyst_timetable() -> None:
     df = pd.DataFrame(data)
     st.dataframe(
         df[["symbol", "catalyst_type", "scheduled_at", "published_at", "confidence"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -653,7 +831,7 @@ def forecast_view() -> None:
                 "decision_ts",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -714,7 +892,7 @@ def forecast_view() -> None:
                     "collapse impact (pp)",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -730,11 +908,11 @@ def forecast_view() -> None:
                 "collapse impact (pp)",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     chart = top.set_index("feature")[["ignition impact (pp)", "collapse impact (pp)"]]
-    st.bar_chart(chart, use_container_width=True)
+    st.bar_chart(chart, width="stretch")
 
 
 def lifecycle_radar() -> None:
@@ -751,7 +929,7 @@ def lifecycle_radar() -> None:
     st.caption("Current hype-lifecycle phase per asset (monotonic state machine).")
     st.dataframe(
         df[["symbol", "chain", "phase", "ts", "confidence"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     events = api_get("/lifecycle/events", params={"limit": 100})
@@ -759,7 +937,7 @@ def lifecycle_radar() -> None:
         st.markdown("**Recent transitions**")
         st.dataframe(
             pd.DataFrame(events)[["ts", "symbol", "phase", "confidence"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -787,7 +965,7 @@ def lifecycle_radar() -> None:
                 ]
                 st.dataframe(
                     pd.DataFrame(evidence_rows),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             else:
@@ -830,10 +1008,51 @@ def backtest_results() -> None:
     data = api_get("/backtest/results", params={"limit": 20})
     if not data:
         st.info(
-            "No backtest runs yet. Run `python -m backtest.runner` or let forecast "
-            "training persist its metrics."
+            "No backtest runs yet. Run `python -m backtest.runner`, trigger one above, "
+            "or let forecast training persist its metrics."
         )
         return
+
+    # ── Headline cards for the latest run ────────────────────────────────
+    latest = data[0]
+    latest_metrics = latest.get("metrics") or {}
+    if latest_metrics:
+        st.subheader("Latest Run")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Precision@10", f"{latest_metrics.get('precision_at_10', 0):.1%}")
+        c2.metric(
+            "Median forward return",
+            f"{latest_metrics.get('median_forward_return', 0):+.1%}",
+        )
+        c3.metric("Collapse rate", f"{latest_metrics.get('collapse_rate', 0):.1%}")
+        c4.metric("Scam avoidance", f"{latest_metrics.get('scam_avoidance_rate', 0):.1%}")
+        st.caption(
+            f"run {latest['run_id']} · {latest['model_version']} · "
+            f"started {str(latest['started_at'])[:19]} · status={latest['status']}"
+        )
+
+        # ── Precision & return trend across runs ─────────────────────────
+        runs_with_metrics = [
+            run for run in data if (run.get("metrics") or {}).get("precision_at_10") is not None
+        ]
+        if len(runs_with_metrics) >= 2:
+            trend = pd.DataFrame(
+                [
+                    {
+                        "started_at": run["started_at"],
+                        "precision@10": run["metrics"].get("precision_at_10", 0),
+                        "median fwd return": run["metrics"].get("median_forward_return", 0),
+                    }
+                    for run in runs_with_metrics
+                ]
+            ).sort_values("started_at")
+            trend["started_at"] = pd.to_datetime(trend["started_at"])
+            st.subheader("Precision Trend Across Runs")
+            st.line_chart(trend.set_index("started_at"), width="stretch")
+
+    st.divider()
+
+    # ── Per-run detail ───────────────────────────────────────────────────
     for run in data:
         st.subheader(f"Run {run['run_id']} · {run['model_version']}")
         st.caption(f"status={run['status']} · started={run['started_at']}")
@@ -841,7 +1060,7 @@ def backtest_results() -> None:
         if metrics:
             st.dataframe(
                 pd.DataFrame([{"metric": name, "value": value} for name, value in metrics.items()]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -933,7 +1152,7 @@ def archive_retention() -> None:
         st.subheader("Lake growth trend")
         st.line_chart(
             _lake_growth_frame(runs, growth),
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
             "Lake bytes per retention pass, extended by the linear projection to "
@@ -953,7 +1172,7 @@ def archive_retention() -> None:
                     "pruned",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     data = api_get("/archive/manifests", params={"limit": 200})
@@ -980,7 +1199,7 @@ def archive_retention() -> None:
                 "object_key",
             ]
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1033,7 +1252,7 @@ def _parity_panel() -> None:
                         for row in mismatches
                     ]
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1047,7 +1266,7 @@ def feed_health() -> None:
         if components.empty:
             st.info("No component health rows exist yet. Worker runs will populate this table.")
         else:
-            st.dataframe(components, use_container_width=True, hide_index=True)
+            st.dataframe(components, width="stretch", hide_index=True)
 
     _parity_panel()
 
@@ -1092,12 +1311,12 @@ def feed_health() -> None:
                         "result": "ok" if probe["ok"] else "failed",
                     }
                 )
-        st.dataframe(pd.DataFrame(endpoint_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(endpoint_rows), width="stretch", hide_index=True)
         with st.expander(f"{chain['chain'].upper()} probe history", expanded=False):
             if history_rows:
                 st.dataframe(
                     pd.DataFrame(history_rows).sort_values("ts", ascending=False),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
             else:
@@ -1136,7 +1355,7 @@ def rpc_pool_status() -> None:
         df = pd.DataFrame(rows)
         st.dataframe(
             df[["endpoint", "status", "health", "consecutive_failures"]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         st.progress(
@@ -1202,7 +1421,7 @@ def narrative_dev_activity() -> None:
     )
     st.dataframe(
         display[["symbol", "chain", "kol", "stars/day", "downloads/day", "decision_ts"]],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     if df.empty:
@@ -1212,7 +1431,7 @@ def narrative_dev_activity() -> None:
         st.markdown("**GitHub star velocity (stars/day)**")
         st.bar_chart(
             chart.set_index("symbol")["github_star_velocity"],
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.info(
@@ -1295,7 +1514,7 @@ def engine_control() -> None:
 
     act_cols = st.columns(3)
     with act_cols[0]:
-        if st.button("🔄 Trigger Scan", type="primary", use_container_width=True):
+        if st.button("🔄 Trigger Scan", type="primary", width="stretch"):
             result = api_post("/engine/scan")
             if result:
                 if result.get("status") == "accepted":
@@ -1303,7 +1522,7 @@ def engine_control() -> None:
                 else:
                     st.warning(f"⚠️ {result.get('message', 'Rejected')}")
     with act_cols[1]:
-        if st.button("🧠 Train Forecast", use_container_width=True):
+        if st.button("🧠 Train Forecast", width="stretch"):
             result = api_post("/engine/forecast")
             if result:
                 if result.get("status") == "accepted":
@@ -1311,7 +1530,7 @@ def engine_control() -> None:
                 else:
                     st.warning(f"⚠️ {result.get('message', 'Rejected')}")
     with act_cols[2]:
-        if st.button("📦 Run Retention", use_container_width=True):
+        if st.button("📦 Run Retention", width="stretch"):
             result = api_post("/engine/retention")
             if result:
                 if result.get("status") == "accepted":
@@ -1327,7 +1546,7 @@ def engine_control() -> None:
         "Seed reference data (chains, sources, fixture tokens) into the database. "
         "Safe to run multiple times — idempotent."
     )
-    if st.button("🌱 Seed Fixture Data", use_container_width=False):
+    if st.button("🌱 Seed Fixture Data", width="content"):
         with st.spinner("Seeding database..."):
             result = api_post("/engine/seed")
         if result:
@@ -1372,7 +1591,7 @@ def data_lake_dashboard() -> None:
             ),
         )
 
-        if st.button("⚡ Densify Labels Now", use_container_width=False):
+        if st.button("⚡ Densify Labels Now", width="content"):
             with st.spinner("Densifying labels from market snapshots..."):
                 result = api_post("/data/densify-labels")
             if result:
@@ -1385,7 +1604,7 @@ def data_lake_dashboard() -> None:
 
     # Signal scoring
     st.subheader("Signal Scoring")
-    if st.button("📊 Score Recent Signals", use_container_width=False):
+    if st.button("📊 Score Recent Signals", width="content"):
         with st.spinner("Scoring recent data points..."):
             signal_data = api_post("/data/signal/score")
         if signal_data:
@@ -1410,7 +1629,7 @@ def data_lake_dashboard() -> None:
                             "reasons",
                         ]
                     ],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
     else:
@@ -1423,7 +1642,7 @@ def data_lake_dashboard() -> None:
     st.caption(
         "Run a full data lake pass: signal scoring + label densification + webhook dispatch."
     )
-    if st.button("🚀 Run Data Lake Pass", type="primary", use_container_width=False):
+    if st.button("🚀 Run Data Lake Pass", type="primary", width="content"):
         result = api_post("/engine/data-lake")
         if result:
             if result.get("status") == "accepted":
@@ -1518,7 +1737,7 @@ def webhook_manager() -> None:
                     "error_message",
                 ]
             ],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     else:
@@ -1645,7 +1864,7 @@ def confidence_dashboard() -> None:
                 row[short] = fval
             rows.append(row)
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
         # Feature importance chart for first token
         if breakdown:
@@ -1659,7 +1878,7 @@ def confidence_dashboard() -> None:
                         for k, v in features.items()
                     ]
                 ).sort_values("value", ascending=False)
-                st.bar_chart(feat_df.set_index("feature"), use_container_width=True)
+                st.bar_chart(feat_df.set_index("feature"), width="stretch")
     else:
         st.info("No scoring data available yet.")
 
@@ -1670,9 +1889,9 @@ def confidence_dashboard() -> None:
     scan_history = data.get("scan_history") or []
     if scan_history:
         df = pd.DataFrame(scan_history)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         if "duration_sec" in df.columns and df["duration_sec"].notna().any():
-            st.line_chart(df.set_index("ts")[["duration_sec"]], use_container_width=True)
+            st.line_chart(df.set_index("ts")[["duration_sec"]], width="stretch")
     else:
         st.info("No scan history yet.")
 
@@ -1754,9 +1973,12 @@ def command_center() -> None:
         if hot.empty:
             st.info("No scored tokens yet — run ingestion or seed fixtures.")
         else:
+            hot_display = hot.head(6).copy()
+            if "risk_band" in hot_display.columns:
+                hot_display["risk_band"] = hot_display["risk_band"].map(_band_cell)
             st.dataframe(
-                hot[["symbol", "chain", "hype", "risk_band", "research_priority"]].head(6),
-                use_container_width=True,
+                hot_display[["symbol", "chain", "hype", "risk_band", "research_priority"]],
+                width="stretch",
                 hide_index=True,
                 height=220,
             )
@@ -1765,9 +1987,12 @@ def command_center() -> None:
         if research.empty:
             st.info("No research candidates yet.")
         else:
+            research_display = research.head(6).copy()
+            if "risk_band" in research_display.columns:
+                research_display["risk_band"] = research_display["risk_band"].map(_band_cell)
             st.dataframe(
-                research[["symbol", "chain", "research_priority", "risk_band", "hype"]].head(6),
-                use_container_width=True,
+                research_display[["symbol", "chain", "research_priority", "risk_band", "hype"]],
+                width="stretch",
                 hide_index=True,
                 height=220,
             )
@@ -1788,14 +2013,14 @@ def command_center() -> None:
                 ]
             ].head(6)
             fdf = fdf.round(3)
-            st.dataframe(fdf, use_container_width=True, hide_index=True, height=220)
+            st.dataframe(fdf, width="stretch", hide_index=True, height=220)
     with f_right:
         st.markdown("**Lifecycle · current phase**")
         if not lifecycle:
             st.info("No lifecycle phases yet.")
         else:
             ldf = pd.DataFrame(lifecycle)[["symbol", "chain", "phase", "ts"]].head(8)
-            st.dataframe(ldf, use_container_width=True, hide_index=True, height=220)
+            st.dataframe(ldf, width="stretch", hide_index=True, height=220)
 
     st.markdown("**Last scan pipeline**")
     if not last_scan:
@@ -1827,7 +2052,7 @@ def command_center() -> None:
     recent = (ops or {}).get("recent_alerts") or []
     if recent:
         alerts_df = pd.DataFrame(recent)[["created_at", "alert_type", "symbol", "state"]].head(6)
-        st.dataframe(alerts_df, use_container_width=True, hide_index=True, height=220)
+        st.dataframe(alerts_df, width="stretch", hide_index=True, height=220)
     else:
         st.info("No alerts have been pushed yet.")
 
@@ -1881,57 +2106,66 @@ def render_active_view(view: str) -> None:
         alerts_view()
 
 
-# ── SSE-injected live banner (shown at top of every page) ─────────────────
+def _sidebar_nav() -> str:
+    """Render the grouped, branded sidebar navigation; return the selected view.
 
-
-def _ws_bridge_js(api_base: str) -> str:
-    """Return JavaScript that maintains a persistent WebSocket connection to the
-    price stream and writes the latest price data into localStorage.
-
-    The WS URL uses ``ws://`` (loopback dev) — a reverse proxy in production
-    would terminate TLS and forward to the same port.
+    Each section gets its own radio so the sidebar reads as an organized
+    command center instead of one flat 28-item list. The active selection is
+    tracked in ``st.session_state["nav_view"]`` and kept in sync across the
+    per-section radios.
     """
-    from urllib.parse import urlparse, urlunparse
+    if "nav_view" not in st.session_state:
+        st.session_state.nav_view = "Command Center"
 
-    parsed = urlparse(api_base)
-    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-    ws_url = urlunparse((ws_scheme, parsed.netloc, "/ws/prices", "", "", ""))
-    return f"""
-    <script>
-    (function() {{
-      const KEY = 'serpent_prices';
-      const url = '{ws_url}';
-      let retryMs = 1000;
-      const MAX_RETRY = 30000;
+    st.sidebar.markdown(
+        '<div class="sc-sidebar-brand">'
+        '<span class="sc-logo">🐍</span>'
+        '<div><div class="sc-sidebar-brand-name">SERPENT CIRCLE</div>'
+        '<div class="sc-sidebar-brand-tag">Hype-Coin Engine</div></div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
-      function connect() {{
-        const ws = new WebSocket(url);
-        ws.onmessage = function(e) {{
-          try {{
-            const data = JSON.parse(e.data);
-            if (data.type === 'ping') return;
-            data._ts = Date.now();
-            localStorage.setItem(KEY, JSON.stringify(data));
-          }} catch(err) {{ console.error('WS parse error', err); }}
-        }};
-        ws.onerror = function() {{
-          ws.close();
-          retryMs = Math.min(retryMs * 2, MAX_RETRY);
-          setTimeout(connect, retryMs);
-        }};
-        ws.onclose = function() {{
-          retryMs = Math.min(retryMs * 2, MAX_RETRY);
-          setTimeout(connect, retryMs);
-        }};
-        ws.onopen = function() {{ retryMs = 1000; }};
-      }}
-      if (!window._serpentWSConnected) {{
-        window._serpentWSConnected = true;
-        connect();
-      }}
-    }})();
-    </script>
-    """
+    view = st.session_state.nav_view
+    for section, views in NAV_SECTIONS:
+        st.sidebar.markdown(
+            f'<div class="sc-nav-section">{section}</div>',
+            unsafe_allow_html=True,
+        )
+        key = f"nav_{section}"
+        current = view if view in views else None
+        # Force exactly one selected item across all section radios: the
+        # section holding the active view shows it selected; every other
+        # section renders with no selection.
+        if current is not None:
+            st.session_state[key] = current
+        elif key in st.session_state:
+            del st.session_state[key]
+        picked = st.sidebar.radio(
+            section,
+            views,
+            key=key,
+            index=views.index(current) if current else None,
+            format_func=lambda name: f"{VIEW_ICONS.get(name, '')} {name}".strip(),
+            label_visibility="collapsed",
+        )
+        if picked is not None and picked != view:
+            st.session_state.nav_view = picked
+            st.rerun()
+    return st.session_state.nav_view
+
+
+def _sidebar_footer() -> None:
+    """Compact brand footer with version and a live API status pill."""
+    state, label = api_status(timeout=1.0)
+    cls = {"ok": "ok", "yellow": "warn"}.get(state, "error")
+    st.sidebar.markdown(
+        f'<div class="sc-sidebar-footer">'
+        f'<span class="sc-sidebar-ver">v{APP_VERSION}</span>'
+        f'<span class="sc-pill sc-pill-{cls}">● {label}</span>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
@@ -1941,48 +2175,20 @@ def main() -> None:
         layout="wide",
     )
     # ── Branding: inject dark-theme CSS + Serpent Circle palette ──────────
-    from ui.styles import load_branding
+    # The theme already renders the branded hero header, so no duplicate
+    # st.title here.
+    inject_theme()
 
-    load_branding()
-    st.title("🐍 Serpent Circle Hype-Coin Engine")
-    st.caption("Research-only local intelligence. Hype and risk stay separate.")
+    # Server-side SSE subscriber replaces the deprecated iframe bridges: the
+    # daemon thread keeps the live engine snapshot in memory so the banner
+    # below updates instantly on phase changes — no localStorage, no polling.
+    start_engine_subscriber()
 
-    # Inject the persistent SSE + WebSocket JavaScript connections
-    components.html(_sse_bridge_js(API_BASE_URL), height=0)
-    components.html(_ws_bridge_js(API_BASE_URL), height=0)
+    view = _sidebar_nav()
 
-    view = st.sidebar.radio(
-        "View",
-        [
-            "Command Center",
-            "Engine Control",
-            "Data Lake",
-            "Confidence Dashboard",
-            "Webhook Manager",
-            "Top Hype Tokens",
-            "Top Research Candidates",
-            "Risk Console",
-            "Token Detail Page",
-            "Why It Ranked",
-            "What Changed",
-            "Historical Similar Setups",
-            "Ignition Radar",
-            "Prelaunch Queue",
-            "Narrative Radar",
-            "Catalyst Timetable",
-            "Forecast",
-            "Syndicate Fingerprint",
-            "Lifecycle Radar",
-            "Narrative Dev-Activity",
-            "RPC Pool Status",
-            "Archive & Retention",
-            "Backtest & Drift",
-            "Feed Health",
-            "Live Ops Console",
-            "Alerts",
-            "Night Crawlers",
-        ],
-    )
+    # Persistent live engine-status banner + system resource strip on every view.
+    render_engine_banner()
+    render_system_strip()
 
     if view == "Narrative Dev-Activity":
         # Own run_every fragment; Streamlit cannot nest fragments, so it renders
@@ -1994,6 +2200,10 @@ def main() -> None:
         from ui.nightcrawler_view import nightcrawler_view
 
         nightcrawler_view()
+    elif view == "Health & Diagnostics":
+        from ui.health_diagnostics_view import health_diagnostics_view
+
+        health_diagnostics_view()
     elif view == "Data Lake":
         data_lake_dashboard()
     elif view == "Confidence Dashboard":
@@ -2002,6 +2212,8 @@ def main() -> None:
         webhook_manager()
     else:
         render_active_view(view)
+
+    _sidebar_footer()
 
 
 if __name__ == "__main__":

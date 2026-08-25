@@ -66,7 +66,7 @@ def probe_narrative_endpoint(source_name: str, url: str, path: str) -> bool:
             )
             response.raise_for_status()
             payload = response.json()
-        return isinstance(payload, (dict, list))
+        return isinstance(payload, dict | list)
     except Exception:  # noqa: BLE001 - a dead source must be skipped, not fatal.
         return False
 

@@ -75,6 +75,64 @@ def _apply_reason_weights(
     return base_points * weight
 
 
+# Default collapse-probability band boundaries (0.0–1.0 scale).  These are
+# the pre-calibration defaults; once adaptive calibration data exists, the
+# calibrator learns ML-specific probability thresholds directly from ML
+# scorer outcomes (RiskOutcome.details["ml_risk_band"]).
+_DEFAULT_PROB_YELLOW = 0.10
+_DEFAULT_PROB_ORANGE = 0.30
+_DEFAULT_PROB_RED = 0.50
+_DEFAULT_PROB_BLACK = 0.75
+
+
+def band_from_collapse_probability(
+    probability: float,
+    *,
+    session: Session | None = None,
+) -> RiskBand:
+    """Map a raw ML collapse probability (0.0–1.0) to a risk band.
+
+    When a session is provided and adaptive calibration data exists, the
+    yellow/orange/red boundaries come from the calibrator's ML-specific
+    probability thresholds, which are learned directly from ML scorer
+    outcomes — the ML scorer calibrates independently of the rule engine
+    instead of borrowing bridged rule-engine score thresholds.  Without a
+    session (or before the first calibration), the hardcoded defaults apply.
+
+    The BLACK boundary stays fixed at 0.75 — it represents
+    structural/hard-reject danger that should not drift.
+
+    This is the single source of truth for ML-probability-to-band
+    conversion; both ``scoring.engine`` and ``risk_engine.outcomes`` should
+    call this function rather than duplicating thresholds.
+    """
+    yellow, orange, red = _DEFAULT_PROB_YELLOW, _DEFAULT_PROB_ORANGE, _DEFAULT_PROB_RED
+    if session is not None:
+        try:
+            from risk_engine.calibrator import get_current_ml_thresholds
+
+            yellow, orange, red = get_current_ml_thresholds(session)
+        except Exception:  # noqa: BLE001 - calibration lookup must not break banding.
+            yellow, orange, red = _DEFAULT_PROB_YELLOW, _DEFAULT_PROB_ORANGE, _DEFAULT_PROB_RED
+
+    # Defensive: keep the band chain strictly ordered
+    # YELLOW < ORANGE < RED < BLACK so no band can become unreachable or
+    # collapse into its neighbor, even if a stale calibration row drifted.
+    red = min(red, _DEFAULT_PROB_BLACK - 0.01)
+    orange = min(orange, red - 0.01)
+    yellow = min(yellow, orange - 0.01)
+
+    if probability >= _DEFAULT_PROB_BLACK:
+        return RiskBand.BLACK
+    if probability >= red:
+        return RiskBand.RED
+    if probability >= orange:
+        return RiskBand.ORANGE
+    if probability >= yellow:
+        return RiskBand.YELLOW
+    return RiskBand.GREEN
+
+
 def assess_risk(
     features: dict[str, float],
     *,
@@ -173,11 +231,24 @@ def assess_risk(
             f"Launch wallets match known pump-and-dump clusters (recidivism {recidivism:.0f}/100)"
         )
 
-    if collapse_probability >= 0.6:
+    # The collapse-probability contribution graduates with the ML band:
+    # an ORANGE band adds a smaller elevated-collapse amount, while RED and
+    # BLACK add the full amount.  Using the shared band mapper keeps the rule
+    # engine and the ML band mapping fully consistent instead of diverging on
+    # a hardcoded threshold that matched no band boundary.
+    collapse_band = band_from_collapse_probability(collapse_probability, session=session)
+    if collapse_band.value in (RiskBand.RED.value, RiskBand.BLACK.value):
         pts = _apply_reason_weights(20.0, "Collapse probability", reason_weights)
         risk_points += pts
         reasons.append(
             f"Forecast model assigns {collapse_probability:.0%} collapse probability within 24h"
+        )
+    elif collapse_band.value == RiskBand.ORANGE.value:
+        pts = _apply_reason_weights(10.0, "Collapse probability", reason_weights)
+        risk_points += pts
+        reasons.append(
+            "Forecast model assigns elevated "
+            f"{collapse_probability:.0%} collapse probability within 24h"
         )
 
     if concentration >= 0.90:
