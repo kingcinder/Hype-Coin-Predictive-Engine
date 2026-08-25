@@ -9,6 +9,7 @@ from common.config import get_settings
 from common.enums import AlertState, AlertType, RiskBand
 from common.logging import get_logger
 from common.time import utc_now
+from engine.price_stream import PriceUpdate, broadcast_price
 from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
 from risk_engine.rules import mask_unreliable_forecast
@@ -61,6 +62,8 @@ class ScoringEngine:
             feature_source=feature_source,
         )
         scores: list[models.Score] = []
+        price_updates: list[PriceUpdate] = []
+        ts_iso = decision_ts.isoformat()
         for asset_id, features in feature_map.items():
             raw = {name: feature.value for name, feature in features.items()}
             missing = [name for name, feature in features.items() if feature.missing]
@@ -90,7 +93,104 @@ class ScoringEngine:
                 decision_ts=decision_ts,
             )
             scores.append(score)
+        # Batch-query latest market + liquidity snapshots for all scored assets
+        # (2 queries total, not N+1), then build PriceUpdate objects.
+        scored_ids = list(feature_map.keys())
+        if scored_ids:
+            price_updates = self._build_price_updates(session, scored_ids, ts_iso)
+            for update in price_updates:
+                broadcast_price(update)
         return scores
+
+    def _build_price_updates(
+        self,
+        session: Session,
+        asset_ids: list[int],
+        ts_iso: str,
+    ) -> list[PriceUpdate]:
+        """Batch-fetch latest market and liquidity data for scored assets.
+
+        Two bulk queries replace what would otherwise be N+1 per-asset queries.
+        """
+        # Latest market snapshot per base_asset_id
+        latest_market_sub = (
+            select(
+                models.MarketSnapshot.pair_id,
+                models.MarketSnapshot.price_usd,
+                models.MarketSnapshot.volume_usd,
+                func.row_number()
+                .over(
+                    partition_by=models.MarketSnapshot.pair_id,
+                    order_by=models.MarketSnapshot.ts.desc(),
+                )
+                .label("rn"),
+            )
+            .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
+            .where(models.Pair.base_asset_id.in_(asset_ids))
+            .subquery()
+        )
+        market_stmt = (
+            select(
+                models.Pair.base_asset_id,
+                latest_market_sub.c.price_usd,
+                latest_market_sub.c.volume_usd,
+            )
+            .join(models.Pair, models.Pair.id == latest_market_sub.c.pair_id)
+            .where(latest_market_sub.c.rn == 1)
+        )
+        market_rows = session.execute(market_stmt).all()
+        price_by_asset: dict[int, tuple[float | None, float | None]] = {}
+        for row in market_rows:
+            price_by_asset[row.base_asset_id] = (row.price_usd, row.volume_usd)
+
+        # Latest liquidity snapshot per pool via pair
+        latest_liq_sub = select(
+            models.LiquiditySnapshot.pool_id,
+            models.LiquiditySnapshot.reserve_usd,
+            func.row_number()
+            .over(
+                partition_by=models.LiquiditySnapshot.pool_id,
+                order_by=models.LiquiditySnapshot.ts.desc(),
+            )
+            .label("rn"),
+        ).subquery()
+        liq_stmt = (
+            select(
+                models.Pair.base_asset_id,
+                latest_liq_sub.c.reserve_usd,
+            )
+            .join(models.Pool, models.Pool.id == latest_liq_sub.c.pool_id)
+            .join(models.Pair, models.Pair.pool_id == models.Pool.id)
+            .where(
+                models.Pair.base_asset_id.in_(asset_ids),
+                latest_liq_sub.c.rn == 1,
+            )
+        )
+        liq_rows = session.execute(liq_stmt).all()
+        liq_by_asset: dict[int, float | None] = {}
+        for row in liq_rows:
+            liq_by_asset[row.base_asset_id] = row.reserve_usd
+
+        updates: list[PriceUpdate] = []
+        for asset_id in asset_ids:
+            asset = session.get(models.Asset, asset_id)
+            if not asset:
+                continue
+            chain = session.get(models.Chain, asset.chain_id)
+            price_vol = price_by_asset.get(asset_id)
+            updates.append(
+                PriceUpdate(
+                    asset_id=asset_id,
+                    symbol=asset.symbol,
+                    chain=chain.slug if chain else "unknown",
+                    address=asset.address,
+                    price_usd=price_vol[0] if price_vol else None,
+                    volume_usd=price_vol[1] if price_vol else None,
+                    liquidity_usd=liq_by_asset.get(asset_id),
+                    timestamp=ts_iso,
+                )
+            )
+        return updates
 
     def _upsert_score(
         self, session: Session, *, asset_id: int, decision_ts: datetime, result

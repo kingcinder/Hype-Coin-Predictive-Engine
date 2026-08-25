@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
@@ -61,6 +61,7 @@ from common.config import get_settings
 from common.enums import AlertState
 from common.logging import get_logger
 from common.time import utc_now
+from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
 from ops.parity import latest_parity
@@ -1342,6 +1343,37 @@ def engine_trigger_retention() -> TriggerResponse:
 
     threading.Thread(target=_run, name="api-manual-retention", daemon=True).start()
     return TriggerResponse(status="accepted", message="Retention pass started")
+
+
+# ── WebSocket Stream ────────────────────────────────────────────────────────
+
+
+@app.websocket("/ws/prices")
+async def ws_price_stream(websocket: WebSocket) -> None:
+    """WebSocket endpoint for live price updates.
+
+    Clients receive JSON messages with price snapshots as they arrive.
+    Format: {"type":"price_update","asset_id":1,"symbol":"FOO",...}
+    """
+    await websocket.accept()
+    queue = price_stream_broker.connect()
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                await websocket.send_json(event)
+            except TimeoutError:
+                await websocket.send_json({"type": "ping"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        price_stream_broker.disconnect(queue)
+
+
+@app.get("/ws/price/count")
+def ws_price_client_count() -> dict:
+    """Return the number of connected WebSocket price clients."""
+    return {"connected_clients": price_stream_broker.connected_count}
 
 
 # ── SSE Stream ──────────────────────────────────────────────────────────────
