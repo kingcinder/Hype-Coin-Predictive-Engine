@@ -810,3 +810,62 @@ class WebhookDispatch(Base):
     status_code: Mapped[int | None] = mapped_column(Integer)
     error_message: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[float | None] = mapped_column(Float)
+
+
+class RiskOutcome(Base):
+    """Tracks what actually happened to tokens after being scored at each risk band.
+
+    One row per score — records the risk band at scoring time, then gets
+    updated with the actual lifecycle outcome after the observation window
+    elapses.  Feeds the adaptive risk calibrator.
+    """
+
+    __tablename__ = "risk_outcomes"
+    __table_args__ = (
+        Index("ix_risk_outcomes_score_id", "score_id"),
+        Index("ix_risk_outcomes_risk_band", "risk_band"),
+        Index("ix_risk_outcomes_scored_at", "scored_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    score_id: Mapped[int] = mapped_column(ForeignKey("scores.id"), nullable=False, unique=True)
+    risk_band: Mapped[str] = mapped_column(String(16), nullable=False)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lifecycle_phase_at_score: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Populated after the observation window elapses
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_phase_at_eval: Mapped[str | None] = mapped_column(String(32))
+    price_change_pct: Mapped[float | None] = mapped_column(Float)
+    collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rugged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    survived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class RiskCalibration(Base):
+    """Persisted adaptive risk threshold calibration state."""
+
+    __tablename__ = "risk_calibrations"
+    __table_args__ = (
+        Index("ix_risk_calibrations_version", "version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    calibrated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Calibrated score thresholds (replacing hardcoded values)
+    yellow_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    orange_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    red_threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    # Per-reason weight adjustments learned from outcomes
+    reason_weights: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # Precision metrics from the calibration window
+    band_precisions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

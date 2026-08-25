@@ -7,12 +7,15 @@ from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.enums import AlertState, AlertType, RiskBand
+from common.logging import get_logger
 from common.time import utc_now
 from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
 from risk_engine.rules import mask_unreliable_forecast
 from scoring.formulas import compute_scores
 from storage import models
+
+log = get_logger(__name__)
 
 
 class ScoringEngine:
@@ -66,6 +69,7 @@ class ScoringEngine:
                 raw,
                 missing,
                 data_layer_uncertainty=self._rpc_pool_uncertainty(session, asset_id),
+                session=session,
             )
             score = self._upsert_score(
                 session, asset_id=asset_id, decision_ts=decision_ts, result=result
@@ -79,6 +83,12 @@ class ScoringEngine:
                 ),
             )
             self._maybe_create_alert(session, score=score, result=result)
+            self._record_risk_outcome(
+                session,
+                asset_id=asset_id,
+                score=score,
+                decision_ts=decision_ts,
+            )
             scores.append(score)
         return scores
 
@@ -231,6 +241,34 @@ class ScoringEngine:
                 message=message,
             )
         )
+
+    def _record_risk_outcome(
+        self,
+        session: Session,
+        *,
+        asset_id: int,
+        score: models.Score,
+        decision_ts: datetime,
+    ) -> None:
+        """Record a risk outcome for adaptive calibration.
+
+        Only records outcomes for non-GREEN bands so the calibrator has
+        meaningful signal to learn from (GREEN tokens are expected to be safe).
+        """
+        if score.risk_band == RiskBand.GREEN.value:
+            return
+        try:
+            from risk_engine.outcomes import record_risk_outcome
+
+            record_risk_outcome(
+                session,
+                asset_id=asset_id,
+                risk_band=score.risk_band,
+                score_id=score.id,
+                decision_ts=decision_ts,
+            )
+        except Exception as exc:  # noqa: BLE001 - outcome recording must not break scoring.
+            log.warning("risk_outcome_recording_failed", error=str(exc), asset_id=asset_id)
 
 
 def score_current_assets(

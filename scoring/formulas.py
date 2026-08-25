@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from common.enums import RiskBand
 from features.definitions import FEATURE_NAMES
 from risk_engine.rules import assess_risk
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -53,9 +57,10 @@ def compute_scores(
     missing_features: list[str] | None = None,
     *,
     data_layer_uncertainty: float = 0.0,
+    session: Session | None = None,
 ) -> ScoreResult:
     missing_features = missing_features or []
-    risk_assessment = assess_risk(features)
+    risk_assessment = assess_risk(features, session=session)
 
     r5 = score_return(features.get("five_min_return", 0.0))
     r1 = score_return(features.get("one_hour_return", 0.0))

@@ -264,6 +264,11 @@ class Settings(BaseSettings):
     alert_quality_noise_floor: float = 0.25
     alert_quality_min_ratings: int = 5
 
+    # Risk outcome tracking: observation window for evaluating flagged tokens
+    risk_outcome_window_hours: float = 48.0
+    risk_calibration_frequency_hours: float = 24.0
+    risk_calibration_min_samples: int = 10
+
     model_version: str = "mvp-rules-v1"
     fingerprint_model_version: str = "cooccurrence-v1"
     forecast_model_version: str = "gbm-hist-v1"

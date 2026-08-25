@@ -211,6 +211,18 @@ class IngestionService:
             result["forecasts"] = forecast_result.get("forecasts", 0)
             scores = score_current_assets(session, decision_ts=decision_ts)
             result["scores"] = len(scores)
+            # ── Risk calibration: learn from historical outcomes ─────────
+            try:
+                from risk_engine.calibrator import run_calibration
+
+                cal_result = run_calibration(session, decision_ts=decision_ts)
+                result["risk_calibration"] = {
+                    "version": cal_result.version,
+                    "adjusted": cal_result.adjusted,
+                    "sample_size": cal_result.sample_size,
+                }
+            except Exception as cal_exc:  # noqa: BLE001
+                log.debug("risk_calibration_failed", error=str(cal_exc))
             result["ntfy"] = run_notifier(session, decision_ts=decision_ts)
             # Compaction is owned by the retention autopilot on its cadence
             # (RETENTION_CADENCE_HOURS), running on a per-partition schedule.
