@@ -849,9 +849,7 @@ class RiskCalibration(Base):
     """Persisted adaptive risk threshold calibration state."""
 
     __tablename__ = "risk_calibrations"
-    __table_args__ = (
-        Index("ix_risk_calibrations_version", "version"),
-    )
+    __table_args__ = (Index("ix_risk_calibrations_version", "version"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     version: Mapped[str] = mapped_column(String(64), nullable=False)

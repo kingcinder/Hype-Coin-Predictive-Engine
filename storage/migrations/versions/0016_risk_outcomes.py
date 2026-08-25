@@ -5,9 +5,8 @@ Revises: 0015_alert_snooze
 Create Date: 2026-08-24
 """
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "0016_risk_outcomes"
 down_revision = "0015_alert_snooze"
