@@ -121,6 +121,7 @@ def main() -> None:
     from ingestion.worker import run_once
     from ops.parity import maybe_run_parity
     from ops.retention import maybe_run_retention
+    from ops.watchdog import WatchdogState, on_scan_failure, on_scan_success, run_watchdog
     from storage.database import SessionLocal
 
     engine_state.started_at = time.monotonic()
@@ -128,6 +129,7 @@ def main() -> None:
     ensure_background_probe()
     iteration = 0
     _last_nc_run_monotonic: float = 0.0  # monotonic timestamp of last NC run
+    _watchdog_state = WatchdogState()
     try:
         while not stop.is_set():
             iteration += 1
@@ -141,8 +143,20 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001 - individual scan failure must not kill the engine
                 log.exception("engine_scan_failed", iteration=iteration, error=str(exc))
                 engine_state.mark_error(str(exc))
-                stop.wait(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
-                continue
+                on_scan_failure(_watchdog_state)
+            else:
+                on_scan_success(_watchdog_state)
+
+            # ── Watchdog: WAL checkpoint, VACUUM, disk, failure tracking ──
+            # Runs every iteration regardless of scan outcome.
+            try:
+                with SessionLocal() as wd_session:
+                    wd_result = run_watchdog(wd_session, _watchdog_state)
+                    wd_session.commit()
+                    if wd_result.get("degraded"):
+                        log.warning("watchdog_degraded", result=wd_result)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("watchdog_failed", error=str(exc))
             phase_error = False
             try:
                 engine_state.mark_forecasting()
@@ -170,6 +184,7 @@ def main() -> None:
                     log.info("engine_parity_complete", result=parity)
             except Exception as exc:  # noqa: BLE001 - parity failure must not kill the engine
                 log.exception("engine_parity_failed", iteration=iteration, error=str(exc))
+
             # Night Crawler pass: crawl all sources, feed data lake
             # Gated by interval — only runs every nightcrawler_interval_minutes
             try:
