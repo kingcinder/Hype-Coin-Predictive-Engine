@@ -225,6 +225,12 @@ class Settings(BaseSettings):
     nightcrawler_explorer_enabled: bool = True
     nightcrawler_nitter_enabled: bool = True
     nightcrawler_presale_enabled: bool = True
+    nightcrawler_farcaster_enabled: bool = True
+    farcaster_search_queries_csv: str = (
+        "token launch,new memecoin,presale live,dev activity,"
+        "smart contract deploy,liquidity pool create,airdrop claim,"
+        "NFT mint,DAO proposal,protocol upgrade,base chain launch,solana token"
+    )
 
     # forecast layer
     forecast_enabled: bool = True

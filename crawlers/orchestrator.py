@@ -22,6 +22,7 @@ from crawlers.heuristics import HeuristicsEngine
 from crawlers.sources.coingecko import CoinGeckoCrawler
 from crawlers.sources.defillama import DeFiLlamaCrawler
 from crawlers.sources.explorer import ExplorerCrawler
+from crawlers.sources.farcaster import FarcasterCrawler
 from crawlers.sources.nitter import NitterCrawler
 from crawlers.sources.presale import PresaleCrawler
 from crawlers.sources.pump_fun import PumpFunCrawler
@@ -59,6 +60,11 @@ class NightCrawlerOrchestrator:
         )
         self._crawlers["nitter"] = NitterCrawler()
         self._crawlers["presale"] = PresaleCrawler()
+        if self.settings.nightcrawler_farcaster_enabled:
+            farcaster_queries = self.settings.farcaster_search_queries_csv.split(",")
+            self._crawlers["farcaster"] = FarcasterCrawler(
+                search_queries=[q.strip() for q in farcaster_queries if q.strip()]
+            )
 
     def run_all(
         self,

@@ -14,15 +14,9 @@ from typing import Any
 from common.logging import get_logger
 from common.time import utc_now
 from crawlers.base import BaseCrawler
+from crawlers.sources.utils import extract_token_mentions
 
 log = get_logger(__name__)
-
-# Token mention patterns: $TICKER, 0x addresses, Solana base58 addresses
-_TOKEN_PATTERN = re.compile(
-    r"\$([A-Z]{2,10})\b|"
-    r"(0x[a-fA-F0-9]{40})|"
-    r"([1-9A-HJ-NP-Za-km-z]{32,44})"
-)
 
 
 class NitterCrawler(BaseCrawler):
@@ -185,15 +179,8 @@ def _strip_html(html: str) -> str:
 
 
 def _extract_token_mentions(text: str) -> list[str]:
-    """Extract unique token mentions from text."""
-    mentions: list[str] = []
-    seen: set[str] = set()
-    for match in _TOKEN_PATTERN.finditer(text):
-        for group in match.groups():
-            if group and group not in seen:
-                seen.add(group)
-                mentions.append(group)
-    return mentions[:5]
+    """Extract unique token mentions from text (delegates to shared utility)."""
+    return extract_token_mentions(text)
 
 
 def _parse_pub_date(date_str: str | None) -> Any:
