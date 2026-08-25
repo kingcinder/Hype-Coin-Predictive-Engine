@@ -13,7 +13,8 @@ from engine.price_stream import PriceUpdate, broadcast_price
 from features.factory import build_and_persist_features
 from ingestion.rpc_pool import get_rpc_pool
 from risk_engine.rules import mask_unreliable_forecast
-from scoring.formulas import compute_scores
+from scoring.ensemble import ensemble_engine
+from scoring.formulas import clamp, compute_scores
 from storage import models
 
 log = get_logger(__name__)
@@ -74,6 +75,31 @@ class ScoringEngine:
                 data_layer_uncertainty=self._rpc_pool_uncertainty(session, asset_id),
                 session=session,
             )
+            # Ensemble: blend rule-based with ML/heuristic when available
+            try:
+                ml_score = raw.get("collapse_probability_24h")
+                h_score = raw.get("ignition_signal")
+                ensemble = ensemble_engine.blend(
+                    rule_hype=result.hype,
+                    rule_risk=result.risk,
+                    rule_confidence=result.confidence,
+                    rule_research_priority=result.research_priority,
+                    rule_risk_band=result.risk_band.value,
+                    ml_hype=clamp(100.0 - ml_score * 100) if ml_score is not None else None,
+                    ml_risk=clamp(ml_score * 100) if ml_score is not None else None,
+                    heuristic_score=h_score if h_score is not None else None,
+                )
+                from dataclasses import replace as _replace
+
+                result = _replace(
+                    result,
+                    hype=ensemble.hype,
+                    risk=ensemble.risk,
+                    confidence=ensemble.confidence,
+                    research_priority=ensemble.research_priority,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # ensemble is additive, never breaks scoring
             score = self._upsert_score(
                 session, asset_id=asset_id, decision_ts=decision_ts, result=result
             )
