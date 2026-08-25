@@ -57,6 +57,7 @@ class PatternMemory:
     success_count: int = 0  # led to tokens that lasted >24h
     avg_hype_at_detection: float = 0.0
     avg_time_to_peak_hours: float = 0.0
+    last_seen_at: datetime | None = None
 
     @property
     def success_rate(self) -> float:
@@ -147,6 +148,7 @@ class HeuristicsEngine:
             self._pattern_memory[pattern_key] = PatternMemory(pattern_key=pattern_key)
         pm = self._pattern_memory[pattern_key]
         pm.occurrence_count += 1
+        pm.last_seen_at = utc_now()
         if success:
             pm.success_count += 1
         # Exponential moving average
@@ -184,6 +186,49 @@ class HeuristicsEngine:
             reverse=True,
         )
         return patterns[:limit]
+
+    def prune(self, max_age_days: int = 30) -> dict[str, int]:
+        """Drop stale source reliabilities and pattern memories.
+
+        Prevents unbounded growth of the in-memory state by evicting
+        entries that haven't been seen within ``max_age_days``.
+
+        Returns the number of pruned entries per category.
+        """
+        cutoff = utc_now() - timedelta(days=max_age_days)
+        pruned_sources = 0
+        pruned_patterns = 0
+
+        # Prune source reliabilities: evict sources not seen in the window
+        stale_sources = [
+            name
+            for name, rel in self._source_reliabilities.items()
+            if rel.last_actionable_at is None or rel.last_actionable_at < cutoff
+        ]
+        for name in stale_sources:
+            del self._source_reliabilities[name]
+            pruned_sources += 1
+
+        # Prune pattern memories: evict patterns not seen in the window
+        stale_patterns = [
+            key
+            for key, pm in self._pattern_memory.items()
+            if pm.last_seen_at is None or pm.last_seen_at < cutoff
+        ]
+        for key in stale_patterns:
+            del self._pattern_memory[key]
+            pruned_patterns += 1
+
+        if pruned_sources or pruned_patterns:
+            log.info(
+                "heuristics_prune",
+                pruned_sources=pruned_sources,
+                pruned_patterns=pruned_patterns,
+                remaining_sources=len(self._source_reliabilities),
+                remaining_patterns=len(self._pattern_memory),
+            )
+
+        return {"pruned_sources": pruned_sources, "pruned_patterns": pruned_patterns}
 
     def summarize(self) -> dict[str, Any]:
         """Summarize the heuristics engine state."""

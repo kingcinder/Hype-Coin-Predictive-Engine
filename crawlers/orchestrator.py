@@ -147,6 +147,13 @@ class NightCrawlerOrchestrator:
                     error_count=1,
                 )
 
+        # Prune stale heuristics to prevent unbounded memory growth
+        try:
+            prune_result = self.heuristics.prune(max_age_days=30)
+            results["_prune"] = prune_result
+        except Exception as exc:  # noqa: BLE001 — pruning failure must not abort the fleet.
+            log.debug("heuristics_prune_failed", error=str(exc))
+
         duration = time.monotonic() - started
         total_items = sum(r.get("items", 0) for r in results.values() if isinstance(r, dict))
 
