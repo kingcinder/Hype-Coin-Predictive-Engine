@@ -6,7 +6,13 @@ fix), and updates the scores table in-place.  This is a one-time migration
 tool — not part of the regular scoring pipeline.
 
 Usage:
-    python scripts/rescore.py [--dry-run]
+    python scripts/rescore.py [--dry-run] [--compare] [--min-change THRESHOLD]
+
+Options:
+    --dry-run          Compute scores but don't write to the database.
+    --compare          Print old → new risk for each token (implies --dry-run).
+    --min-change       Minimum |old - new| to include in --compare output
+                       (default: 0, meaning all tokens).
 """
 
 from __future__ import annotations
@@ -75,8 +81,18 @@ def _build_missing(session: Session) -> dict[tuple[int, datetime], list[str]]:
     return dict(missing_map)
 
 
-def rescore(dry_run: bool = False) -> dict[str, int]:
-    """Rescore all scored tokens and return stats."""
+def rescore(
+    dry_run: bool = False,
+    compare: bool = False,
+    min_change: float = 0.0,
+) -> dict[str, int]:
+    """Rescore all scored tokens and return stats.
+
+    Args:
+        dry_run:  Compute but don't write to the database.
+        compare:  Print old → new risk for each token (implies dry_run).
+        min_change: Minimum |old_risk - new_risk| to include in output.
+    """
     with session_scope() as session:
         features_map = _build_features(session)
         missing_map = _build_missing(session)
@@ -85,11 +101,18 @@ def rescore(dry_run: bool = False) -> dict[str, int]:
         scores = session.scalars(select(models.Score).order_by(models.Score.id)).all()
         log.info("rescore_scores_loaded", count=len(scores))
 
+        # Pre-fetch asset symbols to avoid N+1 lookups during compare
+        asset_map: dict[int, str] = {}
+        if compare:
+            dry_run = True
+            for asset in session.scalars(select(models.Asset)).all():
+                asset_map[asset.id] = asset.symbol or f"id={asset.id}"
+
         updated = 0
         skipped = 0
         errors = 0
-        risk_before: list[float] = []
         risk_after: list[float] = []
+        compare_rows: list[tuple[str, float, float, float]] = []  # (symbol, old, new, diff)
 
         for score in scores:
             ts = score.decision_ts
@@ -113,8 +136,11 @@ def rescore(dry_run: bool = False) -> dict[str, int]:
                 errors += 1
                 continue
 
-            risk_before.append(score.risk)
             risk_after.append(result.risk)
+
+            if compare and abs(result.risk - score.risk) >= min_change:
+                sym = asset_map.get(score.asset_id, f"id={score.asset_id}")
+                compare_rows.append((sym, score.risk, result.risk, result.risk - score.risk))
 
             if not dry_run:
                 score.risk = result.risk
@@ -133,6 +159,18 @@ def rescore(dry_run: bool = False) -> dict[str, int]:
         if not dry_run:
             session.commit()
             log.info("rescore_committed", updated=updated)
+
+        # Print per-token diffs if --compare
+        if compare and compare_rows:
+            compare_rows.sort(key=lambda r: abs(r[3]), reverse=True)
+            print(f"\n--- Risk changes ({len(compare_rows)} tokens, min_change={min_change}) ---")
+            print(f"{'Symbol':>20s}  {'Old':>8s}  {'New':>8s}  {'Delta':>8s}")
+            print("-" * 52)
+            for sym, old, new, diff in compare_rows[:50]:  # top 50 by |delta|
+                print(f"{sym:>20s}  {old:>8.2f}  {new:>8.2f}  {diff:>+8.2f}")
+            if len(compare_rows) > 50:
+                print(f"  ... and {len(compare_rows) - 50} more (showing top 50 by |delta|)")
+            print()
 
         # Print before/after distribution
         if risk_after:
@@ -159,11 +197,23 @@ def rescore(dry_run: bool = False) -> dict[str, int]:
             "skipped": skipped,
             "errors": errors,
             "distinct_risk_values": len(np.unique(np.round(ra, 2))) if risk_after else 0,
+            "compare_rows": len(compare_rows),
         }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rescore all historical tokens")
     parser.add_argument("--dry-run", action="store_true", help="Compute but don't write")
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Print old → new risk for each token (implies --dry-run)",
+    )
+    parser.add_argument(
+        "--min-change",
+        type=float,
+        default=0.0,
+        help="Minimum |old - new| to include in --compare output (default: 0)",
+    )
     args = parser.parse_args()
-    rescore(dry_run=args.dry_run)
+    rescore(dry_run=args.dry_run, compare=args.compare, min_change=args.min_change)
