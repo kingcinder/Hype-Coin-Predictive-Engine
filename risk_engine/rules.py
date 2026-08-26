@@ -188,10 +188,21 @@ def assess_risk(
 
     if liquidity <= 0 or liquidity < settings.black_min_liquidity_usd:
         hard_reject = True
-        risk_points += 45
+        # Proportional: 45 points at zero, ramping down toward the threshold
+        liquidity_ratio = (
+            min(1.0, liquidity / max(settings.black_min_liquidity_usd, 1.0))
+            if liquidity > 0
+            else 0.0
+        )
+        pts = _apply_reason_weights(
+            45.0 * (1.0 - liquidity_ratio), "Pair liquidity below hard minimum", reason_weights
+        )
+        risk_points += pts
         reasons.append(f"Pair liquidity below hard minimum: ${liquidity:,.0f}")
     elif liquidity < settings.min_validated_liquidity_usd:
-        pts = _apply_reason_weights(18.0, "Low liquidity", reason_weights)
+        # Proportional: 18 points at zero, linearly decreasing to 0 at threshold
+        liquidity_ratio = liquidity / max(settings.min_validated_liquidity_usd, 1.0)
+        pts = _apply_reason_weights(18.0 * (1.0 - liquidity_ratio), "Low liquidity", reason_weights)
         risk_points += pts
         reasons.append(f"Liquidity below validated speculative threshold: ${liquidity:,.0f}")
 
@@ -253,25 +264,41 @@ def assess_risk(
 
     if concentration >= 0.90:
         hard_reject = True
-        risk_points += 35
+        # Proportional: 35 at 100%, decreasing to 0 at 90%
+        conc_ratio = (concentration - 0.90) / 0.10  # 0.0 at 0.90, 1.0 at 1.00
+        pts = _apply_reason_weights(
+            35.0 * conc_ratio, "Extreme top-holder concentration", reason_weights
+        )
+        risk_points += pts
         reasons.append(f"Extreme top-holder concentration: {concentration:.2%}")
     elif concentration >= 0.60:
-        pts = _apply_reason_weights(20.0, "Holder concentration", reason_weights)
+        # Proportional: 20 at 90%, decreasing to 0 at 60%
+        conc_ratio = (concentration - 0.60) / 0.30  # 0.0 at 0.60, 1.0 at 0.90
+        pts = _apply_reason_weights(20.0 * conc_ratio, "Holder concentration", reason_weights)
         risk_points += pts
         reasons.append(f"High top-holder concentration: {concentration:.2%}")
 
     if pair_age < 10 and liquidity < settings.min_validated_liquidity_usd:
         hard_reject = True
-        risk_points += 25
+        # Proportional: 25 points at age=0, decreasing to 0 at age=10
+        age_ratio = pair_age / 10.0
+        pts = _apply_reason_weights(
+            25.0 * (1.0 - age_ratio), "Pair too new with insufficient depth", reason_weights
+        )
+        risk_points += pts
         reasons.append("Pair too new with insufficient depth")
 
     if spread > 10:
-        pts = _apply_reason_weights(12.0, "Spread", reason_weights)
+        # Proportional: ramp from 0 at spread=10 to 12 at spread=25+
+        spread_extra = min(15.0, spread - 10.0) / 15.0  # 0.0 at 10, 1.0 at 25+
+        pts = _apply_reason_weights(12.0 * spread_extra, "Spread", reason_weights)
         risk_points += pts
         reasons.append(f"Estimated spread/liquidity friction is high: {spread:.2f}")
 
     if buy_sell_ratio < 0.25:
-        pts = _apply_reason_weights(10.0, "Sell pressure", reason_weights)
+        # Proportional: 10 points at ratio=0, decreasing to 0 at ratio=0.25
+        sell_ratio = buy_sell_ratio / 0.25
+        pts = _apply_reason_weights(10.0 * (1.0 - sell_ratio), "Sell pressure", reason_weights)
         risk_points += pts
         reasons.append(f"Sell pressure dominates buy flow: buy/sell={buy_sell_ratio:.2f}")
 
@@ -281,13 +308,20 @@ def assess_risk(
         reasons.append(f"Low holder count for promoted watch status: {holder_count:.0f}")
 
     if volatility > 30:
-        pts = _apply_reason_weights(8.0, "Volatility", reason_weights)
+        # Proportional: ramp from 0 at vol=30 to 8 at vol=60+
+        vol_extra = min(30.0, volatility - 30.0) / 30.0  # 0.0 at 30, 1.0 at 60+
+        pts = _apply_reason_weights(8.0 * vol_extra, "Volatility", reason_weights)
         risk_points += pts
         reasons.append(f"Extreme short-window volatility: {volatility:.2f}")
 
     score = max(0.0, min(100.0, risk_points))
     if hard_reject:
-        return RiskAssessment(RiskBand.BLACK, max(score, 90.0), reasons, True)
+        # Hard reject forces BLACK band. The score is floored at 40.0 so
+        # downstream consumers (dashboards, alerts) never see a contradictory
+        # low-risk score for a hard-rejected token — but the floor is well
+        # below the old 90.0, preserving proportional variance.
+        score = max(score, 40.0)
+        return RiskAssessment(RiskBand.BLACK, score, reasons, True)
     if score >= red_threshold:
         return RiskAssessment(RiskBand.RED, score, reasons)
     if score >= orange_threshold:
