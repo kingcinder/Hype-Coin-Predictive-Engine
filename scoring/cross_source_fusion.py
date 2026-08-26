@@ -113,7 +113,17 @@ def _count_distinct_sources(
 
     combined = market_branch.union_all(social_branch, ignition_branch, liq_branch)
     source_names = set(session.scalars(combined).all())
-    return len(source_names), sorted(source_names)
+    # Night-crawler sources are stored as ``nightcrawler:<name>``; strip the
+    # prefix so fusion reports the crawler's own name (e.g. ``pump_portal``),
+    # and drop any empty string that would otherwise count as a source —
+    # including a source literally named ``nightcrawler:`` whose stripped
+    # value is empty.
+    normalized = {
+        stripped
+        for name in source_names
+        if name and (stripped := name.removeprefix("nightcrawler:"))
+    }
+    return len(normalized), sorted(normalized)
 
 
 def fuse_signals(

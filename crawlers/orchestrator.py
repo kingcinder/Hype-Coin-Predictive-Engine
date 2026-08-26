@@ -23,13 +23,16 @@ from crawlers.sources.cmc import CMCCrawler
 from crawlers.sources.coingecko import CoinGeckoCrawler
 from crawlers.sources.coinpaprika import CoinPaprikaCrawler
 from crawlers.sources.defillama import DeFiLlamaCrawler
+from crawlers.sources.dexscreener_trends import DexScreenerTrendsCrawler
 from crawlers.sources.explorer import ExplorerCrawler
 from crawlers.sources.farcaster import FarcasterCrawler
 from crawlers.sources.gas_tracker import GasTrackerCrawler
 from crawlers.sources.github_trending import GitHubTrendingCrawler
+from crawlers.sources.google_trends import GoogleTrendsCrawler
 from crawlers.sources.nitter import NitterCrawler
 from crawlers.sources.presale import PresaleCrawler
 from crawlers.sources.pump_fun import PumpFunCrawler
+from crawlers.sources.pump_portal import PumpPortalCrawler
 from crawlers.sources.whale_tracker import WhaleTrackerCrawler
 from crawlers.sources.x_trends import XTrendsCrawler
 from engine.activity_stream import broadcast_activity, compute_activity_signal_score
@@ -83,6 +86,14 @@ class NightCrawlerOrchestrator:
         if self.settings.nightcrawler_x_trends_enabled:
             self._crawlers["x_trends"] = XTrendsCrawler(
                 keywords=self.settings.x_trends_crypto_keywords_csv.split(",")
+            )
+        if self.settings.nightcrawler_pump_portal_enabled:
+            self._crawlers["pump_portal"] = PumpPortalCrawler()
+        if self.settings.nightcrawler_dexscreener_trends_enabled:
+            self._crawlers["dexscreener_trends"] = DexScreenerTrendsCrawler()
+        if self.settings.nightcrawler_google_trends_enabled:
+            self._crawlers["google_trends"] = GoogleTrendsCrawler(
+                geo=self.settings.google_trends_geo
             )
         if self.settings.nightcrawler_farcaster_enabled:
             farcaster_queries = self.settings.farcaster_search_queries_csv.split(",")
@@ -144,6 +155,19 @@ class NightCrawlerOrchestrator:
                         observed_at=decision_ts,
                         raw_path=f"nightcrawler:{name}:{decision_ts.isoformat()}",
                     )
+                    # Link items to known assets so cross-source fusion sees
+                    # this crawler as a corroborating source when scoring.
+                    try:
+                        from crawlers.signal_links import link_crawler_items
+
+                        link_crawler_items(
+                            session,
+                            source=source,
+                            items=items,
+                            observed_at=decision_ts,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # linking is additive, never breaks the crawler
                     # Broadcast to WebSocket clients for live feed updates
                     try:
                         sig_score, sig_engagement, sig_mentions = compute_activity_signal_score(

@@ -240,6 +240,12 @@ class Settings(BaseSettings):
     x_trends_crypto_keywords_csv: str = (
         "BTC,crypto,bitcoin,ethereum,solana,token,memecoin,airdrop,presale,nft,defi,altcoin"
     )
+    # Round 2 fleet expansion: pump.fun live launches, DexScreener boosts,
+    # Google Trends narrative momentum
+    nightcrawler_pump_portal_enabled: bool = True
+    nightcrawler_dexscreener_trends_enabled: bool = True
+    nightcrawler_google_trends_enabled: bool = True
+    google_trends_geo: str = "US"
     farcaster_api_key: str | None = None
     farcaster_tracked_fids_csv: str = "365,fid:warpcast,fid:dwrk9611,fid:danielleecroft"
     farcaster_tracked_channels_csv: str = (

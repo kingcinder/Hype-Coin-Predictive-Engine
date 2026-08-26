@@ -29,6 +29,9 @@ _SOURCE_BADGES: dict[str, str] = {
     "coinpaprika": "🌶️ CoinPaprika",
     "github_trending": "💻 GitHub Trending",
     "x_trends": "🐦 X Trends",
+    "pump_portal": "🎯 PumpPortal",
+    "dexscreener_trends": "📈 DexScreener Trends",
+    "google_trends": "🔍 Google Trends",
 }
 
 
