@@ -150,3 +150,101 @@ only when the outcome was knowable at the label's generation time).
 - **P3 — Tighten dense-label entry interpolation (#6, #7):** interpolate the entry only
   from snapshots at/before `current`, or document the slight underestimate as accepted
   target noise.
+
+---
+
+## Resolution status (appended — the findings above are preserved verbatim)
+
+_Each finding below is marked RESOLVED only because a passing regression test now
+backs it (`tests/test_leakage_audit.py`). Nothing was closed on the absence of the
+original pattern alone._
+
+### 1. [HIGH] `deployer_history_available` — **RESOLVED**
+
+Fix: `features/factory.py` `_deployer_history(session, asset_id, decision_ts)` counts
+only contracts with `observed_at <= decision_ts` — a contract analyzed after the
+decision hour can no longer leak into a historical snapshot.
+
+Regression tests: `test_deployer_history_ignores_contracts_observed_after_decision`,
+`test_deployer_history_counts_contracts_observed_at_decision`.
+
+### 2. [HIGH] `website_presence` / `github_presence_public` — **RESOLVED**
+
+Fix: `features/factory.py` `_url_evidenced_before` returns `None` (read as
+missing/unknown, with `source_count=0` / `freshness=0.0`) when a URL exists on the
+asset row but no crawler evidence (`SocialMention.raw_ref` or
+`RawEvidenceItem.payload`) was observed at or before `decision_ts`. A link added
+post-mint flips no historical value, and decisions that predate the URL's discovery
+read as *unknown*, not a silent zero or a leaked live value.
+
+Corner case: an asset with *no URL at all* on the row still reads as a confident
+0.0 (there is nothing to evidence) — the retroactive flip-to-1 concern is fully
+covered by the evidence gate; only a URL present-but-un-evidenced reads as unknown.
+
+Regression tests: `test_website_presence_is_unknown_without_prior_evidence`,
+`test_website_presence_confident_when_evidenced_before_decision`,
+`test_website_presence_unknown_for_future_evidence_only`.
+
+### 3. [HIGH] `collapse_probability_24h` model-output feature — **RESOLVED**
+
+Fix: `forecast/engine.py` defines `_LEAKAGE_FEATURES = {"collapse_probability_24h"}`
+and `FORECAST_FEATURE_NAMES` excludes it, so the model never trains on its own prior
+output (no feedback loop, no train/serve skew). The feature stays in the scoring set
+where the ensemble legitimately consumes it.
+
+Regression test: `test_collapse_probability_24h_excluded_from_forecast_features`.
+
+### 4. [MED] `rpc_pool_health` — **RESOLVED**
+
+Fix: `features/factory.py` `_rpc_pool_health` reads persisted `RpcPoolSnapshot` rows
+with `ts <= decision_ts` from the `rpc_pool_snapshots` table (added in an earlier
+migration) instead of the live in-process pool — historical snapshots no longer
+reflect current process memory. With no snapshot yet recorded it returns the neutral
+1.0 baseline.
+
+Regression test: `test_rpc_pool_health_ignores_future_snapshots` (plus the existing
+`test_rpc_pool_health_is_a_persisted_feature_and_score_driver`).
+
+### 5. [MED] Bootstrap labels missing `observed_at` guards — **RESOLVED**
+
+Fix: `forecast/labels.py` `seed_labels_at_feature_timestamps` gates both the entry
+query and the forward-window query on `observed_at <= decision_ts`, matching
+`LabelEngine.generate`'s knowable-at-generation invariant — backfilled snapshots can
+no longer enter a label's entry price or outcome window.
+
+Regression tests: `test_bootstrap_labels_ignore_late_observed_forward_snapshots`,
+`test_bootstrap_labels_ignore_late_observed_entry_snapshots` (the late row lands at a
+distinct sub-hour ts so `insert_market_snapshot_once` first-wins dedup cannot no-op
+the guard).
+
+### 6. [LOW] Dense-label entry interpolated from a future snapshot — **RESOLVED**
+
+Fix: `data_lake/labels.py` `_interpolate_price` is now strictly backward-only — the
+entry at an hourly grid point is the last snapshot at or before the reference point
+(LOCF); the future-adjacent snapshot can no longer pull the denominator toward an
+unobserved price and understate magnitudes. Unused `math` import removed.
+
+Regression test: `test_dense_entry_interpolation_is_backward_only`.
+
+### 7. [LOW] Dense-label forward windows from raw future snapshots — **RESOLVED**
+
+Fix: `data_lake/labels.py` `generate_dense_labels` gates the whole snapshot series on
+`observed_at <= decision_ts`, so a snapshot ingested after the generation time can
+never appear in a dense label's forward window (same gate that fixed #5).
+
+Regression test: `test_dense_labels_ignore_late_observed_forward_prices`.
+
+_Commit reference: see `git log` for the commit that landed this sweep (the
+changes are committed; this document was updated in the same push)._
+
+### Validation after all fixes
+
+- `pytest tests/` — full suite green (100%).
+- `ruff check` / `ruff format --check` / `mypy` — clean on `features/factory.py`,
+  `data_lake/labels.py`, `tests/test_leakage_audit.py`.
+- `ops/parity.py --once` — 375 assets compared, 35 mismatches, 0 errors; every
+  reported mismatch is the documented residual `pair_age_minutes: sql=<value>
+  lake=missing` shape (lake path cannot reconstruct pair age from pre-archive
+  `pool_created_at` payloads) — data coverage on legacy archives, not a
+  leakage-pattern divergence. The finding-2/4 fields are not in `LAKE_FEATURE_NAMES`
+  and are not parity-compared.

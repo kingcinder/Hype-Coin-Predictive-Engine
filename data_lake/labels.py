@@ -6,7 +6,8 @@ labels (currently 4). This module densifies the label generation by:
 
 1. Using ALL historical snapshot pairs across ALL assets
 2. Generating labels at regular hourly intervals between snapshots
-3. Using linear interpolation for prices between snapshots
+3. Using the last observed price at or before each grid point as the entry
+   (point-in-time: never the future-adjacent snapshot)
 4. Lowering the effective minimum samples threshold
 
 This should increase label count from 4 to 30+ quickly.
@@ -14,7 +15,6 @@ This should increase label count from 4 to 30+ quickly.
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -33,43 +33,30 @@ LABEL_COLLAPSE = "collapse"
 
 
 def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: datetime) -> float | None:
-    """Interpolate price at target_ts from surrounding snapshots.
+    """Point-in-time entry price at target_ts: last snapshot AT OR BEFORE it.
 
-    Interpolates in log space (geometric mean of the bracket) rather than
-    arithmetic price space: prices move multiplicatively, so log-space
-    interpolation is unbiased for return-derived labels.  Arithmetic
-    interpolation overstates the midpoint between a high and a low price,
-    biasing peak/trough labels.
+    The dense-label entry is the denominator of peak/trough percentages, so it
+    must be knowable at the label's reference point — never interpolated from
+    the immediately-FOLLOWING snapshot, which would pull the entry toward a
+    price that hadn't been observed yet and understate the true magnitude.
+    This is target-side label noise, not feature leakage, but it makes the
+    already-soft dense labels softer, so the entry is computed strictly
+    backward (last observed price at or before the reference point).
+
+    Returns ``None`` when no snapshot at or before ``target_ts`` exists (the
+    caller skips the grid point — no fabricated entry price).
     """
     if not snapshots:
         return None
 
-    # Find the two snapshots surrounding target_ts
+    # Latest snapshot observed at or before the reference point (LOCF).
     before = None
-    after = None
     for snap in snapshots:
         snap_ts = ensure_utc(snap.ts)
         if snap_ts <= target_ts and snap.price_usd is not None and snap.price_usd > 0:
             if before is None or snap_ts > ensure_utc(before.ts):
                 before = snap
-        if snap_ts >= target_ts and snap.price_usd is not None and snap.price_usd > 0:
-            if after is None or snap_ts < ensure_utc(after.ts):
-                after = snap
 
-    # If we have both, interpolate in log space
-    if before is not None and after is not None and before.id != after.id:
-        t0 = ensure_utc(before.ts).timestamp()
-        t1 = ensure_utc(after.ts).timestamp()
-        t_target = target_ts.timestamp()
-        if t1 > t0 and before.price_usd is not None and after.price_usd is not None:
-            frac = (t_target - t0) / (t1 - t0)
-            price0 = float(before.price_usd)
-            price1 = float(after.price_usd)
-            if price0 > 0 and price1 > 0:
-                return math.exp(math.log(price0) + frac * (math.log(price1) - math.log(price0)))
-            return price0 + frac * (price1 - price0)
-
-    # If only before, use it
     if before is not None and before.price_usd is not None:
         return float(before.price_usd)
 
@@ -87,8 +74,9 @@ def generate_dense_labels(
     """Generate labels using ALL historical snapshot pairs.
 
     Instead of only labeling at observed snapshot times, this generates
-    labels at regular hourly intervals, using linear interpolation for
-    prices between snapshots. This dramatically increases label count.
+    labels at regular hourly intervals, using the last observed price at
+    or before each grid point as the entry (point-in-time, never the
+    future-adjacent snapshot). This dramatically increases label count.
     """
     settings = get_settings()
     decision_ts = ensure_utc(decision_ts or utc_now())

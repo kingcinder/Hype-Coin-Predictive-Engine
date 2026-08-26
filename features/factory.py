@@ -290,6 +290,8 @@ class FeatureFactory:
         )
         rpc_pool_health = self._rpc_pool_health(session, asset, decision_ts)
         collapse_probability = self._forecast_probability(session, asset.id, decision_ts)
+        website_presence = self._url_evidenced_before(session, asset.website_url, decision_ts)
+        github_presence = self._url_evidenced_before(session, asset.github_url, decision_ts)
 
         lifecycle_phase = self._lifecycle_phase(session, asset.id, decision_ts)
 
@@ -320,15 +322,15 @@ class FeatureFactory:
             ),
             _feature(
                 "website_presence",
-                self._url_evidenced_before(session, asset.website_url, decision_ts),
-                1,
-                1.0,
+                website_presence,
+                1 if website_presence is not None else 0,
+                1.0 if website_presence is not None else 0.0,
             ),
             _feature(
                 "github_presence_public",
-                self._url_evidenced_before(session, asset.github_url, decision_ts),
-                1,
-                1.0,
+                github_presence,
+                1 if github_presence is not None else 0,
+                1.0 if github_presence is not None else 0.0,
             ),
             _feature("suspicious_contract_flags", flags, 1, 1.0),
             _feature(
@@ -506,16 +508,23 @@ class FeatureFactory:
 
     def _url_evidenced_before(
         self, session: Session, url: str | None, decision_ts: datetime
-    ) -> float:
+    ) -> float | None:
         """Point-in-time website/github presence: 1.0 only when crawler evidence
         referencing the URL was observed at or before the decision time.
 
         The asset row's ``website_url``/``github_url`` reflect *current* state
         — a URL discovered by a Night Crawler last week would wrongly count
         for a decision a month ago.  Evidence-gating on ``observed_at <=
-        decision_ts`` keeps the feature honest for historical snapshots: a URL
-        with no prior evidence reads as absent (0.0) rather than leaking the
-        live value.
+        decision_ts`` keeps the feature honest for historical snapshots.
+
+        Returns ``None`` — read as "unknown" (missing) downstream — when a URL
+        exists on the asset row but no evidence of it was observed at or before
+        the decision time.  This is the point-in-time-correct answer for a
+        decision that predates the URL's discovery: we cannot say the website
+        was absent (it may simply not have been crawled yet), so a confident
+        0.0 would be a silent zero, and a 1.0 would leak the live value.
+        Only a URL that is absent from the asset row entirely (``url is
+        None``) reads as a confident 0.0.
 
         Evidence sources: a ``SocialMention.raw_ref`` that contains the URL,
         or a ``RawEvidenceItem.payload`` whose JSON text mentions it (crawlers
@@ -549,7 +558,9 @@ class FeatureFactory:
                 ),
             )
         )
-        return 1.0 if evidence else 0.0
+        if evidence:
+            return 1.0
+        return None
 
     def _ignition_features(
         self, session: Session, asset_id: int, decision_ts: datetime

@@ -106,7 +106,8 @@ def test_website_presence_is_evidence_gated(session) -> None:
     asset = seed_market_asset(session)
     decision = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     # Asset row has website_url/github_url, but no evidence observed before
-    # the decision -> both read as absent (no live-state leak).
+    # the decision -> both read as UNKNOWN/missing (no live-state leak, no
+    # silent zero).
     values = {
         value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision)
     }

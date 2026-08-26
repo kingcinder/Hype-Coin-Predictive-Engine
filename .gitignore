@@ -30,6 +30,7 @@ build/
 engine.log
 *.log
 models/
+reports/
 # Freebuff app metadata (its local DB, run docs, logs) — never commit
 .freebuff/
 coverage/history.json.new
