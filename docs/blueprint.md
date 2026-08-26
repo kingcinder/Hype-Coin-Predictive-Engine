@@ -503,6 +503,19 @@ evidence), FastAPI, Streamlit, APScheduler.
   + the **Archive & Retention** UI view surface the lake. A full $0 stack
   validation runbook lives in `docs/validation.md` §Phase 4.)*
 
+- **Phase 9 (validation / benchmark harness):** a standalone, leak-first harness
+  (`validation/`) that answers whether each engine output beats a dumb baseline —
+  with walk-forward partitioning, regime stratification, naive-baseline
+  comparisons, confidence intervals, a leakage cross-check, and three synthetic
+  self-tests (perfect predictor / pure noise / injected leakage) that run as
+  permanent pytest regressions. *(done: methodology in
+  `docs/validation-methodology.md`, design + pre-committed expectations in
+  `docs/validation-harness-design.md`, harness + regression tests in
+  `validation/` + `tests/test_validation_harness.py`, and the honest field
+  report — no scoring output demonstrably better than baseline yet; score
+  distribution must be fixed before a re-run is meaningful — in
+  `docs/validation-field-report.md`.)*
+
 **North star metric:** *median minutes of advance warning for collapse onset at a 70%
 recall and <30% false-alarm rate, measured on a walk-forward backtest.* If the engine
 can't prove that on its own history, it doesn't get to whisper in the operator's ear.

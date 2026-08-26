@@ -58,17 +58,26 @@ Equivalent Makefile target: `make engine`.
 
 ## Night Crawlers — Army of Data Spiders
 
-Seven crawlers continuously feed the engine with expanding data:
+Sixteen crawlers continuously feed the engine with expanding data:
 
 | Crawler | Source | Data Collected |
 |---------|--------|---------------|
-| **CoinGecko** | coingecko.com | Trending coins, new listings, market data |
-| **Pump.fun** | pump.fun | New token launches, bonding curve progress |
-| **DeFiLlama** | defillama.com | TVL, protocol data, new pools |
-| **Whale Tracker** | Etherscan/Solana RPC | Large wallet movements, smart money flows |
-| **Explorer** | Etherscan/Solana FM | On-chain metrics, contract deployments |
-| **Nitter** | nitter.net | Social sentiment (Twitter proxy) |
-| **Presale** | PinkSale/CryptoRank | Upcoming token launches |
+| **CoinGecko** | coingecko.com | Market data, trending tokens, historical prices |
+| **CoinMarketCap** | coinmarketcap.com | New listings, trending tokens, market data |
+| **CoinPaprika** | coinpaprika.com | Market data, new coins, top gainers |
+| **DeFiLlama** | defillama.com | TVL tracking, protocol launches, yield data |
+| **DexScreener Trends** | dexscreener.com | New token profiles + paid-boost activity |
+| **Explorer** | Etherscan/Solana FM | Contract intelligence, deployer tracking |
+| **Farcaster** | farcaster.xyz | Project mentions, developer activity |
+| **Gas Tracker** | public RPCs | Fee-market pressure as a hype proxy |
+| **GitHub Trending** | github.com | Dev-activity signals, trending repos |
+| **Google Trends** | trends.google.com | Realtime crypto search momentum |
+| **Nitter** | nitter.net | Crypto Twitter sentiment |
+| **Presale** | PinkSale/CryptoRank | Launchpad and presale intelligence |
+| **Pump.fun** | pump.fun | New Solana token launches |
+| **PumpPortal** | pumpportal.fun | Live pump.fun launches (HTTP + WebSocket tap) |
+| **Whale Tracker** | Etherscan/Solana RPC | Large on-chain movements, wallet intelligence |
+| **X Trends** | X (unofficial trends feed) | Which crypto topics are heating up |
 
 ### Self-Adjusting Heuristics
 
@@ -86,10 +95,13 @@ Engine Loop (every scan)
     ↓
 Interval Gate (every nightcrawler_interval_minutes, default 30m)
     ↓
-Orchestrator runs 7 crawlers independently
+Orchestrator runs each crawler independently
     ├── Each crawler has its own try/except (one crash doesn't abort the fleet)
     ├── Thread-safe singleton with threading.Lock
-    └── Adaptive frequency per source
+    ├── Adaptive frequency per source
+    └── Signal linking: every item resolves to known assets and is upserted
+        as a SocialMention, so cross-source fusion sees the crawler as a
+        corroborating source when scoring
     ↓
 Pipeline: Score → Archive → Alert
     ├── Signal scoring (novelty, corroboration, magnitude)
@@ -184,6 +196,53 @@ Register HTTP endpoints to receive real-time alerts:
 - `GET /parity/latest` — Latest lake-vs-SQL parity run (mismatch count, decision window, state)
 - `GET /parity/mismatches` — Reviewable lake-vs-SQL divergence history (per-asset/feature filters)
 - `GET /ops/console` — Live ops console
+
+## Validation & Benchmarking (Phase 9)
+
+The engine ships with a standalone validation harness (`validation/`) that
+answers one question honestly: **is this system's output better than a dumb
+baseline?** It was built leak-first — research methodology, then a design doc
+with pre-committed expectations, then the harness, then a synthetic
+self-test suite (perfect predictor, pure noise, and an *injected* leakage
+pattern that the harness must flag) — and only then run against the real
+engine.
+
+```bash
+# Run the three synthetic self-tests (regression-gated in pytest too)
+python -m validation --self-test
+
+# Benchmark a real engine database (read-only — never writes to it)
+python -m validation --db serpent.db
+
+# Versioned report is written to reports/validation-<ts>.json
+```
+
+Documentation, in dependency order:
+
+- `docs/validation-methodology.md` — Stage 1: research + metric mapping + ground-truth definitions
+- `docs/validation-harness-design.md` — Stage 2: architecture + pre-committed self-test expectations
+- `docs/validation-field-report.md` — Stage 4: the honest verdict on the real engine
+
+**Current verdict (field report):** no scoring output is yet demonstrably
+better than its naive baseline; the confidence calibration is worse than the
+trust ceiling; the apparent concordance-1.0 "wins" are degenerate-score
+artifacts flagged by the harness's leakage cross-check; and the probability /
+hazard / ensemble layers have never produced enough data to benchmark at all.
+
+The field report names the concrete next step: fix the quantized score
+distribution before re-running.
+
+## Feature & Label Leakage Audit
+
+The point-in-time correctness sweep (`docs/leakage-audit.md`) traced every
+feature and label back to data that was known at its decision time. All seven
+findings are **RESOLVED** and each is backed by a passing regression test
+(`tests/test_leakage_audit.py`): deployer history and website/github presence
+are evidence-gated to `observed_at <= decision_ts` (unknown reads as missing,
+never a leaked live value), the forecast model no longer trains on its own
+output, `rpc_pool_health` reads persisted snapshots instead of live process
+memory, and both bootstrap and dense labels reject price data observed after
+their generation time.
 
 ## GUI Views
 

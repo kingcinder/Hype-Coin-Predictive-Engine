@@ -8,6 +8,41 @@
 .\scripts\dev.ps1 smoke
 ```
 
+## Phase 9 — Benchmark Harness (does the engine beat a dumb baseline?)
+
+The `validation/` package is a standalone, leak-first benchmark harness. It
+observes and measures the engine; it never writes to the engine database.
+
+```bash
+# Synthetic self-tests: perfect predictor, pure noise, injected leakage.
+# The injected-leak case must be FLAGGED, not reported as a great score.
+python -m validation --self-test
+
+# Benchmark a real engine DB (read-only), write a versioned report:
+python -m validation --db serpent.db
+# -> reports/validation-<ts>.json (report format v1)
+```
+
+Artifacts, in dependency order:
+
+- `docs/validation-methodology.md` — Stage 1: literature review (walk-forward /
+  purged / embargoed CV, calibration metrics, precision@K, regime stratification,
+  meme-coin failure modes, survival analysis), metric mapping to every engine
+  output, ground-truth definitions, naive-baseline + significance gates.
+- `docs/validation-harness-design.md` — Stage 2: architecture (reuses the
+  point-in-time evidence architecture), walk-forward partition + embargo/purge,
+  versioned report format, and the pre-committed self-test expectations.
+- `validation/` — Stage 3: the harness (metrics, baselines, leakage detection,
+  synthetic datasets, report writer, CLI). Regression tests live in
+  `tests/test_validation_harness.py`.
+- `docs/validation-field-report.md` — Stage 4: the honest verdict on the real
+  engine, cross-checked against the versioned report JSON.
+
+Self-test expectations are pre-committed in the design doc; the pytest
+regression suite (`tests/test_validation_harness.py`) re-runs all three
+synthetic cases on every CI pass so a broken or gameable metric cannot slip
+back in silently.
+
 ## Production deployment checks
 
 On Linux, install with `sudo REPO_URL=<git-url> bash deploy/install.sh`.
