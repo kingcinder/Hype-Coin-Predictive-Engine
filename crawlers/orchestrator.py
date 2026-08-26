@@ -75,6 +75,7 @@ class NightCrawlerOrchestrator:
             self._crawlers["gas_tracker"] = GasTrackerCrawler(
                 etherscan_api_key=self.settings.etherscan_api_key,
                 include_solana=self.settings.gas_tracker_solana_enabled,
+                include_pending_tx=self.settings.gas_tracker_pending_tx_enabled,
             )
         if self.settings.nightcrawler_coinpaprika_enabled:
             self._crawlers["coinpaprika"] = CoinPaprikaCrawler()

@@ -73,12 +73,309 @@ def test_gas_tracker_handles_bad_oracle_response() -> None:
     respx.get("https://api.etherscan.io/api").mock(
         return_value=Response(200, json={"status": "0", "result": "NOTOK"})
     )
-    crawler = GasTrackerCrawler(include_solana=False)
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=False)
     try:
         items = crawler.fetch()
     finally:
         crawler.close()
     assert items == []
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_severe_congestion() -> None:
+    """Pending tx count above 200k = severe congestion signal."""
+    # Mock the Etherscan oracle (gas prices normal)
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    # Mock the txpool_status RPC
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "pending": "0x3e800",  # 256,000 in decimal
+                    "queued": "0x1e848",  # 125,000 in decimal
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    # 1 gas oracle + 1 pending tx = 2 items
+    assert len(items) == 2
+    pending_item = items[1]
+    assert pending_item["source_domain"] == "ethereum-rpc"
+    assert pending_item["source_type"] == "market_data"
+    assert pending_item["metrics"]["signal"] == "pending_tx_congestion"
+    assert pending_item["metrics"]["pending_txs"] == 256_000
+    assert pending_item["metrics"]["queued_txs"] == 125_000
+    assert pending_item["metrics"]["total_txs"] == 381_000
+    assert pending_item["metrics"]["congestion"] == "severe"
+    assert pending_item["metrics"]["congested"] is True
+    assert "severe" in pending_item["title"]
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_high_congestion() -> None:
+    """Pending tx count above 80k but below 200k = high congestion."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "pending": "0x186a0",  # 100,000 in decimal
+                    "queued": "0x2710",  # 10,000 in decimal
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 2
+    pending_item = items[1]
+    assert pending_item["metrics"]["pending_txs"] == 100_000
+    assert pending_item["metrics"]["congestion"] == "high"
+    assert pending_item["metrics"]["congested"] is True
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_normal_congestion() -> None:
+    """Pending tx count below 80k = normal congestion."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "pending": "0x1388",  # 5,000 in decimal
+                    "queued": "0x3e8",  # 1,000 in decimal
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 2
+    pending_item = items[1]
+    assert pending_item["metrics"]["pending_txs"] == 5_000
+    assert pending_item["metrics"]["congestion"] == "normal"
+    assert pending_item["metrics"]["congested"] is False
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_fallback_on_rpc_failure() -> None:
+    """When the first RPC fails, try the next one."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    # First RPC fails
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(500, json={"error": "server error"})
+    )
+    # Second RPC succeeds
+    respx.post("https://eth.llamarpc.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "pending": "0x186a0",  # 100,000
+                    "queued": "0x2710",  # 10,000
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 2
+    pending_item = items[1]
+    assert pending_item["metrics"]["pending_txs"] == 100_000
+    assert pending_item["metrics"]["rpc_source"] == "eth.llamarpc.com"
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_all_rpcs_fail() -> None:
+    """When all RPCs fail, pending tx item is skipped but gas oracle still works."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    # All RPCs fail
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(500, json={"error": "server error"})
+    )
+    respx.post("https://eth.llamarpc.com").mock(
+        return_value=Response(500, json={"error": "server error"})
+    )
+    respx.post("https://rpc.ankr.com/eth").mock(
+        return_value=Response(500, json={"error": "server error"})
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    # Only gas oracle item, no pending tx
+    assert len(items) == 1
+    assert items[0]["metrics"]["chain"] == "ethereum"
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_disabled() -> None:
+    """When include_pending_tx=False, no pending tx item is returned."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=False)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    # Only gas oracle item
+    assert len(items) == 1
+
+
+@respx.mock
+def test_gas_tracker_pending_tx_bad_rpc_response() -> None:
+    """RPC returns non-dict result — skip this endpoint, try next."""
+    respx.get("https://api.etherscan.io/api").mock(
+        return_value=Response(
+            200,
+            json={
+                "status": "1",
+                "result": {
+                    "SafeGasPrice": "5",
+                    "ProposeGasPrice": "7",
+                    "FastGasPrice": "9",
+                    "suggestBaseFee": "4.5",
+                },
+            },
+        )
+    )
+    # First RPC returns non-dict result
+    respx.post("https://ethereum-rpc.publicnode.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "NOTOK",
+            },
+        )
+    )
+    # Second RPC returns valid response
+    respx.post("https://eth.llamarpc.com").mock(
+        return_value=Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "pending": "0x1388",  # 5,000
+                    "queued": "0x3e8",  # 1,000
+                },
+            },
+        )
+    )
+    crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=True)
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 2
+    pending_item = items[1]
+    assert pending_item["metrics"]["pending_txs"] == 5_000
+    assert pending_item["metrics"]["rpc_source"] == "eth.llamarpc.com"
 
 
 @respx.mock

@@ -69,7 +69,7 @@ Sixteen crawlers continuously feed the engine with expanding data:
 | **DexScreener Trends** | dexscreener.com | New token profiles + paid-boost activity |
 | **Explorer** | Etherscan/Solana FM | Contract intelligence, deployer tracking |
 | **Farcaster** | farcaster.xyz | Project mentions, developer activity |
-| **Gas Tracker** | public RPCs | Fee-market pressure as a hype proxy |
+| **Gas Tracker** | Etherscan + public RPCs | Fee-market pressure + pending-tx congestion proxy |
 | **GitHub Trending** | github.com | Dev-activity signals, trending repos |
 | **Google Trends** | trends.google.com | Realtime crypto search momentum |
 | **Nitter** | nitter.net | Crypto Twitter sentiment |

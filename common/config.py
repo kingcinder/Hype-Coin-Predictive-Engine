@@ -231,6 +231,7 @@ class Settings(BaseSettings):
     # Phase 8 fleet expansion: gas tracker, CoinPaprika, GitHub trending, X trends
     nightcrawler_gas_tracker_enabled: bool = True
     gas_tracker_solana_enabled: bool = True
+    gas_tracker_pending_tx_enabled: bool = True
     nightcrawler_coinpaprika_enabled: bool = True
     nightcrawler_github_trending_enabled: bool = True
     github_trending_search_query: str = "crypto token memecoin created:>30d"
