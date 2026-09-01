@@ -200,6 +200,21 @@ def render_engine_banner() -> None:
         unsafe_allow_html=True,
     )
 
+    # Surface a recent phase-watchdog timeout on EVERY view (not just Feed
+    # Health / Archive & Retention), so a phase that was abandoned after its
+    # deadline is obvious without opening logs. Rendered only while an alarm
+    # exists; the full list lives in Feed Health > Watchdog alarms.
+    alarms = api_get_silent("/watchdog/alarms", params={"limit": 1}, timeout=2.0)
+    if alarms:
+        latest = alarms[0]
+        component = latest.get("component", "phase")
+        ts = latest.get("ts") or ""
+        st.warning(
+            f"🚨 **{component} watchdog timeout** — a phase exceeded its deadline "
+            f"and was abandoned in the background ({str(ts)[:16]}). See "
+            "**Feed Health > Watchdog alarms**."
+        )
+
 
 @st.fragment(run_every=UI_REFRESH_SECONDS)
 def render_system_strip() -> None:
@@ -319,6 +334,44 @@ def token_selector(df: pd.DataFrame) -> int | None:
     return options[label]
 
 
+def _render_llm_narrative(result: dict[str, Any]) -> None:
+    """Render a cached ``/llm/predict`` response as the LLM Narrative panel."""
+    summary = (result.get("narrative_summary") or "").strip()
+    risk = (result.get("risk_assessment") or "").strip()
+    if not summary and not risk:
+        st.info("The LLM returned no narrative for this token.")
+        return
+    if summary:
+        st.markdown(f"**Narrative**  \n{summary}")
+    if risk:
+        st.markdown(f"**Risk assessment**  \n{risk}")
+    factors = result.get("key_factors") or []
+    if factors:
+        st.markdown("**Key factors**")
+        for factor in factors:
+            st.write(f"- {factor}")
+    deltas = [
+        f"{label} {float(result[key]):+.1f}"
+        for label, key in (
+            ("hype", "hype_delta"),
+            ("risk", "risk_delta"),
+            ("confidence", "confidence_delta"),
+        )
+        if result.get(key) not in (None, 0, 0.0)
+    ]
+    meta: list[str] = []
+    if result.get("llm_model"):
+        meta.append(str(result["llm_model"]))
+    if result.get("latency_ms") is not None:
+        meta.append(f"{result['latency_ms']:.0f} ms")
+    if result.get("cached"):
+        meta.append("cached")
+    if deltas:
+        meta.append("deltas: " + ", ".join(deltas))
+    if meta:
+        st.caption(" · ".join(meta))
+
+
 def render_token_detail(asset_id: int | None) -> None:
     if asset_id is None:
         st.info("Select a scored token to inspect details.")
@@ -339,6 +392,28 @@ def render_token_detail(asset_id: int | None) -> None:
     cols[2].metric("Liquidity", f"{score['liquidity_access']:.1f}")
     cols[3].metric("Confidence", f"{score['confidence']:.1f}")
     cols[4].metric("Research", f"{score['research_priority']:.1f}")
+
+    # ── LLM Narrative: on-demand call, cached per token in the session ──────
+    st.markdown("**LLM Narrative**")
+    llm_cache_key = f"llm_narrative_{asset_id}"
+    llm_result = st.session_state.get(llm_cache_key)
+    if llm_result is not None:
+        _render_llm_narrative(llm_result)
+        if st.button("Regenerate LLM narrative", key=f"llm_regen_{asset_id}"):
+            st.session_state.pop(llm_cache_key, None)
+            st.rerun()
+    else:
+        llm_health = api_get_silent("/llm/health") or {}
+        if llm_health.get("connected") and llm_health.get("available"):
+            if st.button("Generate LLM narrative", key=f"llm_gen_{asset_id}"):
+                result = api_post(f"/llm/predict/{asset_id}")
+                if result:
+                    st.session_state[llm_cache_key] = result
+                    st.rerun()
+                else:
+                    st.error("LLM prediction failed. Check the engine log for details.")
+        else:
+            st.caption("LLM offline — start Ollama to generate narratives.")
 
     explanation = data.get("explanation") or {}
     risk_reasons = explanation.get("risk_reasons") or []
@@ -1118,6 +1193,7 @@ def archive_retention() -> None:
         "lake on local disk; the docker profile uses MinIO. Query the lake with "
         '`python -m ops.archive --query "SELECT ..."`.'
     )
+    _watchdog_alarms_panel()
     growth = api_get("/retention/growth", params={"limit": 30})
     if growth and growth.get("runs"):
         runs = growth["runs"]
@@ -1257,8 +1333,34 @@ def _parity_panel() -> None:
             )
 
 
+def _watchdog_alarms_panel() -> None:
+    """Surface recent engine phase-watchdog alarms prominently.
+
+    These red ``system_health`` rows mean a blocking phase (retention /
+    forecast / parity / nightcrawler / data-lake) exceeded its watchdog
+    deadline and was abandoned in the background — the engine loop kept going,
+    but an operator should investigate why. Hidden entirely when nothing has
+    ever timed out.
+    """
+    alarms = api_get("/watchdog/alarms", params={"limit": 20})
+    if not alarms:
+        return
+    rows = pd.DataFrame(alarms)
+    st.warning(
+        f"🚨 **{len(rows)} recent engine phase-watchdog alarm(s):** a blocking phase "
+        "exceeded its watchdog deadline and was abandoned in the background. "
+        "The loop kept running, but investigate why it stalled."
+    )
+    st.dataframe(
+        rows[["ts", "component", "state", "message"]],
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def feed_health() -> None:
     st.header("Feed Health")
+    _watchdog_alarms_panel()
     data = api_get("/health")
     if data:
         st.metric("API Status", data.get("status", "unknown"))
@@ -1266,6 +1368,10 @@ def feed_health() -> None:
         if components.empty:
             st.info("No component health rows exist yet. Worker runs will populate this table.")
         else:
+            _state_emoji = {"ok": "🟢 ok", "yellow": "🟡 yellow", "red": "🔴 red"}
+            components["state"] = components["state"].map(
+                lambda s: _state_emoji.get(str(s), str(s))
+            )
             st.dataframe(components, width="stretch", hide_index=True)
 
     _parity_panel()

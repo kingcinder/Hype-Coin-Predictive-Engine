@@ -20,6 +20,29 @@ from storage.repository import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_watchdog_inflight() -> Generator[None, None, None]:
+    """Reset the engine phase-watchdog in-flight registry around every test.
+
+    ``ops.watchdog.run_stage_with_timeout`` keeps a process-global map of the
+    abandoned daemon threads that are still wedged per phase. Tests that drive a
+    wedged phase leave one of those threads running past the test, which would
+    leak the registry into the next test and cause spurious skips. Clearing it
+    before and after each test keeps watchdog tests hermetically isolated without
+    touching the threads themselves (they are daemons and simply stop being
+    tracked).
+    """
+    import ops.watchdog  # noqa: PLC0415 - local import keeps the fixture cheap.
+
+    def _reset() -> None:
+        with ops.watchdog._in_flight_lock:  # noqa: SLF001 - test fixture needs the internals.
+            ops.watchdog._in_flight.clear()  # noqa: SLF001
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture()
 def session() -> Generator[Session, None, None]:
     engine = create_engine(

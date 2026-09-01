@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     api_base_url: str = "http://localhost:8000"
+    # SQLite busy timeout (ms) before a write gives up on a transient lock and
+    # raises "database is locked". Higher than the SQLite default so genuine
+    # intra-process write collisions (worker thread + API thread on one file)
+    # wait instead of failing spuriously. Cross-process contention is handled
+    # separately by the single-writer lock guard.
+    sqlite_busy_timeout_ms: int = 30000
 
     # Streamlit GUI (single-command engine: `python -m engine`)
     ui_port: int = 8501
@@ -185,6 +191,29 @@ class Settings(BaseSettings):
     retention_stale_warning_cooldown_hours: float = 24.0
     retention_backlog_warning_threshold: int = 2
     retention_backlog_warning_cooldown_hours: float = 24.0
+    # Retention watchdog: max wall-clock time for the retention *stage* inside
+    # the engine loop before it is abandoned in a daemon thread and the loop
+    # continues. The retention stage runs synchronously in the engine's main
+    # thread, so a wedged pass (e.g. SQLite lock contention, or a hung
+    # object-store/DuckDB call) would otherwise freeze the whole loop — no
+    # further scans and no operational watchdog (WAL checkpoint / VACUUM /
+    # failure tracking). A pass compacts at most
+    # RETENTION_MAX_PARTITIONS_PER_PASS partitions of ARCHIVE_BATCH_SIZE rows,
+    # so 10 minutes is generous yet bounded.
+    retention_timeout_seconds: float = 600.0
+
+    # Shared watchdog ceiling for the other blocking engine phases (seconds).
+    # Each phase also owns a per-phase setting so an operator can tune an
+    # outlier — e.g. a slow night-crawler fleet — without relaxing the rest;
+    # they all default to PHASE_TIMEOUT_SECONDS. Any phase that stops making
+    # progress (wedged DB lock, hung DuckDB/HTTP/LLM call) would otherwise run
+    # synchronously in the main thread and freeze the whole loop the same way
+    # the retention stage did.
+    phase_timeout_seconds: float = 900.0
+    forecast_timeout_seconds: float = phase_timeout_seconds
+    parity_timeout_seconds: float = phase_timeout_seconds
+    data_lake_timeout_seconds: float = phase_timeout_seconds
+    nightcrawler_timeout_seconds: float = 1800.0
 
     # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
     # against the live SQL path over the archived evidence, paging a mismatch
@@ -333,6 +362,7 @@ class Settings(BaseSettings):
     llm_max_tokens_per_call: int = 512
     llm_batch_size: int = 10  # max tokens per batch predict call
     llm_timeout_seconds: float = 30.0
+    llm_predict_cache_ttl_seconds: float = 3600.0  # in-process TTL for on-demand /llm/predict
 
     # Adaptive LLM weight calibration: adjusts llm_weight dynamically based
     # on whether LLM predictions improve or degrade scoring accuracy over time.

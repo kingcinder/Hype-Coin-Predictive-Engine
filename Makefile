@@ -1,9 +1,14 @@
 .PHONY: setup up down migrate seed worker api ui engine test lint format smoke \
-	bootstrap-local local-worker local-api local-ui archive archive-query retention parity backtest refresh-rpc-pools forecast-ab
+	bootstrap-local local-worker local-api local-ui archive archive-query retention parity backtest refresh-rpc-pools forecast-ab install-local
 
 setup:
 	python -m pip install --upgrade pip
 	python -m pip install -e ".[dev]"
+
+# Wire this checkout for desktop use (venv + DB bootstrap + desktop shortcut),
+# no root required. See packaging/install-local.sh.
+install-local:
+	bash packaging/install-local.sh
 
 up:
 	docker compose up --build
@@ -53,6 +58,10 @@ archive-query:
 # Run one retention-autopilot pass (compaction + pruning + lake-growth report).
 retention:
 	python -m ops.retention --once
+
+# Diagnose the retention-phase wedge (runs/health gap + competing writer/port).
+diagnose-retention:
+	python -m scripts.diagnose_retention
 
 # Run one lake-vs-SQL parity check over the archived lake (daily CI job).
 parity:

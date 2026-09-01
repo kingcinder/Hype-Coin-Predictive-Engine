@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from common.config import Settings
@@ -13,6 +15,7 @@ from ops.archive import (
     run_archive,
 )
 from storage import models
+from storage.database import acquire_sqlite_writer_lock
 from storage.repository import (
     get_or_create_chain,
     get_or_create_source,
@@ -326,6 +329,39 @@ def test_explicit_overrides_win_over_profile() -> None:
     assert settings.database_url == "postgresql+psycopg://user:pass@db:5432/serpent"
     assert settings.archive_backend == "s3"
     assert not settings.archive_backend_is_local
+
+
+def test_acquire_sqlite_writer_lock_blocks_a_second_writer(tmp_path) -> None:
+    """A second engine opening the same SQLite file hits the single-writer
+    guard and fails fast instead of wedging the loop on lock contention."""
+    settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path}/serpent.db",
+    )
+    fd = acquire_sqlite_writer_lock(settings)
+    assert fd is not None
+    try:
+        with pytest.raises(RuntimeError, match="already holds the SQLite writer lock"):
+            acquire_sqlite_writer_lock(settings)
+    finally:
+        os.close(fd)
+
+
+def test_acquire_sqlite_writer_lock_noop_for_non_sqlite() -> None:
+    """Postgres (docker profile) handles concurrent writers itself, so the guard
+    is a no-op and never blocks those engines."""
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:pass@db:5432/serpent",
+    )
+    assert acquire_sqlite_writer_lock(settings) is None
+
+
+def test_sqlite_busy_timeout_config_default() -> None:
+    """The busy timeout is configurable and defaults well above SQLite's own mask
+    spurious intra-process write collisions."""
+    settings = Settings(_env_file=None)
+    assert settings.sqlite_busy_timeout_ms >= 5000
 
 
 def test_raw_evidence_payload_sanitizes_datetimes(session) -> None:

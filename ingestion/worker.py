@@ -39,6 +39,18 @@ def main() -> None:
         log.info("worker_once_complete", result=result)
         return
 
+    # Single-writer guard: refuse to start if another process already owns the
+    # SQLite file (a second writer causes "database is locked" loop wedges).
+    from storage.database import acquire_sqlite_writer_lock
+
+    _db_lock: int | None = None
+    try:
+        _db_lock = acquire_sqlite_writer_lock(settings)
+    except RuntimeError as exc:  # noqa: BLE001
+        log.critical("worker_sqlite_writer_conflict", error=str(exc))
+        print(str(exc))
+        raise SystemExit(1) from None
+
     ensure_background_probe()
     iteration = 0
     while True:

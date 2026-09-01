@@ -5,7 +5,11 @@
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-PROJECT_DIR="/home/cody/Documents/Hype-Coin-Predictive-Engine-main"
+# Resolve the project directory relative to this script so the launcher
+# works from any checkout location (desktop shortcut, CLI, CI). Override
+# with SERPENT_PROJECT_DIR if you keep the script elsewhere.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${SERPENT_PROJECT_DIR:-$SCRIPT_DIR}"
 
 # ── Step 1: Navigate to project ──────────────────────────────────────
 cd "$PROJECT_DIR" || {
@@ -36,6 +40,24 @@ echo "  GUI : http://localhost:8501"
 echo "  Ctrl+C to stop"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
+
+# Spawn a helper that surfaces the GUI as soon as the API is healthy,
+# then hands back to the engine (exec keeps Ctrl+C wired to the engine).
+(
+    API_PORT="${SERPENT_API_PORT:-8000}"
+    UI_PORT="${SERPENT_UI_PORT:-8501}"
+    for _ in $(seq 1 90); do
+        if curl -sf "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
+            sleep 2  # let the Streamlit GUI settle before opening the browser
+            xdg-open "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
+                || sensible-browser "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
+                || true
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "⚠️  Engine did not become healthy in 90s — open http://localhost:${UI_PORT} manually."
+) &
 
 # exec replaces the shell so Ctrl+C goes straight to the engine
 exec python -m engine

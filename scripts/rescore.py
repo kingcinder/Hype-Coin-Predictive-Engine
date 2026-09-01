@@ -85,6 +85,7 @@ def rescore(
     dry_run: bool = False,
     compare: bool = False,
     min_change: float = 0.0,
+    session: Session | None = None,
 ) -> dict[str, int]:
     """Rescore all scored tokens and return stats.
 
@@ -92,113 +93,139 @@ def rescore(
         dry_run:  Compute but don't write to the database.
         compare:  Print old → new risk for each token (implies dry_run).
         min_change: Minimum |old_risk - new_risk| to include in output.
+        session:  Optional session to run against (used by tests that need
+            a controlled in-memory database); defaults to the configured DB.
     """
-    with session_scope() as session:
-        features_map = _build_features(session)
-        missing_map = _build_missing(session)
 
-        # Load existing scores
-        scores = session.scalars(select(models.Score).order_by(models.Score.id)).all()
-        log.info("rescore_scores_loaded", count=len(scores))
+    def _run(active: Session) -> dict[str, int]:
+        return _rescore_in_session(active, dry_run=dry_run, compare=compare, min_change=min_change)
 
-        # Pre-fetch asset symbols to avoid N+1 lookups during compare
-        asset_map: dict[int, str] = {}
-        if compare:
-            dry_run = True
-            for asset in session.scalars(select(models.Asset)).all():
-                asset_map[asset.id] = asset.symbol or f"id={asset.id}"
+    if session is not None:
+        return _run(session)
+    with session_scope() as active_session:
+        return _run(active_session)
 
-        updated = 0
-        skipped = 0
-        errors = 0
-        risk_after: list[float] = []
-        compare_rows: list[tuple[str, float, float, float]] = []  # (symbol, old, new, diff)
 
-        for score in scores:
-            ts = score.decision_ts
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=UTC)
-            key = (score.asset_id, ts)
-            feat = features_map.get(key)
-            if not feat:
-                skipped += 1
-                continue
+def _rescore_in_session(
+    session: Session,
+    *,
+    dry_run: bool,
+    compare: bool,
+    min_change: float,
+) -> dict[str, int]:
+    """The rescore body, running against a caller-provided session.
 
-            missing = missing_map.get(key, [])
-            try:
-                result = compute_scores(
-                    feat,
-                    missing,
-                    session=session,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("rescore_error", score_id=score.id, error=str(exc))
-                errors += 1
-                continue
+    Does not close the session — the caller owns its lifecycle (``rescore``
+    wraps a ``session_scope`` that handles cleanup; tests inject an in-memory
+    session they keep open). Commits only when ``dry_run`` is False: that is
+    the rescore contract, and it applies to injected sessions too.
+    """
+    features_map = _build_features(session)
+    missing_map = _build_missing(session)
 
-            risk_after.append(result.risk)
+    # Load existing scores
+    scores = session.scalars(select(models.Score).order_by(models.Score.id)).all()
+    log.info("rescore_scores_loaded", count=len(scores))
 
-            if compare and abs(result.risk - score.risk) >= min_change:
-                sym = asset_map.get(score.asset_id, f"id={score.asset_id}")
-                compare_rows.append((sym, score.risk, result.risk, result.risk - score.risk))
+    # Pre-fetch asset symbols to avoid N+1 lookups during compare
+    asset_map: dict[int, str] = {}
+    if compare:
+        dry_run = True
+        for asset in session.scalars(select(models.Asset)).all():
+            asset_map[asset.id] = asset.symbol or f"id={asset.id}"
 
-            if not dry_run:
-                score.risk = result.risk
-                score.exit_risk = result.exit_risk
-                score.hype = result.hype
-                score.ethos = result.ethos
-                score.liquidity_access = result.liquidity_access
-                score.manipulation = result.manipulation
-                score.confidence = result.confidence
-                score.uncertainty = result.uncertainty
-                score.catalyst = result.catalyst
-                score.research_priority = result.research_priority
-                score.risk_band = result.risk_band.value
-            updated += 1
+    updated = 0
+    skipped = 0
+    errors = 0
+    risk_after: list[float] = []
+    compare_rows: list[tuple[str, float, float, float]] = []  # (symbol, old, new, diff)
+
+    for score in scores:
+        ts = score.decision_ts
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        key = (score.asset_id, ts)
+        feat = features_map.get(key)
+        if not feat:
+            skipped += 1
+            continue
+
+        missing = missing_map.get(key, [])
+        try:
+            result = compute_scores(
+                feat,
+                missing,
+                session=session,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rescore_error", score_id=score.id, error=str(exc))
+            errors += 1
+            continue
+
+        risk_after.append(result.risk)
+
+        if compare and abs(result.risk - score.risk) >= min_change:
+            sym = asset_map.get(score.asset_id, f"id={score.asset_id}")
+            compare_rows.append((sym, score.risk, result.risk, result.risk - score.risk))
 
         if not dry_run:
-            session.commit()
-            log.info("rescore_committed", updated=updated)
+            score.risk = result.risk
+            score.exit_risk = result.exit_risk
+            score.hype = result.hype
+            score.ethos = result.ethos
+            score.liquidity_access = result.liquidity_access
+            score.manipulation = result.manipulation
+            score.confidence = result.confidence
+            score.uncertainty = result.uncertainty
+            score.catalyst = result.catalyst
+            score.research_priority = result.research_priority
+            score.risk_band = result.risk_band.value
+        updated += 1
 
-        # Print per-token diffs if --compare
-        if compare and compare_rows:
-            compare_rows.sort(key=lambda r: abs(r[3]), reverse=True)
-            print(f"\n--- Risk changes ({len(compare_rows)} tokens, min_change={min_change}) ---")
-            print(f"{'Symbol':>20s}  {'Old':>8s}  {'New':>8s}  {'Delta':>8s}")
-            print("-" * 52)
-            for sym, old, new, diff in compare_rows[:50]:  # top 50 by |delta|
-                print(f"{sym:>20s}  {old:>8.2f}  {new:>8.2f}  {diff:>+8.2f}")
-            if len(compare_rows) > 50:
-                print(f"  ... and {len(compare_rows) - 50} more (showing top 50 by |delta|)")
-            print()
+    if not dry_run:
+        session.commit()
+        log.info("rescore_committed", updated=updated)
 
-        # Print before/after distribution
-        if risk_after:
-            ra = np.array(risk_after)
-            unique = len(np.unique(np.round(ra, 2)))
-            print(f"\n{'=' * 60}")
-            print(f"Rescore complete ({'DRY RUN' if dry_run else 'APPLIED'})")
-            print(f"  Updated: {updated}, Skipped: {skipped}, Errors: {errors}")
-            print(f"  Risk scores: {unique} distinct values (was 2-4)")
-            print(f"  Risk range: {ra.min():.2f} – {ra.max():.2f}")
-            print(f"  Risk mean: {ra.mean():.2f}, std: {ra.std():.2f}")
-            # Top 10 distinct values
-            from collections import Counter
+    # Print per-token diffs if --compare (header always prints so an empty
+    # diff is visible instead of looking like the flag was ignored).
+    if compare:
+        compare_rows.sort(key=lambda r: abs(r[3]), reverse=True)
+        print(f"\n--- Risk changes ({len(compare_rows)} tokens, min_change={min_change}) ---")
+        print(f"{'Symbol':>20s}  {'Old':>8s}  {'New':>8s}  {'Delta':>8s}")
+        print("-" * 52)
+        for sym, old, new, diff in compare_rows[:50]:  # top 50 by |delta|
+            print(f"{sym:>20s}  {old:>8.2f}  {new:>8.2f}  {diff:>+8.2f}")
+        if len(compare_rows) > 50:
+            print(f"  ... and {len(compare_rows) - 50} more (showing top 50 by |delta|)")
+        print()
 
-            rounded = np.round(ra, 2)
-            counts = Counter(rounded)
-            print("  Top 10 distinct values:")
-            for val, cnt in counts.most_common(10):
-                print(f"    {val:>8.2f}: {cnt} tokens")
-            print(f"{'=' * 60}")
+    # Print before/after distribution
+    if risk_after:
+        ra = np.array(risk_after)
+        unique = len(np.unique(np.round(ra, 2)))
+        print(f"\n{'=' * 60}")
+        print(f"Rescore complete ({'DRY RUN' if dry_run else 'APPLIED'})")
+        print(f"  Updated: {updated}, Skipped: {skipped}, Errors: {errors}")
+        print(f"  Risk scores: {unique} distinct values (was 2-4)")
+        print(f"  Risk range: {ra.min():.2f} – {ra.max():.2f}")
+        print(f"  Risk mean: {ra.mean():.2f}, std: {ra.std():.2f}")
+        # Top 10 distinct values
+        from collections import Counter
 
-        return {
-            "updated": updated,
-            "skipped": skipped,
-            "errors": errors,
-            "distinct_risk_values": len(np.unique(np.round(ra, 2))) if risk_after else 0,
-            "compare_rows": len(compare_rows),
-        }
+        rounded = np.round(ra, 2)
+        counts = Counter(rounded)
+        print("  Top 10 distinct values:")
+        for val, cnt in counts.most_common(10):
+            print(f"    {val:>8.2f}: {cnt} tokens")
+        print(f"{'=' * 60}")
+
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "distinct_risk_values": len(np.unique(np.round(ra, 2))) if risk_after else 0,
+        "compare_rows": len(compare_rows),
+    }
 
 
 if __name__ == "__main__":

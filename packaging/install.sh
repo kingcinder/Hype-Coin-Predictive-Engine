@@ -429,20 +429,24 @@ echo "  ✅ CLI command installed: /usr/local/bin/serpent"
 # ── Create desktop entry ───────────────────────────────────────────────────
 DESKTOP_DIR="/usr/share/applications"
 if [[ -d "$DESKTOP_DIR" ]]; then
+  # `serpent start` needs root to talk to systemd, so the entry elevates via
+  # pkexec (PolicyKit password prompt), waits for the API to answer, then
+  # opens the GUI. Plain `Exec=... serpent start` would fail silently for a
+  # non-root user, which is why it must not be called directly.
   cat > "$DESKTOP_DIR/serpent-engine.desktop" <<DESKTOP
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Serpent Circle Engine
-Comment=Hype-Coin Predictive Engine — crypto intelligence dashboard
-Exec=/usr/local/bin/serpent start
+Comment=Hype-Coin Predictive Engine — start engine and open the dashboard
+Exec=bash -c 'pkexec /usr/local/bin/serpent start; for i in $(seq 1 60); do curl -sf http://localhost:8000/health >/dev/null 2>&1 && break; sleep 1; done; xdg-open http://localhost:8501'
 Icon=utilities-terminal
-Terminal=true
+Terminal=false
 Categories=Finance;Science;Development;
 Keywords=crypto;prediction;hype;coin;serpent;blockchain;
 StartupNotify=false
 DESKTOP
-  echo "  ✅ Desktop entry installed"
+  echo "  ✅ Desktop entry installed (starts service via pkexec, opens GUI)"
 fi
 
 # ── Fix ownership ──────────────────────────────────────────────────────────

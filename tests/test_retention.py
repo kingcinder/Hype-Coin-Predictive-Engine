@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time as _time
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import func, select
 
 from common.config import Settings
@@ -14,8 +16,15 @@ from ops.retention import (
     retention_due,
     run_retention,
 )
+from ops.watchdog import run_stage_with_timeout
 from storage import models
-from storage.repository import get_or_create_chain, get_or_create_source, store_raw_evidence
+from storage.repository import (
+    get_or_create_chain,
+    get_or_create_source,
+    latest_watchdog_timeouts,
+    record_health,
+    store_raw_evidence,
+)
 
 DECISION_TS = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 
@@ -62,6 +71,127 @@ def _compact(session, tmp_path, settings: Settings) -> None:
         session, DECISION_TS
     )
     session.flush()
+
+
+def test_latest_watchdog_timeouts_filters_alarms(session) -> None:
+    """The watchdog-alarm query surfaces only rows carrying the watchdog message
+    shape and ignores ordinary phase health rows."""
+    record_health(
+        session,
+        component="lake",
+        state="red",
+        message=(
+            "retention stage exceeded 600s watchdog timeout; pass abandoned, engine loop continuing"
+        ),
+        ts=DECISION_TS,
+    )
+    record_health(
+        session,
+        component="lake",
+        state="ok",
+        message="partitions=0 rows=0",
+        ts=DECISION_TS + timedelta(seconds=1),
+    )
+    record_health(
+        session, component="forecast", state="ok", message="training complete", ts=DECISION_TS
+    )
+    session.flush()
+
+    alarms = latest_watchdog_timeouts(session, limit=10)
+    assert len(alarms) == 1
+    assert alarms[0].component == "lake"
+    assert alarms[0].state == "red"
+    assert "watchdog timeout" in (alarms[0].message or "")
+
+
+def test_run_stage_with_timeout_returns_result_and_re_raises_errors() -> None:
+    """A stage that finishes within the deadline returns its result, and a
+    failing stage forwards its exception to the caller."""
+    out = run_stage_with_timeout(lambda: {"status": "ok"}, timeout_seconds=5.0)
+    assert out.result == {"status": "ok"}
+    assert out.timed_out is False
+    assert out.skipped is False
+
+    def _boom() -> dict[str, object]:
+        raise RuntimeError("lake exploded")
+
+    with pytest.raises(RuntimeError, match="lake exploded"):
+        run_stage_with_timeout(_boom, timeout_seconds=5.0)
+
+
+def test_run_stage_with_timeout_abandons_a_wedged_stage() -> None:
+    """A stage still running past the deadline is abandoned in a daemon thread:
+    the call returns timed_out and does not wait for the stage to finish, so a
+    stuck retention pass can no longer freeze the engine loop."""
+    release = _time.monotonic() + 0.5  # far beyond the 0.05s deadline
+
+    def _stuck() -> dict[str, object]:
+        while _time.monotonic() < release:
+            _time.sleep(0.01)
+        return {"status": "ok"}
+
+    started = _time.monotonic()
+    out = run_stage_with_timeout(_stuck, timeout_seconds=0.05, stage="retention")
+    elapsed = _time.monotonic() - started
+
+    # The watchdog fired promptly instead of waiting out the stuck stage.
+    assert out.timed_out is True
+    assert out.skipped is False
+    assert elapsed < 0.5
+
+
+def test_run_stage_with_timeout_skips_while_previous_wedged() -> None:
+    """A stage whose previous run is still wedged (abandoned daemon thread) is
+    skipped rather than spawning another thread, so repeated timeouts cannot
+    pile up background threads. Once the wedge clears, the stage runs again."""
+    import threading
+
+    release = threading.Event()
+
+    def _stuck() -> dict[str, object]:
+        release.wait(timeout=5.0)
+        return {"status": "ok"}
+
+    first = run_stage_with_timeout(_stuck, timeout_seconds=0.02, stage="probe")
+    assert first.timed_out is True  # abandoned, but its thread is still running
+
+    # Second run for the same stage must skip, not spawn a fresh thread.
+    second = run_stage_with_timeout(_stuck, timeout_seconds=0.1, stage="probe")
+    assert second.skipped is True
+    assert second.timed_out is False
+    assert second.result is None
+
+    # A different stage is unaffected.
+    other = run_stage_with_timeout(_stuck, timeout_seconds=0.2, stage="other")
+    assert other.timed_out is True
+
+    # Release the wedge; once the abandoned thread finishes it frees the stage,
+    # so the next run succeeds again.
+    release.set()
+    deadline = _time.monotonic() + 5.0
+    recovered = None
+    while _time.monotonic() < deadline:
+        candidate = run_stage_with_timeout(_stuck, timeout_seconds=0.05, stage="probe")
+        if not candidate.skipped:
+            recovered = candidate
+            break
+        _time.sleep(0.01)
+    assert recovered is not None
+    assert recovered.result == {"status": "ok"}
+    assert recovered.timed_out is False
+
+
+def test_engine_phase_watchdog_timeout_config_defaults() -> None:
+    """The watchdog timeouts are config-backed and share the phase ceiling.
+    Forecast/parity/data-lake default to PHASE_TIMEOUT_SECONDS; retention and
+    the night crawler fleet keep their own (tuned) values."""
+    settings = Settings(_env_file=None)
+    assert settings.retention_timeout_seconds == 600.0
+    assert settings.phase_timeout_seconds == 900.0
+    assert settings.forecast_timeout_seconds == settings.phase_timeout_seconds
+    assert settings.parity_timeout_seconds == settings.phase_timeout_seconds
+    assert settings.data_lake_timeout_seconds == settings.phase_timeout_seconds
+    assert settings.nightcrawler_timeout_seconds == 1800.0
 
 
 def test_retention_first_run_records_totals_and_health(session, tmp_path) -> None:

@@ -5,6 +5,12 @@
 # (serpent-retention.timer) may fire more often than the configured cadence;
 # --check-due exits cleanly and logs when there is nothing to do.
 #
+# If the engine/worker ever wedges in the retention phase (repeated
+# `database is locked`, then logs go silent), diagnose it via the runbook:
+#   docs/runbook.md  § "Retention-phase wedge"
+# Recent passes are surfaced in Feed Health; abandoned phases show a red
+# `lake` alarm on `GET /watchdog/alarms`.
+#
 # Adjust the paths to your checkout and venv:
 #   WorkingDirectory=/opt/serpent
 #   ExecStart=/bin/sh -c '/opt/serpent/.venv/bin/python -m ops.retention --check-due && exec /opt/serpent/.venv/bin/python -m ops.retention --once || rc=$$?; if [ "$${rc:-0}" -eq 1 ]; then echo "retention pass not due; exiting cleanly"; exit 0; fi; exit "$${rc:-0}"'

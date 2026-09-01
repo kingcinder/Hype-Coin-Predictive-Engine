@@ -741,6 +741,25 @@ def latest_health(session: Session, *, limit: int = 25) -> list[models.SystemHea
     return list(session.scalars(stmt))
 
 
+def latest_watchdog_timeouts(session: Session, *, limit: int = 20) -> list[models.SystemHealth]:
+    """Recent engine phase-watchdog alarms (most recent first).
+
+    These are the ``red`` rows recorded by ``engine/run.py`` when a blocking
+    phase (retention / forecast / parity / nightcrawler / data-lake) exceeded
+    its watchdog deadline and was abandoned. Identified by the message shape
+    ``*watchdog timeout; pass abandoned, engine loop continuing``. Surfaced in
+    Feed Health and the Archive & Retention view.
+    """
+    return list(
+        session.scalars(
+            select(models.SystemHealth)
+            .where(models.SystemHealth.message.like("%watchdog timeout; pass abandoned%"))
+            .order_by(desc(models.SystemHealth.ts))
+            .limit(limit)
+        )
+    )
+
+
 def assets_for_ids(session: Session, asset_ids: Iterable[int]) -> dict[int, models.Asset]:
     ids = list(asset_ids)
     if not ids:

@@ -535,6 +535,53 @@ def test_retention_growth_api_projects_disk_full_horizon(session, monkeypatch) -
         get_settings.cache_clear()
 
 
+def test_watchdog_alarms_endpoint(session) -> None:
+    """GET /watchdog/alarms returns recent watchdog-timeout rows (red, ranked
+    newest first) and ignores ordinary phase health rows; empty with none."""
+    from storage.repository import latest_health, record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        # No watchdog alarms yet.
+        assert client.get("/watchdog/alarms").json() == []
+        record_health(
+            session,
+            component="lake",
+            state="red",
+            message=(
+                "retention stage exceeded 600s watchdog timeout; pass abandoned, "
+                "engine loop continuing"
+            ),
+            error_count=1,
+            ts=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+        )
+        record_health(
+            session,
+            component="lake",
+            state="ok",
+            message="partitions=0 rows=0",
+            ts=datetime(2026, 5, 1, 0, 1, tzinfo=UTC),
+        )
+        session.commit()
+
+        body = client.get("/watchdog/alarms").json()
+        assert len(body) == 1
+        assert body[0]["component"] == "lake"
+        assert body[0]["state"] == "red"
+        assert "watchdog timeout" in body[0]["message"]
+        # Ordinary phase rows are still present in the general feed-health list
+        # (latest per component), and the watchdog alarm is a separate signal.
+        latest_by_component = {c.component: c for c in latest_health(session)}
+        assert latest_by_component["lake"].state == "ok"  # the ok row is the latest lake row
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+
 def test_parity_latest_endpoint(session) -> None:
     """GET /parity/latest returns the last parity run's state, mismatch count,
     decision window, and compared assets from its health row; 404 before any run."""

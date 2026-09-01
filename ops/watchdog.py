@@ -13,7 +13,9 @@ Called once per scan iteration from the main engine loop.
 from __future__ import annotations
 
 import os
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -178,6 +180,103 @@ def on_scan_failure(state: WatchdogState) -> None:
     """Increment failure counter after a failed scan."""
     state.consecutive_scan_failures += 1
     state.total_scan_failures += 1
+
+
+@dataclass
+class StageOutcome:
+    """Result of a watchdog-guarded stage run.
+
+    Exactly one of the three completion flags is set: ``result`` (success),
+    ``timed_out`` (abandoned after the deadline), or ``skipped`` (a previous
+    wedged run of the same stage is still in flight).
+    """
+
+    result: dict[str, object] | None = None
+    timed_out: bool = False
+    skipped: bool = False
+
+
+# Per-stage watchdog state: keeps at most one in-flight daemon thread per phase.
+# On timeout a wedged run is abandoned but stays tracked, so the next iteration
+# for that stage sees it still running and *skips* instead of piling up threads.
+_in_flight: dict[str, threading.Thread] = {}
+_in_flight_lock = threading.Lock()
+
+
+def _register_in_flight(stage: str, thread: threading.Thread) -> None:
+    with _in_flight_lock:
+        _in_flight[stage] = thread
+
+
+def _clear_in_flight(stage: str, thread: threading.Thread) -> None:
+    with _in_flight_lock:
+        if _in_flight.get(stage) is thread:
+            _in_flight.pop(stage, None)
+
+
+def _in_flight_alive(stage: str) -> bool:
+    with _in_flight_lock:
+        thread = _in_flight.get(stage)
+        return thread is not None and thread.is_alive()
+
+
+def run_stage_with_timeout(
+    fn: Callable[[], dict[str, object]],
+    *,
+    timeout_seconds: float,
+    stage: str = "phase",
+) -> StageOutcome:
+    """Run a blocking engine stage, guarding the loop against a wedge.
+
+    Phases like retention compaction run synchronously in the engine's main
+    thread, so if one stops making progress — e.g. ``database is locked``
+    contention, or a hung object-store/DuckDB call — it freezes the whole
+    loop: no further scans and, worse, the operational watchdog itself (WAL
+    checkpoint / VACUUM / failure tracking) never gets to run. To keep a
+    single bad stage from wedging the engine, this runs ``fn`` in a daemon
+    thread and enforces ``timeout_seconds``:
+
+    - completes in time -> ``StageOutcome(result=...)`` and re-raises ``fn``'s
+      exception if it failed;
+    - exceeds the deadline -> the callable is abandoned in the background
+      (daemon, so it can never block shutdown) and ``StageOutcome(timed_out=True)``
+      is returned so the caller can record a health alarm and continue the
+      loop. The abandoned thread stays tracked as in-flight for its stage.
+    - a previous wedged run of the *same* stage is still in flight -> skips,
+      ``StageOutcome(skipped=True)``, so repeated timeouts cannot pile up
+      background daemon threads.
+    """
+    if _in_flight_alive(stage):
+        log.warning("stage_watchdog_skipped_inflight", stage=stage)
+        return StageOutcome(skipped=True)
+
+    holder: dict[str, object] = {"done": False}
+
+    def _target() -> None:
+        try:
+            holder["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - forwarded to the caller.
+            holder["error"] = exc
+        finally:
+            holder["done"] = True
+            # When a wedged run finally finishes, free the stage so a future
+            # iteration can run it again.
+            _clear_in_flight(stage, thread)
+
+    thread = threading.Thread(target=_target, name=f"serpent-{stage}-watchdog", daemon=True)
+    _register_in_flight(stage, thread)
+    thread.start()
+    thread.join(timeout_seconds)
+    if not holder["done"]:
+        # Timed out: the callable keeps running in the daemon thread and stays
+        # tracked in-flight, so the next call skips instead of spawning another.
+        return StageOutcome(timed_out=True)
+    error = holder.get("error")
+    if error is not None:
+        if isinstance(error, BaseException):
+            raise error
+        raise RuntimeError(str(error))
+    return StageOutcome(result=holder["result"])  # type: ignore[arg-type]
 
 
 def run_watchdog(

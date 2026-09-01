@@ -6,6 +6,10 @@
 # If you change RETENTION_CADENCE_HOURS in .env, adjust OnCalendar here to
 # match. Persistent=true catches up after the machine was off.
 #
+# A retention pass that stalls is abandoned by the phase watchdog after
+# RETENTION_TIMEOUT_SECONDS (the loop keeps going); diagnosis: docs/runbook.md
+# § "Retention-phase wedge".
+#
 # Other cadences:
 #   every 6 hours:  OnCalendar=*-*-* 00/6:00:00
 #   weekly:         OnCalendar=weekly

@@ -244,6 +244,13 @@ output, `rpc_pool_health` reads persisted snapshots instead of live process
 memory, and both bootstrap and dense labels reject price data observed after
 their generation time.
 
+## Operational Runbook
+
+Field notes for diagnosing and recovering from incidents in the running engine
+live in `docs/runbook.md` — starting with the `retention`-stage wedge (two
+writers on one SQLite file freezes the loop) and the phase-watchdog recovery
+that now guards it.
+
 ## GUI Views
 
 | View | Description |

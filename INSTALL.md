@@ -1,8 +1,34 @@
 # Installation
 
+Two ways to install: a **desktop (local) install** that needs no root and is
+ideal for running the engine from a repo checkout on your own machine, and a
+**system install** that registers Serpent Circle as a systemd service on Ubuntu.
+
+## Desktop Install (no root)
+
+From a repo checkout:
+
+```bash
+bash packaging/install-local.sh
+# or: make install-local
+```
+
+The installer:
+- Creates the project virtualenv (`.venv`) and installs dependencies
+- Bootstraps the SQLite database (skipped if already present)
+- Installs a **Serpent Circle Engine** desktop shortcut that starts the whole
+  stack (worker + API + GUI) in a terminal and auto-opens the dashboard at
+  http://localhost:8501 once the engine is healthy
+
+After install, double-click **Serpent Circle Engine** on your desktop (or run
+`./start-engine.sh`). The engine also runs from a plain terminal with
+`python -m engine`.
+
+## System Install (Ubuntu service)
+
 One command installs Serpent Circle as a system service on Ubuntu.
 
-## Quick Install
+### Quick Install
 
 ```bash
 # Clone and install
@@ -127,6 +153,11 @@ sudo apt install python3.12 python3.12-venv python3.12-dev git
 
 ## Troubleshooting
 
+For incidents in a running engine — e.g. the loop wedging in the `retention`
+phase (`database is locked` in every phase followed by long silence), the
+single-writer lock guard, and the phase-watchdog recovery — see the
+**operational runbook**: [`docs/runbook.md`](docs/runbook.md).
+
 **Service won't start:**
 ```bash
 sudo serpent status          # check service state
@@ -140,6 +171,10 @@ sudo lsof -i :8000  # find what's using port 8000
 sudo lsof -i :8501  # find what's using port 8501
 sudo serpent stop    # stop the service
 ```
+The engine now refuses to boot when port 8000 is already bound (it likely
+means a second engine is running against the same DB and would wedge the loop
+as a second writer). See the retention-wedge diagnosis in
+[`docs/runbook.md`](docs/runbook.md).
 
 **Database issues:**
 ```bash
@@ -151,6 +186,9 @@ Base.metadata.create_all(bind=engine)
 print('Schema OK')
 "
 ```
+If the worker logs `database is locked` repeatedly or falls silent for hours
+(stuck in a phase), that is the retention/phase wedge — the runbook
+[`docs/runbook.md`](docs/runbook.md) has the diagnosis and recovery steps.
 
 **Reinstall from scratch:**
 ```bash

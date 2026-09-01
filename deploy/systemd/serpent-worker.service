@@ -1,3 +1,10 @@
+# Serpent Circle — ingestion worker (loop).
+#
+# The worker loop runs the post-scan phases (forecast, retention, parity,
+# night-crawler, data-lake) under watchdog timeouts; a wedged phase is
+# abandoned and the loop keeps going. Diagnosis for contention/wedge incidents
+# lives in the runbook: docs/runbook.md § "Retention-phase wedge".
+
 [Unit]
 Description=Serpent Circle ingestion worker
 After=network-online.target

@@ -74,7 +74,12 @@ from ops.parity import latest_parity
 from risk_engine.rules import assess_risk, mask_unreliable_forecast
 from storage import models
 from storage.database import get_session
-from storage.repository import latest_health, latest_scan_result, latest_scores
+from storage.repository import (
+    latest_health,
+    latest_scan_result,
+    latest_scores,
+    latest_watchdog_timeouts,
+)
 
 log = get_logger(__name__)
 
@@ -157,6 +162,33 @@ def health(session: DbSession) -> HealthResponse:
         else "degraded"
     )
     return HealthResponse(status=status, database=database, components=components)
+
+
+@app.get("/watchdog/alarms", response_model=list[HealthComponent])
+def watchdog_alarms(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[HealthComponent]:
+    """Recent engine phase-watchdog alarms (most recent first).
+
+    These red ``system_health`` rows are recorded when a blocking engine phase
+    (retention / forecast / parity / nightcrawler / data-lake) exceeded its
+    watchdog deadline and was abandoned in the background. Surfaced in the
+    Feed Health and Archive & Retention views so a wedged phase is immediately
+    visible to an operator; empty when no phase has ever timed out.
+    """
+    return [
+        HealthComponent(
+            component=row.component,
+            state=row.state,
+            ts=row.ts,
+            message=row.message,
+            freshness_sec=row.freshness_sec,
+            lag_sec=row.lag_sec,
+            error_count=row.error_count,
+        )
+        for row in latest_watchdog_timeouts(session, limit=limit)
+    ]
 
 
 @app.get("/parity/latest", response_model=ParityLatestResponse)
@@ -1933,9 +1965,28 @@ def llm_health() -> dict:
     }
 
 
+# In-process TTL cache for on-demand LLM predictions, keyed by asset_id.
+# A fresh Ollama call costs ~2s per token, and the GUI reruns frequently, so
+# repeated requests within the TTL window are served from memory instead of
+# re-generating. Never persists across restarts; see ``llm_predict_cache_ttl_seconds``.
+_LLM_PREDICT_CACHE: dict[int, tuple[float, dict]] = {}
+
+
 @app.post("/llm/predict/{asset_id}")
 def llm_predict_token(asset_id: int, session: DbSession) -> dict:
-    """Get an LLM-enhanced prediction for a single token."""
+    """Get an LLM-enhanced prediction for a single token.
+
+    Results are cached in-process for ``llm_predict_cache_ttl_seconds``;
+    the response includes a ``cached`` flag so callers can tell whether the
+    text was served from memory or freshly generated.
+    """
+    now = time.time()
+    hit = _LLM_PREDICT_CACHE.get(asset_id)
+    if hit is not None and (now - hit[0]) < get_settings().llm_predict_cache_ttl_seconds:
+        payload = dict(hit[1])
+        payload["cached"] = True
+        return payload
+
     from llm.engine import llm_engine
 
     asset = session.get(models.Asset, asset_id)
@@ -1971,7 +2022,7 @@ def llm_predict_token(asset_id: int, session: DbSession) -> dict:
         rule_risk=score.risk if score else 25.0,
         rule_confidence=score.confidence if score else 50.0,
     )
-    return {
+    payload = {
         "asset_id": pred.asset_id,
         "symbol": pred.symbol,
         "narrative_summary": pred.narrative_summary,
@@ -1983,6 +2034,14 @@ def llm_predict_token(asset_id: int, session: DbSession) -> dict:
         "llm_model": pred.llm_model,
         "latency_ms": pred.latency_ms,
     }
+    # Only cache successful predictions: a failed call returns empty text
+    # with neutral deltas and must stay retryable.
+    if pred.narrative_summary or pred.risk_assessment:
+        payload["cached"] = False
+        _LLM_PREDICT_CACHE[asset_id] = (now, payload)
+    else:
+        payload["cached"] = False
+    return payload
 
 
 @app.get("/llm/narrative/{asset_id}")
