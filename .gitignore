@@ -31,6 +31,9 @@ engine.log
 *.log
 models/
 reports/
+
+# Serpent Circle renovation chain workspace (per-run scratch; never commit)
+.serpent-circle/
 # Freebuff app metadata (its local DB, run docs, logs) — never commit
 .freebuff/
 coverage/history.json.new

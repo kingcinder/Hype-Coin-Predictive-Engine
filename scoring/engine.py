@@ -19,6 +19,7 @@ from scoring.formulas import ScoreResult, clamp, compute_scores
 from scoring.llm_calibration import llm_calibrator
 from scoring.llm_ensemble import apply_llm_adjustments
 from storage import models
+from storage.repository import assets_for_ids
 
 log = get_logger(__name__)
 
@@ -178,8 +179,12 @@ class ScoringEngine:
 
                 llm_tokens = []
                 score_by_asset: dict[int, models.Score] = {s.asset_id: s for s in scores}
+                # Load the assets once (batched) instead of session.get per
+                # scored asset: the scan already built features from these
+                # rows, so one IN() query serves the whole LLM pass.
+                assets_by_id = assets_for_ids(session, list(feature_map))
                 for asset_id in feature_map:
-                    asset = session.get(models.Asset, asset_id)
+                    asset = assets_by_id.get(asset_id)
                     if not asset:
                         continue
                     raw = {name: feature.value for name, feature in feature_map[asset_id].items()}
@@ -346,11 +351,25 @@ class ScoringEngine:
             liq_by_asset[row.base_asset_id] = row.reserve_usd
 
         updates: list[PriceUpdate] = []
+        # Batch-load the assets (and their chains) instead of session.get per
+        # scored asset: the same IN()-query idiom as the lake path's batching.
+        assets_by_id = assets_for_ids(session, asset_ids)
+        chain_ids = {
+            asset.chain_id for asset in assets_by_id.values() if asset.chain_id is not None
+        }
+        chains_by_id: dict[int, models.Chain] = {}
+        if chain_ids:
+            chains_by_id = {
+                chain.id: chain
+                for chain in session.scalars(
+                    select(models.Chain).where(models.Chain.id.in_(chain_ids))
+                ).all()
+            }
         for asset_id in asset_ids:
-            asset = session.get(models.Asset, asset_id)
+            asset = assets_by_id.get(asset_id)
             if not asset:
                 continue
-            chain = session.get(models.Chain, asset.chain_id)
+            chain = chains_by_id.get(asset.chain_id) if asset.chain_id else None
             price_vol = price_by_asset.get(asset_id)
             updates.append(
                 PriceUpdate(

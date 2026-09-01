@@ -22,6 +22,25 @@ The MVP is a modular monorepo with replaceable subsystems and a single Python ru
 - `ui` owns the operator-facing research terminal.
 - `backtest` owns replay-safe historical scans and metrics.
 
+## Read-path batching
+
+The score scan is the engine's hot read path: every iteration builds features
+for every known asset and scores each. Both read paths batch by design —
+invariant data is loaded once per scan, never per asset:
+
+- The **SQL path** (`features/factory.py`, `scoring/engine.py`) loads the
+  source id→name map once per `persist_for_assets` scan and threads it through
+  every per-asset build (velocity features no longer re-scan the whole
+  `sources` table per asset), and `_build_price_updates` / the LLM pass load
+  `Asset`/`Chain` rows with `assets_for_ids` + one `IN` query instead of
+  `session.get` per asset.
+- The **lake path** (`features/lake.py`) already reads the whole asset batch
+  from the Parquet lake in one DuckDB pass and caches reconstructions keyed by
+  `(store, asset, hour)`.
+
+Both paths feed the identical shared math (`compute_market_block`), so the
+feature values are path-independent by construction.
+
 ## Data Flow
 
 1. Ingestion fetches source data and writes raw evidence plus normalized rows.

@@ -94,6 +94,20 @@ def _feature(
     )
 
 
+def _load_source_names(session: Session) -> dict[int, str]:
+    """Load the source id→name map in one query.
+
+    The velocity features filter mentions by source name on every asset and
+    the mapping is invariant within a scan, so the per-asset build path loads
+    it lazily on first use and ``persist_for_assets`` loads it once and passes
+    it down — turning O(assets) full-table scans of ``sources`` into one.
+    """
+    return {
+        row.id: str(row.name)
+        for row in session.execute(select(models.Source.id, models.Source.name)).all()
+    }
+
+
 def compute_market_block(
     *,
     asset: Any,
@@ -229,7 +243,12 @@ def _volatility(market_rows: Sequence[Any]) -> float | None:
 
 class FeatureFactory:
     def build_for_asset(
-        self, session: Session, asset: models.Asset, decision_ts: datetime
+        self,
+        session: Session,
+        asset: models.Asset,
+        decision_ts: datetime,
+        *,
+        source_names: dict[int, str] | None = None,
     ) -> list[FeatureValue]:
         decision_ts = ensure_utc(decision_ts)
         pairs = session.scalars(
@@ -286,7 +305,7 @@ class FeatureFactory:
             session, asset, decision_ts
         )
         kol_velocity, star_velocity, download_velocity = self._velocity_features(
-            session, asset, decision_ts
+            session, asset, decision_ts, source_names=source_names
         )
         rpc_pool_health = self._rpc_pool_health(session, asset, decision_ts)
         collapse_probability = self._forecast_probability(session, asset.id, decision_ts)
@@ -412,8 +431,12 @@ class FeatureFactory:
             stmt = stmt.where(models.Asset.id.in_(asset_ids))
         assets = session.scalars(stmt).all()
         output: dict[int, dict[str, FeatureValue]] = {}
+        # The source id→name map is invariant within a scan: load it once and
+        # share it across every per-asset build instead of reloading the whole
+        # ``sources`` table inside each asset's velocity features.
+        source_names = _load_source_names(session) if assets else {}
         for asset in assets:
-            values = self.build_for_asset(session, asset, decision_ts)
+            values = self.build_for_asset(session, asset, decision_ts, source_names=source_names)
             output[asset.id] = {value.name: value for value in values}
             for value in values:
                 upsert_feature(
@@ -714,7 +737,12 @@ class FeatureFactory:
         return growth, channel_diversity, prelaunch_velocity
 
     def _velocity_features(
-        self, session: Session, asset: models.Asset, decision_ts: datetime
+        self,
+        session: Session,
+        asset: models.Asset,
+        decision_ts: datetime,
+        *,
+        source_names: dict[int, str] | None = None,
     ) -> tuple[float | None, float | None, float | None]:
         """Blueprint §6 dev-activity proxies from persisted crawler metrics.
 
@@ -739,10 +767,9 @@ class FeatureFactory:
                 models.SocialMention.ts > decision_ts - timedelta(days=14),
             )
         ).all()
-        source_names = {
-            row.id: str(row.name)
-            for row in session.execute(select(models.Source.id, models.Source.name)).all()
-        }
+        if source_names is None:
+            source_names = _load_source_names(session)
+        source_ids_by_name = {name: source_id for source_id, name in source_names.items()}
 
         # --- kol_velocity: distinct KOL channels in the trailing 24h ----------
         kol_keys: set[str] = set()
@@ -762,8 +789,8 @@ class FeatureFactory:
 
         # --- star / download velocity: cumulative-metric delta per repo -------
         def _cumulative_rate(source_name: str, metric_key: str) -> float | None:
-            source = session.scalar(select(models.Source).where(models.Source.name == source_name))
-            if source is None:
+            source_id = source_ids_by_name.get(source_name)
+            if source_id is None:
                 return None
             relevant_urls = {
                 str(mention.raw_ref)
@@ -774,7 +801,7 @@ class FeatureFactory:
                 return None
             evidence = session.scalars(
                 select(models.RawEvidenceItem).where(
-                    models.RawEvidenceItem.source_id == source.id,
+                    models.RawEvidenceItem.source_id == source_id,
                     models.RawEvidenceItem.observed_at <= decision_ts,
                     models.RawEvidenceItem.observed_at > decision_ts - timedelta(days=14),
                 )
