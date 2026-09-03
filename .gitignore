@@ -32,6 +32,11 @@ engine.log
 models/
 reports/
 
+# Pre-rescore DB backups (never commit)
+serpent.db.pre-rescore*
+serpent.db.pre-rescore*-wal
+serpent.db.pre-rescore*-shm
+
 # Serpent Circle renovation chain workspace (per-run scratch; never commit)
 .serpent-circle/
 # Freebuff app metadata (its local DB, run docs, logs) — never commit

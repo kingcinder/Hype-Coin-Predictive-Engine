@@ -16,7 +16,13 @@ from ops.retention import (
     retention_due,
     run_retention,
 )
-from ops.watchdog import run_stage_with_timeout
+from ops.watchdog import (
+    note_phase_skip,
+    reset_phase_skip,
+    reset_phase_skip_tracking,
+    run_stage_with_timeout,
+    snapshot_phase_state,
+)
 from storage import models
 from storage.repository import (
     get_or_create_chain,
@@ -181,6 +187,61 @@ def test_run_stage_with_timeout_skips_while_previous_wedged() -> None:
     assert recovered.timed_out is False
 
 
+def test_note_phase_skip_counts_then_realerts_and_resets() -> None:
+    """``note_phase_skip`` counts consecutive skips per stage, returns True (and
+    resets) once the threshold is reached so a long wedge re-alerts, and counts
+    each stage independently."""
+    reset_phase_skip_tracking()
+    try:
+        # Two skips below a threshold of 3 -> False; the third -> True (reset).
+        assert note_phase_skip("retention", 3) is False
+        assert note_phase_skip("retention", 3) is False
+        assert note_phase_skip("retention", 3) is True
+        # After reset the cycle repeats.
+        assert note_phase_skip("retention", 3) is False
+        # Stages are independent.
+        assert note_phase_skip("forecast", 3) is False
+        # A completed run clears the counter: next skip starts over.
+        reset_phase_skip("forecast")
+        assert note_phase_skip("forecast", 3) is False
+        # Threshold <= 0 disables re-alerting entirely (never counts, never fires).
+        assert note_phase_skip("parity", 0) is False
+        assert note_phase_skip("parity", 0) is False
+    finally:
+        reset_phase_skip_tracking()
+
+
+def test_snapshot_phase_state_reflects_wedged_and_skips() -> None:
+    """``snapshot_phase_state`` reports which phase is currently wedged (its
+    abandoned watchdog thread is still in flight) and how many consecutive
+    iterations have been skipped, so the SSE feed / UI can surface the stuck
+    phase live."""
+    import threading
+
+    release = threading.Event()
+
+    def _stuck() -> dict[str, object]:
+        release.wait(timeout=5.0)
+        return {"status": "ok"}
+
+    reset_phase_skip_tracking()
+    try:
+        # Wedge a stage: the run exceeds its deadline and is abandoned, but its
+        # thread stays in flight.
+        out = run_stage_with_timeout(_stuck, timeout_seconds=0.02, stage="lake_compactor")
+        assert out.timed_out is True
+        note_phase_skip("lake_compactor", 20)
+
+        snap = {p["stage"]: p for p in snapshot_phase_state()}
+        assert snap["lake_compactor"]["in_flight"] is True
+        assert snap["lake_compactor"]["consecutive_skips"] == 1
+        # A stage that never ran is absent from the snapshot.
+        assert "forecast" not in snap
+    finally:
+        release.set()  # let the wedged thread finish so it can't linger
+        reset_phase_skip_tracking()
+
+
 def test_engine_phase_watchdog_timeout_config_defaults() -> None:
     """The watchdog timeouts are config-backed and share the phase ceiling.
     Forecast/parity/data-lake default to PHASE_TIMEOUT_SECONDS; retention and
@@ -192,6 +253,8 @@ def test_engine_phase_watchdog_timeout_config_defaults() -> None:
     assert settings.parity_timeout_seconds == settings.phase_timeout_seconds
     assert settings.data_lake_timeout_seconds == settings.phase_timeout_seconds
     assert settings.nightcrawler_timeout_seconds == 1800.0
+    # Repeatedly-stuck phases re-alert after this many consecutive skips.
+    assert settings.skip_alert_cycles == 20
 
 
 def test_retention_first_run_records_totals_and_health(session, tmp_path) -> None:

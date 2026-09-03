@@ -11,11 +11,20 @@ Usage::
 
     python scripts/backfill_history.py --days 90 --provider coingecko
     python scripts/backfill_history.py --days 90 --provider defillama --dry-run
+
+Hermetic runs (integration tests / dry migrations):
+
+    # "Settings" resolves SERPENT_DB_PATH/DATABASE_URL, so the storage layer
+    # binds the throwaway DB; COINGECKO_BASE_URL / DEFILLAMA_BASE_URL point the
+    # HTTP client at a local mock so the real __main__ never hits the network.
+    SERPENT_DB_PATH=/tmp/backfill.db COINGECKO_BASE_URL=http://127.0.0.1:8899 \
+        python scripts/backfill_history.py --days 5 --provider coingecko
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -26,16 +35,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from common.logging import get_logger
 from storage import models
-from storage.database import SessionLocal
+from storage.database import session_scope
 from storage.repository import get_or_create_source, insert_market_snapshot_once
 
 log = get_logger(__name__)
 
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
-DEFILLAMA_COINS_BASE = "https://coins.llama.fi"
+# Provider API bases — env-overridable so a test-driving subprocess can point
+# the client at a local mock (same seam philosophy as SERPENT_DB_PATH).
+COINGECKO_BASE = os.environ.get("COINGECKO_BASE_URL") or "https://api.coingecko.com/api/v3"
+DEFILLAMA_COINS_BASE = os.environ.get("DEFILLAMA_BASE_URL") or "https://coins.llama.fi"
 
 # Chain slug -> CoinGecko platform id / DeFiLlama chain name
 PLATFORM_BY_CHAIN = {
@@ -125,8 +137,29 @@ def _coingecko_history(
     return out
 
 
-def backfill_coingecko(session, *, days: int = 90, dry_run: bool = False) -> dict[str, int | bool]:
-    """Backfill daily closes from CoinGecko for all assets with pairs."""
+def backfill_coingecko(
+    *,
+    days: int = 90,
+    dry_run: bool = False,
+    session: Session | None = None,
+) -> dict[str, int | bool]:
+    """Backfill daily closes from CoinGecko for all assets with pairs.
+
+    ``session`` is injectable for tests; when None (the CLI path) this call
+    opens and owns its own ``session_scope()`` cycle, mirroring
+    ``scripts/rescore.py``'s seam. The worker body lives in
+    ``_backfill_coingecko_in_session`` and never closes a caller's session.
+    """
+    if session is not None:
+        return _backfill_coingecko_in_session(session, days=days, dry_run=dry_run)
+    with session_scope() as active:
+        return _backfill_coingecko_in_session(active, days=days, dry_run=dry_run)
+
+
+def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; readable > clever
+    session: Session, *, days: int, dry_run: bool
+) -> dict[str, int | bool]:
+    """The CoinGecko backfill body against a caller-owned session."""
     client = httpx.Client(
         headers={"User-Agent": "serpent-backfill/1.0"}, follow_redirects=True, timeout=30.0
     )
@@ -162,6 +195,8 @@ def backfill_coingecko(session, *, days: int = 90, dry_run: bool = False) -> dic
                     ts=ts,
                     observed_at=ts,
                     price_usd=price,
+                    # Price history carries no volume; NULL is the honest value.
+                    volume_usd=None,
                 )
             inserted += 1
         if history:
@@ -209,9 +244,30 @@ def _defillama_history(
     return per_coin
 
 
-def backfill_defillama(session, *, days: int = 90, dry_run: bool = False) -> dict[str, int | bool]:
+def backfill_defillama(
+    *,
+    days: int = 90,
+    dry_run: bool = False,
+    session: Session | None = None,
+) -> dict[str, int | bool]:
     """Backfill daily closes from DeFiLlama (chain:address refs) — good for
-    EVM/Solana addresses CoinGecko may not index."""
+    EVM/Solana addresses CoinGecko may not index.
+
+    ``session`` is injectable for tests; when None (the CLI path) this call
+    opens and owns its own ``session_scope()`` cycle, mirroring
+    ``scripts/rescore.py``'s seam. The worker body lives in
+    ``_backfill_defillama_in_session`` and never closes a caller's session.
+    """
+    if session is not None:
+        return _backfill_defillama_in_session(session, days=days, dry_run=dry_run)
+    with session_scope() as active:
+        return _backfill_defillama_in_session(active, days=days, dry_run=dry_run)
+
+
+def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; readable > clever
+    session: Session, *, days: int, dry_run: bool
+) -> dict[str, int | bool]:
+    """The DeFiLlama backfill body against a caller-owned session."""
     client = httpx.Client(
         headers={"User-Agent": "serpent-backfill/1.0"}, follow_redirects=True, timeout=30.0
     )
@@ -244,6 +300,8 @@ def backfill_defillama(session, *, days: int = 90, dry_run: bool = False) -> dic
                     ts=ts,
                     observed_at=ts,
                     price_usd=price,
+                    # Price history carries no volume; NULL is the honest value.
+                    volume_usd=None,
                 )
             inserted += 1
         if not dry_run:
@@ -272,13 +330,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="count inserts without writing")
     args = parser.parse_args(argv)
 
-    with SessionLocal() as session:
-        if args.provider == "coingecko":
-            result: dict[str, Any] = backfill_coingecko(
-                session, days=args.days, dry_run=args.dry_run
-            )
-        else:
-            result = backfill_defillama(session, days=args.days, dry_run=args.dry_run)
+    # The CLI path deliberately passes NO session: the worker opens and owns
+    # its own session_scope() cycle (the injectable seam stays unreachable
+    # from argv, so a test-driving subprocess can never sneak a session in).
+    if args.provider == "coingecko":
+        result: dict[str, Any] = backfill_coingecko(days=args.days, dry_run=args.dry_run)
+    else:
+        result = backfill_defillama(days=args.days, dry_run=args.dry_run)
     print(result)
     return 0
 

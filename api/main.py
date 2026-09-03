@@ -54,6 +54,8 @@ from api.schemas import (
     RpcPoolEndpointRow,
     RpcPoolProbeRow,
     ScanResultRow,
+    ScoreDriftLatestResponse,
+    ScoreDriftRunRow,
     ScorerAccuracyRow,
     SeedResponse,
     SimilarSetupRow,
@@ -71,6 +73,7 @@ from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
 from ops.parity import latest_parity
+from ops.score_drift import latest_score_drift
 from risk_engine.rules import assess_risk, mask_unreliable_forecast
 from storage import models
 from storage.database import get_session
@@ -203,6 +206,56 @@ def parity_latest(session: DbSession) -> ParityLatestResponse | JSONResponse:
     if latest is None:
         return JSONResponse(status_code=404, content={"detail": "no parity run yet"})
     return ParityLatestResponse(**latest)
+
+
+@app.get("/score-drift/latest", response_model=ScoreDriftLatestResponse)
+def score_drift_latest(session: DbSession) -> ScoreDriftLatestResponse | JSONResponse:
+    """Structured summary of the most recent score-distribution drift probe.
+
+    Reads the latest ``component:score_drift`` health row, so the GUI can show
+    whether the persisted risk distribution still matches the live formula
+    without re-running the probe. 404 when no probe has run yet.
+    """
+    latest = latest_score_drift(session)
+    if latest is None:
+        return JSONResponse(status_code=404, content={"detail": "no score-drift probe yet"})
+    return ScoreDriftLatestResponse(**latest)
+
+
+@app.get("/score-drift/history", response_model=list[ScoreDriftRunRow])
+def score_drift_history(
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[ScoreDriftRunRow]:
+    """Drift-probe time series, most recent first, for the trend chart.
+
+    Every comparable probe appends a ``score_drift_runs`` row — the pure-numpy
+    KS D/p, the persisted-vs-live distinct-value ratio (the quantization
+    signal), and the mean per-token |delta| — so divergence is visible growing
+    before it ever crosses red; ``/score-drift/latest`` is just the newest
+    point. Rows are pruned to ``SCORE_DRIFT_RUNS_KEEP`` by the probe itself.
+    """
+    from ops.score_drift import recent_score_drift_runs
+
+    return [
+        ScoreDriftRunRow(
+            id=row.id,
+            run_ts=row.run_ts,
+            state=row.state,
+            sampled=row.sampled,
+            compared=row.compared,
+            ks_d=row.ks_d,
+            ks_p=row.ks_p,
+            distinct_ratio=row.distinct_ratio,
+            mean_abs_delta=row.mean_abs_delta,
+            distinct_persisted=row.distinct_persisted,
+            distinct_live=row.distinct_live,
+            no_features=row.no_features,
+            errors=row.errors,
+            message=row.message,
+        )
+        for row in recent_score_drift_runs(session, limit=limit)
+    ]
 
 
 @app.get("/parity/mismatches", response_model=list[ParityMismatchRow])

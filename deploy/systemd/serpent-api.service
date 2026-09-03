@@ -9,6 +9,10 @@ WorkingDirectory=/opt/serpent
 EnvironmentFile=-/opt/serpent/.env
 User=serpent
 Group=serpent
+# Apply the alembic chain before serving so endpoints that read migration-owned
+# tables (e.g. /score-drift/history on 0020's score_drift_runs) work right
+# after an upgrade, even when the API boots before the worker. Idempotent.
+ExecStartPre=/opt/serpent/.venv/bin/alembic -c storage/alembic.ini upgrade head
 ExecStart=/opt/serpent/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=10

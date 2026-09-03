@@ -4,6 +4,11 @@
 # night-crawler, data-lake) under watchdog timeouts; a wedged phase is
 # abandoned and the loop keeps going. Diagnosis for contention/wedge incidents
 # lives in the runbook: docs/runbook.md § "Retention-phase wedge".
+#
+# The worker also self-migrates on boot (storage.database.run_migrations, so
+# e.g. 0020's score_drift_runs exists before the first drift probe), and the
+# ExecStartPre below applies the same chain at the unit level as a belt-and-
+# suspenders for restarts against an upgraded code tree.
 
 [Unit]
 Description=Serpent Circle ingestion worker
@@ -16,6 +21,7 @@ WorkingDirectory=/opt/serpent
 EnvironmentFile=-/opt/serpent/.env
 User=serpent
 Group=serpent
+ExecStartPre=/opt/serpent/.venv/bin/alembic -c storage/alembic.ini upgrade head
 ExecStart=/opt/serpent/.venv/bin/python -m ingestion.worker --loop
 Restart=on-failure
 RestartSec=15

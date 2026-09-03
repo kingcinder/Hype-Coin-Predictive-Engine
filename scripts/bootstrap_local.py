@@ -19,7 +19,7 @@ os.environ.setdefault("ENV", "local-single")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.config import get_settings
-from storage.database import Base, SessionLocal, engine
+from storage.database import Base, run_migrations, session_scope
 from storage.seed import seed_reference_data
 
 ARCHIVE_HELP = """\
@@ -51,9 +51,18 @@ def main() -> None:
     archive_dir = Path(settings.archive_local_dir)
     archive_dir.mkdir(parents=True, exist_ok=True)
 
-    Base.metadata.create_all(bind=engine)
-    seed_reference_data()
-    with SessionLocal() as session:
+    # Migrations first, then create_all as a safety net: the alembic chain
+    # builds the schema (and stamps alembic_version) so a worker-only deploy
+    # that never boots the combined engine still has every table — e.g. 0020's
+    # score_drift_runs before the first drift probe. Route through the
+    # storage-layer session pattern like the migration scripts do: the CLI
+    # path owns its own session_scope() cycle, instead of binding the
+    # configured DB at module import (which also defeats the SERPENT_DB_PATH
+    # override for subprocess-driven bootstrap runs).
+    run_migrations()
+    with session_scope() as session:
+        Base.metadata.create_all(bind=session.get_bind())
+        seed_reference_data()
         session.commit()
 
     print(

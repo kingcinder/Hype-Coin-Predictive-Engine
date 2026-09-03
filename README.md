@@ -299,6 +299,46 @@ See **[INSTALL.md](INSTALL.md)** for full instructions, configuration, troublesh
 
 ## Development
 
+### Import & dependency guards
+
+Two stdlib-only lint scripts enforce the import contract in CI (lint job) and
+as pre-commit hooks:
+
+- **Collection guard** — `scripts/check_broken_imports.py`: fails on imports
+  that would break `pytest` collection (dangling repo-local paths, e.g. the
+  historical `from storage.schema import metadata`). With `--venv PATH` it
+  also resolves third-party roots against that venv's site-packages, so a WIP
+  importing a package the install step doesn't provide fails lint, not just
+  Tests.
+- **Dependency-declaration guard** — `scripts/check_declared_deps.py`: every
+  third-party import root must be declared in `pyproject.toml`
+  (`[project.dependencies]` or an optional-dependencies group) or registered
+  in `KNOWN_VENV_ABSENT`, so a manually- or transitively-installed package
+  can never drift silently into the tree.
+
+The CI lint job runs the collection guard against its own install venv
+(`.venv/bin/python scripts/check_broken_imports.py --venv .venv`) plus the
+dependency-declaration scan; the pre-commit hooks mirror both (they fire on
+`.py` changes, and on `pyproject.toml` changes for the declaration guard).
+
+Locally:
+
+```bash
+make check-imports              # collection guard, bare python3 (works pre-setup)
+make check-imports VENV=.venv   # full coverage: also verify third-party roots vs the venv
+make check-deps                 # dependency-declaration guard
+make lint                       # ruff + mypy + both guards
+```
+
+**Registering an intentional optional import:** a third-party root the code
+may use but that is legitimately missing from the lint venv — e.g. the opt-in
+Telegram crawler's `telethon` — belongs in `KNOWN_VENV_ABSENT`, the commented
+tuple at the top of `scripts/check_broken_imports.py`; add it with a
+why-comment. Both guards honor the shared registry (the collection guard once
+`--venv` resolution is enabled, the declaration guard always), and both
+suites parametrize guard-the-guard tests over it, so a new member is covered
+automatically and a dead one fails loudly.
+
 ```bash
 # Install dev dependencies (pinned dev lock included)
 python -m pip install -e ".[dev]"
@@ -319,7 +359,7 @@ mypy api/ common/ engine/ crawlers/ data_lake/ ui/
 # Format
 ruff format .
 
-# Pre-commit hooks (ruff format + lint on every commit)
+# Pre-commit hooks (ruff + both import guards on every commit)
 pre-commit install
 
 # Refresh the coverage trend chart + history (committed to coverage/)

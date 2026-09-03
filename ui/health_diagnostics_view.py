@@ -12,10 +12,11 @@ from typing import Any
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import psutil
 import streamlit as st
 
-from ui.api_client import api_get
+from ui.api_client import api_get, api_get_silent
 from ui.theme import apply_dark_theme
 
 
@@ -30,6 +31,192 @@ def _fmt_bytes(n: float) -> str:
 
 def _state_color(state: str) -> str:
     return {"ok": "#00ff88", "yellow": "#eab308", "red": "#f97316"}.get(state, "#9ca3af")
+
+
+def _render_score_drift_panel() -> None:
+    """Score-distribution drift card: persisted risk vs the live formula.
+
+    Newest probe from ``/score-drift/latest`` (the alarm compares the stored
+    distribution the GUI serves against what the *current* ``compute_scores``
+    yields over the same feature vectors). ``red`` is unmissable and points at
+    the operator review workflow; the deduped ``score_drift`` alert — message
+    plus sign-off (ack) state — is surfaced so the card carries the ack
+    context for the ``--auto-apply`` rescue.
+
+    ``api_get_silent`` is used because a 404 before the first probe is an
+    expected state, not an API error — the card renders an informative note
+    instead of flashing a red error banner.
+    """
+    latest = api_get_silent("/score-drift/latest")
+    if latest is None:
+        st.info(
+            "No score-drift probe yet (or the API is unreachable — check the other "
+            "panels for a connectivity failure). The alarm arms on the next scan "
+            "once at least `score_drift_min_samples` scores are sampled."
+        )
+        return
+
+    state = latest.get("state") or "unknown"
+    ks_d = latest.get("ks_d")
+    ks_p = latest.get("ks_p")
+    distinct_ratio = latest.get("distinct_ratio")
+    mean_delta = latest.get("mean_abs_delta")
+    compared = latest.get("compared", 0)
+    error_count = latest.get("error_count", 0)
+    ts = latest.get("ts")
+    stamp = str(ts)[:19] if ts else "n/a"
+
+    titles = {
+        "ok": ("✅", "Persisted risk matches the live formula"),
+        "yellow": ("⚠️", "Persisted risk is drifting from the live formula"),
+        "red": ("🚨", "STALE SCORES — won't match the live formula"),
+    }
+    icon, title = titles.get(state, ("❓", f"Score-drift state: {state}"))
+    st.markdown(f"**{icon} {title}**")
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        ks_label = "—"
+        if ks_d is not None:
+            ks_label = f"{ks_d:.3f}"
+            if ks_p is not None:
+                ks_label += f" (p={ks_p:.1e})"
+        st.metric(
+            "KS D",
+            ks_label,
+            help=(
+                "two-sample Kolmogorov–Smirnov D between persisted and live "
+                "risk distributions (p is the asymptotic significance)"
+            ),
+        )
+    with m2:
+        st.metric(
+            "Distinct ratio",
+            f"{distinct_ratio:.2f}" if distinct_ratio is not None else "—",
+            help=(
+                "stored distinct risk values ÷ live distinct values; ≈1 equal "
+                "richness, ≪1 means the served scores collapsed to bands"
+            ),
+        )
+    with m3:
+        st.metric(
+            "Mean |Δ|",
+            f"{mean_delta:.1f}" if mean_delta is not None else "—",
+            help="mean per-token risk delta between persisted and live",
+        )
+    with m4:
+        st.metric("Compared", compared, help="tokens compared by the last probe")
+
+    # ── Drift trend series: divergence visible growing before it crosses red ──
+    history = api_get_silent("/score-drift/history", params={"limit": 50}) or []
+    if history:
+        trend_rows = [
+            {
+                "ts": row.get("run_ts"),
+                "KS D": row.get("ks_d"),
+                "Distinct ratio": row.get("distinct_ratio"),
+                "state": row.get("state"),
+            }
+            for row in reversed(history)  # API returns newest-first
+        ]
+        trend_df = pd.DataFrame(trend_rows)
+        trend_df["ts"] = pd.to_datetime(trend_df["ts"], errors="coerce")
+        trend_df = trend_df.dropna(subset=["ts"])
+        if not trend_df.empty:
+            melted = trend_df.melt(
+                id_vars=["ts", "state"],
+                value_vars=["KS D", "Distinct ratio"],
+                var_name="metric",
+                value_name="value",
+            )
+            melted = melted.dropna(subset=["value"])
+            if melted.empty:
+                st.caption("Trend series has no comparable probe signals yet.")
+            else:
+                fig = px.line(
+                    melted,
+                    x="ts",
+                    y="value",
+                    color="metric",
+                    markers=True,
+                    labels={"value": "", "metric": "", "ts": ""},
+                )
+                # Mark probes that crossed into red on both series (shared legend).
+                red_pts = melted[melted["state"] == "red"]
+                for metric in ("KS D", "Distinct ratio"):
+                    sub = red_pts[red_pts["metric"] == metric]
+                    if sub.empty:
+                        continue
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sub["ts"],
+                            y=sub["value"],
+                            mode="markers",
+                            marker={"color": "#f97316", "size": 11, "symbol": "x"},
+                            name="red probe",
+                            legendgroup="red",
+                            hovertemplate=f"{metric}: %{{y:.3f}}<extra></extra>",
+                        )
+                    )
+                fig.update_layout(
+                    height=210,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                )
+                # KS D is bounded [0, 1]; distinct_ratio can exceed 1 when the
+                # persisted distribution is richer than the live one, so scale
+                # the axis to the data rather than clipping at 1.
+                y_max = max(1.0, float(melted["value"].max()))
+                fig.update_yaxes(range=[0, y_max])
+                apply_dark_theme(fig)
+                st.plotly_chart(fig, width="stretch")
+                st.caption(
+                    "KS D and persisted÷live distinct-ratio per probe (newest at "
+                    "right); red × marks probes that crossed into red. A line "
+                    "trending up is divergence growing before it alarms."
+                )
+        else:
+            st.caption("Trend series has no timestamped probes yet.")
+    else:
+        st.caption("Trend series fills in as probes run.")
+
+    if state == "red":
+        st.error(
+            "**Stale-score alarm**: the distribution the GUI serves no longer "
+            "matches the current scoring formula. Review the movers before "
+            "trusting served scores:\n\n"
+            "```bash\nmake rescore-compare\n```\n"
+            "When the diff looks right, ack the alert and rescue the persisted "
+            "scores with `python -m ops.score_drift --once --auto-apply`."
+        )
+    elif state == "yellow":
+        st.warning(
+            "Divergence trending — run `make rescore-compare` to size the gap "
+            "before it crosses red."
+        )
+    elif error_count:
+        st.warning(f"Last probe errored on {error_count} token(s) — see the message below.")
+    else:
+        st.caption(f"Last probe: {stamp} · no drift")
+
+    if latest.get("message"):
+        st.caption(f"{latest['message'][:160]}")
+
+    # Deduped score_drift alert: message + sign-off state (the rescue gate).
+    alerts = api_get_silent("/alerts", params={"limit": 50}) or []
+    drift_alerts = [a for a in alerts if a.get("alert_type") == "score_drift"]
+    if drift_alerts:
+        alert = drift_alerts[0]
+        a_state = alert.get("state", "?")
+        acked = (
+            "✅ acked"
+            if alert.get("acked_at")
+            else "open — not yet acknowledged (required before --auto-apply)"
+        )
+        with st.expander(f"score_drift alert · {a_state} · {acked}"):
+            st.markdown(alert.get("message") or "(no message)")
+    else:
+        st.caption("No score_drift alert open.")
 
 
 def _db_size_bytes() -> int:
@@ -186,6 +373,12 @@ def _render_health_body() -> None:
                 st.markdown(comp_html, unsafe_allow_html=True)
     else:
         st.warning("Health data unavailable — is the API running?")
+
+    st.divider()
+
+    # ── Score-Distribution Drift ─────────────────────────────────────────
+    st.subheader("\U0001f4ca Score-Distribution Drift")
+    _render_score_drift_panel()
 
     st.divider()
 

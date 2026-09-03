@@ -34,6 +34,45 @@ class ParityLatestResponse(BaseModel):
     compare_hours_ago: float
 
 
+class ScoreDriftLatestResponse(BaseModel):
+    """Latest persisted-vs-live score-distribution drift probe."""
+
+    state: str
+    ts: datetime | None
+    message: str | None
+    error_count: int
+    sampled: int
+    compared: int
+    ks_d: float | None
+    ks_p: float | None
+    distinct_ratio: float | None
+    mean_abs_delta: float | None
+
+
+class ScoreDriftRunRow(BaseModel):
+    """One persisted drift-probe measurement — the trend-series point.
+
+    Each probe that produces a comparable sample appends a row with the
+    pure-numpy KS D/p, the persisted-vs-live distinct-value quantization
+    ratio, and the mean per-token |delta|, for ``GET /score-drift/history``
+    (divergence visible growing before it crosses red)."""
+
+    id: int
+    run_ts: datetime | None
+    state: str
+    sampled: int
+    compared: int
+    ks_d: float
+    ks_p: float
+    distinct_ratio: float
+    mean_abs_delta: float
+    distinct_persisted: int
+    distinct_live: int
+    no_features: int
+    errors: int
+    message: str | None
+
+
 class ParityMismatchRow(BaseModel):
     run_ts: datetime
     decision_ts: datetime

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
@@ -21,6 +22,31 @@ from storage.repository import (
 
 
 @pytest.fixture(autouse=True)
+def _isolate_database_url_env() -> Generator[None, None, None]:
+    """Scrub the DB-override env vars around every test.
+
+    ``Settings`` now resolves ``SERPENT_DB_PATH`` / ``DATABASE_URL`` itself
+    (see ``common.config.apply_database_url_env_override``), so a developer
+    shell that exports either var — exactly what the smoke docs tell operators
+    to do — would otherwise leak into every ``Settings(...)``-constructor test
+    in the suite (e.g. test_archive's local-single profile expectations) and
+    silently rebind them to a throwaway DB. Tests that want an override set it
+    explicitly via monkeypatch (or a subprocess env), which runs after this
+    scrub; the originals are restored on teardown.
+    """
+    saved = {
+        name: os.environ.get(name)
+        for name in ("SERPENT_DB_PATH", "DATABASE_URL")
+        if name in os.environ
+    }
+    for name in saved:
+        os.environ.pop(name, None)
+    yield
+    for name, value in saved.items():
+        os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
 def _isolate_watchdog_inflight() -> Generator[None, None, None]:
     """Reset the engine phase-watchdog in-flight registry around every test.
 
@@ -37,10 +63,36 @@ def _isolate_watchdog_inflight() -> Generator[None, None, None]:
     def _reset() -> None:
         with ops.watchdog._in_flight_lock:  # noqa: SLF001 - test fixture needs the internals.
             ops.watchdog._in_flight.clear()  # noqa: SLF001
+        ops.watchdog.reset_phase_skip_tracking()
 
     _reset()
     yield
     _reset()
+
+
+# NOTE: pytest loads this file both as ``conftest`` (its own import) and as
+# ``tests.conftest`` (when a test imports TrackingScope) — two module objects,
+# which is harmless ONLY while this module has no import-time side effects.
+# Keep TrackingScope and friends free of fixture-registration side effects.
+class TrackingScope:
+    """Stand-in for ``storage.database.session_scope`` that records entry/exit
+    and closes the wrapped session, mirroring the real ``with SessionLocal()``
+    cycle — lets tests assert that a ``session=None`` call (the CLI path)
+    owns its own session lifecycle and closes it, exactly like ``rescore``.
+    """
+
+    def __init__(self, target: Session) -> None:
+        self.target = target
+        self.entered = 0
+        self.closed = False
+
+    def __enter__(self) -> Session:
+        self.entered += 1
+        return self.target
+
+    def __exit__(self, *exc: object) -> None:
+        self.closed = True
+        self.target.close()
 
 
 @pytest.fixture()

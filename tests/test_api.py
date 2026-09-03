@@ -700,6 +700,67 @@ def test_backtest_run_api_accepts_lake_source(session, monkeypatch) -> None:
         app.dependency_overrides.clear()
 
 
+def test_score_drift_history_endpoint_returns_series(session) -> None:
+    """GET /score-drift/history returns the persisted probe trend series,
+    newest first, with the full signal vector per run."""
+    base = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
+    session.add_all(
+        [
+            models.ScoreDriftRun(
+                run_ts=base,
+                state="yellow",
+                sampled=50,
+                compared=50,
+                ks_d=0.22,
+                ks_p=0.03,
+                distinct_ratio=0.40,
+                mean_abs_delta=4.1,
+                distinct_persisted=20,
+                distinct_live=50,
+                no_features=0,
+                errors=0,
+                message="score distribution drift: sampled=50 compared=50",
+            ),
+            models.ScoreDriftRun(
+                run_ts=base + timedelta(hours=1),
+                state="red",
+                sampled=50,
+                compared=50,
+                ks_d=0.51,
+                ks_p=1e-6,
+                distinct_ratio=0.10,
+                mean_abs_delta=22.3,
+                distinct_persisted=5,
+                distinct_live=50,
+                no_features=0,
+                errors=0,
+                message="score distribution drift: sampled=50 compared=50 | quantized",
+            ),
+        ]
+    )
+    session.commit()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app)
+        rows = client.get("/score-drift/history").json()
+        assert len(rows) == 2
+        assert rows[0]["state"] == "red"  # newest first
+        assert rows[0]["ks_d"] == pytest.approx(0.51)
+        assert rows[0]["distinct_ratio"] == pytest.approx(0.10)
+        assert rows[0]["mean_abs_delta"] == pytest.approx(22.3)
+        assert rows[0]["distinct_persisted"] == 5
+        assert rows[1]["state"] == "yellow"
+        limited = client.get("/score-drift/history", params={"limit": 1}).json()
+        assert len(limited) == 1
+        assert limited[0]["state"] == "red"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_parity_mismatches_endpoint_returns_history(session) -> None:
     """GET /parity/mismatches returns reviewable divergence history, newest
     run first, with per-asset/feature filtering."""

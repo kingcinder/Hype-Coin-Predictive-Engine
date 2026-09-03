@@ -33,41 +33,20 @@ from common.logging import get_logger
 log = get_logger(__name__)
 
 
-def _run_migrations() -> None:
-    """Apply the alembic migration chain to the database on every boot.
-
-    ``Base.metadata.create_all`` only creates missing *tables* — it never alters
-    existing tables when models gain columns.  The live drift (migration 0019's
-    ML probability thresholds missing from ``risk_calibrations``/``risk_outcomes``)
-    happened exactly because the engine booted with create_all only.  Every
-    migration in the chain is existence-guarded, so ``upgrade head`` is
-    idempotent: fresh DBs build the full schema, existing DBs get only the
-    pending column/table additions.
-    """
-    try:
-        from alembic import command
-        from alembic.config import Config
-
-        project_root = Path(__file__).resolve().parents[1]
-        cfg = Config(str(project_root / "storage" / "alembic.ini"))
-        cfg.set_main_option("script_location", str(project_root / "storage" / "migrations"))
-        command.upgrade(cfg, "head")
-        log.info("engine_migrations_applied")
-    except Exception as exc:  # noqa: BLE001 - never block engine boot on migration issues.
-        log.warning("engine_migrations_failed", error=str(exc))
-
-
 def _bootstrap() -> None:
     """Idempotent zero-container bootstrap: migrations + schema + reference rows."""
     from common.config import get_settings
-    from storage.database import Base, SessionLocal, engine
+    from storage.database import Base, SessionLocal, engine, run_migrations
     from storage.seed import seed_reference_data
 
     settings = get_settings()
     Path(settings.archive_local_dir).mkdir(parents=True, exist_ok=True)
     # Migrations first — create_all is only a safety net for anything the models
-    # define that the chain does not (it cannot add columns to existing tables).
-    _run_migrations()
+    # define that the chain does not (it cannot add columns to existing tables,
+    # and it never stamps alembic_version). Shared with the worker and local
+    # bootstrap via storage.database.run_migrations, so every boot path applies
+    # the same chain (e.g. 0020's score_drift_runs before the first probe).
+    run_migrations()
     Base.metadata.create_all(bind=engine)
     seed_reference_data()
     with SessionLocal() as session:
@@ -110,6 +89,7 @@ def _run_watchdog_phase(
     component: str,
     timeout_seconds: float,
     fn: Callable[[], dict[str, object]],
+    skip_alert_cycles: int = 20,
     session: Any = None,
 ) -> StageOutcome:
     """Run a blocking engine phase under the shared watchdog timeout.
@@ -118,39 +98,71 @@ def _run_watchdog_phase(
     engine's main thread, so if it stops making progress it would freeze the
     whole loop — no further scans and no operational watchdog.
     ``run_stage_with_timeout`` runs it in a daemon thread with a wall-clock
-    deadline. Returns the ``StageOutcome``: on a fresh timeout a red health
-    alarm for ``component`` is recorded and the loop continues; on a skip (a
-    previous wedged run of the same phase still in flight) nothing is recorded
-    because the original timeout already alarmed.
+    deadline. Returns the ``StageOutcome``:
+
+    - a fresh timeout records a red health alarm for ``component`` and the loop
+      continues;
+    - a skip (a previous wedged run of the same phase still in flight) records
+      nothing by itself, but after ``skip_alert_cycles`` consecutive skips it
+      re-records a red alarm so a long wedge doesn't go silent for its whole
+      duration;
+    - a completed run clears the stage's skip counter.
 
     ``session`` is injectable for tests: when provided the alarm row is added
     to it (and flushed) instead of opening a throwaway ``SessionLocal``, so an
     integration driver can assert the red row landed.
     """
-    from ops.watchdog import run_stage_with_timeout
+    from ops.watchdog import (
+        note_phase_skip,
+        reset_phase_skip,
+        run_stage_with_timeout,
+    )
     from storage.repository import record_health
 
     outcome = run_stage_with_timeout(fn, timeout_seconds=timeout_seconds, stage=stage)
-    if not outcome.timed_out:
+
+    def _record(message: str) -> None:
+        if session is not None:
+            record_health(session, component=component, state="red", message=message)
+            session.flush()
+        else:
+            from storage.database import SessionLocal
+
+            try:
+                with SessionLocal() as alarm_session:
+                    record_health(alarm_session, component=component, state="red", message=message)
+                    alarm_session.commit()
+            except Exception as exc:  # noqa: BLE001 - an alarm must never kill the loop.
+                log.debug("stage_watchdog_alarm_failed", stage=stage, error=str(exc))
+
+    if outcome.result is not None:
+        reset_phase_skip(stage)
+        return outcome
+    if outcome.timed_out:
+        reset_phase_skip(stage)
+        message = (
+            f"{stage} stage exceeded {timeout_seconds:.0f}s watchdog timeout; "
+            "pass abandoned, engine loop continuing"
+        )
+        log.error("engine_stage_watchdog_timeout", stage=stage, timeout_seconds=timeout_seconds)
+        _record(message)
         return outcome
 
-    message = (
-        f"{stage} stage exceeded {timeout_seconds:.0f}s watchdog timeout; "
-        "pass abandoned, engine loop continuing"
-    )
-    log.error("engine_stage_watchdog_timeout", stage=stage, timeout_seconds=timeout_seconds)
-    if session is not None:
-        record_health(session, component=component, state="red", message=message)
-        session.flush()
-    else:
-        from storage.database import SessionLocal
-
-        try:
-            with SessionLocal() as alarm_session:
-                record_health(alarm_session, component=component, state="red", message=message)
-                alarm_session.commit()
-        except Exception as exc:  # noqa: BLE001 - an alarm must never kill the loop.
-            log.debug("stage_watchdog_alarm_failed", stage=stage, error=str(exc))
+    # outcome.skipped — the original timeout already alarmed. Re-alert only once
+    # the phase has been stuck for skip_alert_cycles consecutive skips, so a
+    # long wedge keeps surfacing instead of going dark.
+    if note_phase_skip(stage, skip_alert_cycles):
+        message = (
+            f"{stage} stage still wedged after {skip_alert_cycles} consecutive "
+            "skipped iterations (watchdog timeout; pass abandoned, engine loop "
+            "continuing)"
+        )
+        log.error(
+            "engine_stage_watchdog_skip_realert",
+            stage=stage,
+            consecutive_skips=skip_alert_cycles,
+        )
+        _record(message)
     return outcome
 
 
@@ -167,28 +179,32 @@ def run_engine_phases(
     parity_fn: Callable[[], dict[str, object]] | None = None,
     nightcrawler_fn: Callable[[], dict[str, object]] | None = None,
     data_lake_fn: Callable[[], dict[str, object]] | None = None,
+    score_drift_fn: Callable[[], dict[str, object]] | None = None,
 ) -> tuple[bool, float]:
-    """Run the five post-scan engine phases for one loop iteration.
+    """Run the post-scan engine phases for one loop iteration.
 
     This is the phase wiring that ``main()`` drives each iteration — forecast
-    training, retention compaction, parity, night crawler, and the data-lake
-    pass — each guarded by the watchdog timeout. Every phase callable is
-    injectable (defaults to the real pipeline) and alarm rows can be written to
-    an injected ``alarm_session`` instead of the live DB, so tests can drive the
-    wiring end-to-end with blocking stubs. Returns ``(phase_error,
-    last_nc_run_monotonic)``. ``phase_error`` is True when any phase (except
-    parity) failed or was abandoned by the watchdog; ``last_nc_run_monotonic``
-    advances only on a completed night-crawler pass.
+    training, retention compaction, parity, night crawler, the data-lake pass,
+    and the score-distribution drift probe — each guarded by the watchdog
+    timeout. Every phase callable is injectable (defaults to the real pipeline)
+    and alarm rows can be written to an injected ``alarm_session`` instead of
+    the live DB, so tests can drive the wiring end-to-end with blocking stubs.
+    Returns ``(phase_error, last_nc_run_monotonic)``. ``phase_error`` is True
+    when any phase (except the informational parity/score-drift pair) failed or
+    was abandoned by the watchdog; ``last_nc_run_monotonic`` advances only on a
+    completed night-crawler pass.
     """
     from engine.state import engine_state
     from forecast.engine import maybe_run_forecast
     from ops.parity import maybe_run_parity
     from ops.retention import maybe_run_retention
+    from ops.score_drift import maybe_run_score_drift
 
     state = system_state or engine_state
     forecast_fn = forecast_fn or maybe_run_forecast
     retention_fn = retention_fn or maybe_run_retention
     parity_fn = parity_fn or maybe_run_parity
+    score_drift_fn = score_drift_fn or maybe_run_score_drift
 
     if nightcrawler_fn is None:
 
@@ -224,6 +240,7 @@ def run_engine_phases(
             stage="forecast",
             component="forecast",
             timeout_seconds=settings.forecast_timeout_seconds,
+            skip_alert_cycles=settings.skip_alert_cycles,
             fn=forecast_fn,
             session=alarm_session,
         )
@@ -246,6 +263,7 @@ def run_engine_phases(
             stage="retention",
             component="lake",
             timeout_seconds=settings.retention_timeout_seconds,
+            skip_alert_cycles=settings.skip_alert_cycles,
             fn=retention_fn,
             session=alarm_session,
         )
@@ -267,6 +285,7 @@ def run_engine_phases(
             stage="parity",
             component="parity",
             timeout_seconds=settings.parity_timeout_seconds,
+            skip_alert_cycles=settings.skip_alert_cycles,
             fn=parity_fn,
             session=alarm_session,
         )
@@ -287,6 +306,7 @@ def run_engine_phases(
                     stage="nightcrawler",
                     component="nightcrawler",
                     timeout_seconds=settings.nightcrawler_timeout_seconds,
+                    skip_alert_cycles=settings.skip_alert_cycles,
                     fn=nightcrawler_fn,
                     session=alarm_session,
                 )
@@ -314,6 +334,7 @@ def run_engine_phases(
                 stage="data_lake",
                 component="data_lake",
                 timeout_seconds=settings.data_lake_timeout_seconds,
+                skip_alert_cycles=settings.skip_alert_cycles,
                 fn=data_lake_fn,
                 session=alarm_session,
             )
@@ -332,6 +353,24 @@ def run_engine_phases(
         log.exception("engine_data_lake_failed", iteration=iteration, error=str(exc))
         state.mark_error(f"data_lake: {exc}")
         phase_error = True
+
+    # ── Score-distribution drift probe (informational, like parity) ──────────
+    try:
+        if settings.score_drift_enabled:
+            drift = _run_watchdog_phase(
+                stage="score_drift",
+                component="score_drift",
+                timeout_seconds=settings.score_drift_timeout_seconds,
+                skip_alert_cycles=settings.skip_alert_cycles,
+                fn=score_drift_fn,
+                session=alarm_session,
+            )
+            if drift.skipped:
+                log.info("engine_phase_skipped_still_wedged", stage="score_drift")
+            elif drift.result and not drift.result.get("skipped"):
+                log.info("engine_score_drift_complete", result=drift.result)
+    except Exception as exc:  # noqa: BLE001 - drift failure must not kill the engine
+        log.exception("engine_score_drift_failed", iteration=iteration, error=str(exc))
 
     return phase_error, last_nc_run_monotonic
 

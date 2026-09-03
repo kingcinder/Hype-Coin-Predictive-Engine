@@ -8,6 +8,9 @@ on:
 
 # Required status checks for branch protection (GitHub Settings > Branches):
 #   "Lint & Format", "Type Check (mypy)", "Tests", "Docker build"
+# The "Rescore CLI smoke (throwaway DB)" job below is recommended as a status
+# check too: it drives the migration CLI's real __main__ against a throwaway
+# DB on every PR, so a regression in the write path fails fast in CI.
 # Every job below must pass before a PR can merge — enabling the protection
 # rule is the final, repo-owner step (Settings cannot be set from a file).
 
@@ -25,11 +28,28 @@ jobs:
             pyproject.toml
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
+        run: python -m venv .venv && .venv/bin/pip install -e ".[dev]"
       - name: Ruff format check
-        run: ruff format --check .
+        run: .venv/bin/ruff format --check .
       - name: Ruff lint check
-        run: ruff check .
+        run: .venv/bin/ruff check .
+      # Collection guard: fails if any repo-local import is dangling (e.g. the
+      # historical `from storage.schema import metadata`, which broke pytest
+      # collection for the whole suite) OR — with --venv — if any source file
+      # imports a package that isn't installed in this job's venv, so a WIP
+      # picking up a not-yet-added dependency fails lint, not just Tests. The
+      # script itself stays stdlib-only; --venv adds site-packages resolution
+      # against the deps installed above.
+      - name: Broken-import scan
+        run: .venv/bin/python scripts/check_broken_imports.py --venv .venv
+      # Dependency-declaration guard: fails if any source file imports a
+      # third-party root that isn't declared in pyproject.toml
+      # ([project.dependencies] or an optional-dependencies group) or
+      # registered in KNOWN_VENV_ABSENT — a manually- or transitively-
+      # installed package can no longer drift silently into the tree, only to
+      # break a fresh `pip install -e ".[dev]"` in the Tests job later.
+      - name: Dependency-declaration scan
+        run: .venv/bin/python scripts/check_declared_deps.py
 
   typecheck:
     name: Type Check (mypy)
@@ -70,6 +90,76 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: core
+
+  rescore-smoke:
+    name: Rescore CLI smoke (throwaway DB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install dependencies
+        run: python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+      - name: Bootstrap + seed throwaway DB
+        env:
+          ENV: local-single
+          SERPENT_DB_PATH: ${{ runner.temp }}/rescore-smoke.db
+          LLM_ENABLED: "false"  # no Ollama in CI; the seed's scoring must stay hermetic
+        run: |
+          rm -f "$SERPENT_DB_PATH" "$SERPENT_DB_PATH-wal" "$SERPENT_DB_PATH-shm"
+          .venv/bin/python scripts/bootstrap_local.py
+          .venv/bin/python scripts/seed_fixtures.py
+      - name: Rescore read-only (--compare --dry-run)
+        env:
+          ENV: local-single
+          SERPENT_DB_PATH: ${{ runner.temp }}/rescore-smoke.db
+          LLM_ENABLED: "false"
+        run: |
+          .venv/bin/python scripts/rescore.py --compare --dry-run > /tmp/rescore-dry.log 2>&1
+          grep -q "Rescore complete (DRY RUN)" /tmp/rescore-dry.log
+          if grep -q "Rescore complete (APPLIED)" /tmp/rescore-dry.log; then
+            echo "read-only rescore pass wrote to the throwaway DB" >&2
+            exit 1
+          fi
+      - name: Rescore for real (write path)
+        env:
+          ENV: local-single
+          SERPENT_DB_PATH: ${{ runner.temp }}/rescore-smoke.db
+          LLM_ENABLED: "false"
+        run: |
+          .venv/bin/python scripts/rescore.py > /tmp/rescore-apply.log 2>&1
+          grep -q "Rescore complete (APPLIED)" /tmp/rescore-apply.log
+          # The seed fixture has exactly 2 scored tokens and every row carries
+          # features, so the write loop must update both with zero errors — the
+          # deterministic proof that rescore *persisted*, not just that the DB
+          # is non-empty (those counts come from seed_fixtures). If
+          # seed_fixtures ever gains another scored token, update the greps.
+          grep -q "Updated: 2," /tmp/rescore-apply.log
+          grep -q "Errors: 0" /tmp/rescore-apply.log
+      - name: Assert throwaway DB is non-empty
+        run: |
+          .venv/bin/python - <<'EOF'
+          import sqlite3
+
+          conn = sqlite3.connect("${{ runner.temp }}/rescore-smoke.db")
+          counts = {
+              t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+              for t in ("assets", "chains", "scores", "market_snapshots")
+          }
+          print("throwaway DB counts:", counts)
+          assert counts["assets"] >= 3, counts
+          assert counts["chains"] >= 1, counts
+          assert counts["scores"] >= 2, counts
+          assert counts["market_snapshots"] >= 6, counts
+          EOF
+      - name: Assert real suite still collects
+        run: |
+          .venv/bin/python -m pytest tests/ --collect-only -q
 
   docker:
     name: Docker build

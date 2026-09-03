@@ -28,6 +28,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/serpent
+# Apply the alembic chain before the pass so migration-owned tables (e.g. 0007
+# retention runs, 0020 score_drift_runs) exist even if this timer fires before
+# any worker booted on a hand-rolled DB copy. Idempotent; mirrors the worker
+# and API units.
+ExecStartPre=/opt/serpent/.venv/bin/alembic -c storage/alembic.ini upgrade head
 ExecStart=/bin/sh -c '/opt/serpent/.venv/bin/python -m ops.retention --check-due && exec /opt/serpent/.venv/bin/python -m ops.retention --once || rc=$$?; if [ "$${rc:-0}" -eq 1 ]; then echo "retention pass not due; exiting cleanly"; exit 0; fi; exit "$${rc:-0}"'
 # Read the project .env the same way the worker does.
 EnvironmentFile=-/opt/serpent/.env

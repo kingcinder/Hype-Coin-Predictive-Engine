@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from common.config import get_settings
 from common.logging import get_logger
@@ -200,6 +201,10 @@ class StageOutcome:
 # On timeout a wedged run is abandoned but stays tracked, so the next iteration
 # for that stage sees it still running and *skips* instead of piling up threads.
 _in_flight: dict[str, threading.Thread] = {}
+# Consecutive skips per stage: a wedged phase re-alerts after
+# SKIP_ALERT_CYCLES consecutive skips rather than going silent for the whole
+# wedge.
+_skip_counts: dict[str, int] = {}
 _in_flight_lock = threading.Lock()
 
 
@@ -218,6 +223,65 @@ def _in_flight_alive(stage: str) -> bool:
     with _in_flight_lock:
         thread = _in_flight.get(stage)
         return thread is not None and thread.is_alive()
+
+
+def note_phase_skip(stage: str, threshold: int) -> bool:
+    """Track one consecutive skip for ``stage``; return True when it's time to re-alert.
+
+    A wedged phase alarms on its first timeout, then *skips* each iteration
+    while the abandoned run is still in flight. Incrementing a per-stage skip
+    counter lets the caller re-alert once the count reaches ``threshold``,
+    so a long wedge doesn't stay silent for its whole duration. On hitting the
+    threshold the counter resets, so alerts repeat every ``threshold`` skips.
+    ``threshold <= 0`` disables re-alerting (always returns False, never counts).
+    """
+    if threshold <= 0:
+        return False
+    with _in_flight_lock:
+        n = _skip_counts.get(stage, 0) + 1
+        if n >= threshold:
+            _skip_counts[stage] = 0
+            return True
+        _skip_counts[stage] = n
+        return False
+
+
+def reset_phase_skip(stage: str) -> None:
+    """Clear a stage's consecutive-skip counter (fresh timeout or completed run)."""
+    with _in_flight_lock:
+        _skip_counts.pop(stage, None)
+
+
+def reset_phase_skip_tracking() -> None:
+    """Clear all per-stage skip counters (test isolation, engine restart)."""
+    with _in_flight_lock:
+        _skip_counts.clear()
+
+
+def snapshot_phase_state() -> list[dict[str, Any]]:
+    """Live per-phase watchdog state, for the SSE health feed and the GUI.
+
+    Returns one entry per tracked phase: ``stage``, ``in_flight`` (the watchdog
+    daemon thread is alive — either a run is in progress or a wedged run is
+    still abandoned in the background), and ``consecutive_skips`` (how many
+    consecutive iterations have skipped this phase because the previous run is
+    still wedged). ``in_flight`` on a phase that already timed out, or
+    ``consecutive_skips > 0``, is how operators see that a phase is currently
+    stuck and that the loop is skipping it rather than running it.
+    """
+    with _in_flight_lock:
+        stages = sorted(set(_in_flight) | set(_skip_counts))
+        entries: list[dict[str, Any]] = []
+        for stage in stages:
+            thread = _in_flight.get(stage)
+            entries.append(
+                {
+                    "stage": stage,
+                    "in_flight": thread is not None and thread.is_alive(),
+                    "consecutive_skips": _skip_counts.get(stage, 0),
+                }
+            )
+        return entries
 
 
 def run_stage_with_timeout(

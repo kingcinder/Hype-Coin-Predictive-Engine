@@ -1,9 +1,48 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Database URL override sources, highest precedence first. ``SERPENT_DB_PATH``
+# is project-specific (a SQLite file path or a full ``scheme://`` URL);
+# ``DATABASE_URL`` is the generic 12-factor connection URL. Both are resolved
+# ONCE, into ``Settings.database_url`` at construction time (see
+# ``apply_database_url_env_override`` below), so *every* consumer that reads
+# ``settings.database_url`` — session_scope() users, alembic migrations,
+# diagnose_retention's ``--db`` default, bootstrap_local's written config, the
+# watchdog's sqlite checks — binds the effective URL, not a per-layer guess.
+
+
+def database_url_env_override() -> tuple[str, str] | None:
+    """The env override for ``database_url`` as ``(source, effective_url)``.
+
+    Mirror of the precedence the storage layer used to own:
+    ``SERPENT_DB_PATH`` (project-specific) beats ``DATABASE_URL`` (generic
+    12-factor) when both are set, and a bare filesystem path is normalized to
+    a ``sqlite://`` URL (forward slashes on every OS so ``sqlite:////tmp/x.db``
+    and ``sqlite:///C:/x.db`` parse; ``Path.as_posix`` emits no backslashes on
+    Windows). Returns ``None`` when neither var is set, in which case the
+    configured/default URL stands.
+
+    Scope note: only *os.environ* is consulted — a ``DATABASE_URL`` line
+    supplied via the ``.env`` file is folded into the URL by pydantic-settings
+    but is outside this override (and therefore outside the boot warning in
+    ``storage.database.make_engine``). Treat ``.env`` as deliberate
+    configuration, not a throwaway redirect.
+    """
+    override = (os.environ.get("SERPENT_DB_PATH") or "").strip()
+    if override:
+        if "://" in override:
+            return "SERPENT_DB_PATH", override
+        return "SERPENT_DB_PATH", f"sqlite:///{Path(override).expanduser().as_posix()}"
+    override = (os.environ.get("DATABASE_URL") or "").strip()
+    if override:
+        return "DATABASE_URL", override
+    return None
 
 
 class Settings(BaseSettings):
@@ -215,6 +254,13 @@ class Settings(BaseSettings):
     data_lake_timeout_seconds: float = phase_timeout_seconds
     nightcrawler_timeout_seconds: float = 1800.0
 
+    # A wedged phase reports one red alarm on its first timeout, then *skips*
+    # while the abandoned run is still in flight — which would leave it silent
+    # for the whole wedge. After this many consecutive skips the phase re-alerts
+    # (a fresh red watchdog row) so a long-running wedge keeps surfacing instead
+    # of going dark; 0 disables re-alerting entirely.
+    skip_alert_cycles: int = 20
+
     # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
     # against the live SQL path over the archived evidence, paging a mismatch
     # via ntfy. PARITY_COMPARE_HOURS_AGO is the decision-time horizon for the
@@ -345,6 +391,40 @@ class Settings(BaseSettings):
     backtest_drift_return_floor: float = -10.0  # median forward return below this = drift
     backtest_drift_collapse_rise: float = 0.15  # collapse-rate spike vs previous run
 
+    # Score-distribution drift alarm: compares the risk distribution PERSISTED
+    # in the scores table (what the GUI serves) against what the CURRENT live
+    # formula yields when re-run over the same sampled feature vectors. A
+    # formula change (e.g. the rescore migration) quantizes the stored risk to a
+    # few bands while live computation is continuous; until a rescore lands, the
+    # GUI silently serves stale scores. Each scan samples the latest decision
+    # window, recomputes live scores for the same (asset, decision_ts) pairs,
+    # and grades the divergence with a two-sample Kolmogorov-Smirnov D (pure
+    # numpy — scipy is not a dependency), a distinct-value quantization ratio
+    # (persisted distinct values / live distinct values; ~1 = same richness,
+    # <<1 = stored scores collapsed to a handful of bands), and the mean |delta|
+    # per token. Red records score_drift SystemHealth + a deduped score_drift
+    # Alert and pages ntfy at most once per cooldown.
+    score_drift_enabled: bool = True
+    score_drift_sample_size: int = 300
+    score_drift_min_samples: int = 10
+    score_drift_ks_d_warn: float = 0.20
+    score_drift_ks_d_red: float = 0.35
+    score_drift_ks_p_red: float = 0.01  # K-S red also requires p below this
+    score_drift_distinct_ratio_warn: float = 0.35
+    score_drift_distinct_ratio_red: float = 0.15
+    score_drift_mean_delta_warn: float = 5.0
+    score_drift_mean_delta_red: float = 15.0
+    score_drift_alert_cooldown_hours: float = 24.0
+    # Bounded trend-history window: each probe appends a ``score_drift_runs``
+    # row (KS D/p, distinct ratio, mean |delta|) and prunes rows beyond the
+    # newest RUNS_KEEP, so the series shows divergence growing before it
+    # crosses red without becoming an archive.
+    score_drift_runs_keep: int = 5000
+    # Watchdog ceiling for the score-drift phase inside the engine loop (it
+    # re-runs live scores over a bounded sample each iteration, so even a
+    # pathological feature block stays bounded).
+    score_drift_timeout_seconds: float = 120.0
+
     # Risk outcome tracking: observation window for evaluating flagged tokens
     risk_outcome_window_hours: float = 48.0
     # Price-change thresholds for the unknown-outcome fallback in ensemble
@@ -449,11 +529,47 @@ class Settings(BaseSettings):
         if self.env == "local-single":
             # Only apply profile defaults for fields the operator did not set
             # explicitly (via init kwargs or environment variables).
-            if "database_url" not in self.model_fields_set:
+            if "database_url" not in self.model_fields_set and database_url_env_override() is None:
                 self.database_url = "sqlite:///serpent.db"
             if "archive_backend" not in self.model_fields_set:
                 self.archive_backend = "local"
         return self
+
+    @model_validator(mode="after")
+    def apply_database_url_env_override(self) -> Settings:
+        """Resolve the ``SERPENT_DB_PATH`` / ``DATABASE_URL`` override.
+
+        Runs after the profile defaults so ``settings.database_url`` is the
+        *effective* URL for every consumer. ``SERPENT_DB_PATH`` is
+        project-specific and always wins when set — even over an explicit
+        ``database_url=`` — exactly as the storage layer used to resolve it.
+        ``DATABASE_URL`` yields to an explicit init kwarg (pydantic's
+        ``init > env`` priority) but otherwise overrides the configured
+        default/profile value. Either way, no consumer that reads
+        ``settings.database_url`` can silently bypass the override, because
+        the resolution now lives here rather than in the storage layer.
+        """
+        resolved = database_url_env_override()
+        if resolved is None:
+            return self
+        source, url = resolved
+        if source == "DATABASE_URL" and "database_url" in self.model_fields_set:
+            return self  # explicit init kwarg beat the 12-factor var
+        self.database_url = url
+        return self
+
+    @property
+    def database_url_env(self) -> str | None:
+        """Which env var overrides ``database_url`` (or None).
+
+        Diagnostics can surface this so an operator can tell at a glance
+        whether a run is bound to the configured DB, a 12-factor
+        ``DATABASE_URL``, or a project-specific ``SERPENT_DB_PATH`` override.
+        (The effective URL is always ``database_url``; this reports the
+        override source in effect when no explicit value beat it.)
+        """
+        resolved = database_url_env_override()
+        return resolved[0] if resolved is not None else None
 
     @property
     def farcaster_tracked_fids(self) -> list[str]:

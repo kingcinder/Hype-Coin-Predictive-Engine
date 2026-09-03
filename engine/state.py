@@ -232,11 +232,18 @@ class EngineState:
                 if self.scan.started_at and self.scan.completed_at
                 else ((time.monotonic() - self.scan.started_at) if self.scan.started_at else None)
             )
+            # Live per-phase watchdog state (in-flight threads + consecutive
+            # skips) so the SSE feed / GUI can show which phase is currently
+            # wedged and that iterations are being skipped. Lazily imported to
+            # keep engine/state decoupled from ops.watchdog's DB/config imports.
+            from ops.watchdog import snapshot_phase_state  # noqa: PLC0415
+
             return {
                 "status": "running" if self.started_at else "stopped",
                 "uptime_sec": round(uptime_sec, 1) if uptime_sec is not None else None,
                 "total_iterations": self.total_iterations,
                 "scan_interval_seconds": self.scan_interval_seconds,
+                "watchdog": {"phases": snapshot_phase_state()},
                 "scan": {
                     "phase": self.scan.phase.value,
                     "phase_message": self.scan.phase_message,

@@ -6,3 +6,33 @@ repos:
         args: [--check]
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+  # Repo-local guard: fails on imports that would break pytest collection
+  # (the historical `from storage.schema import metadata` class of failure).
+  # The script scans the whole repo itself, like the CI step does, so the
+  # hook must NOT receive the staged filenames as positional args (argparse
+  # would reject them, and a per-file scan could miss breakage elsewhere);
+  # files: '\\.py$' only decides *when* the hook fires — any commit touching
+  # a .py file re-runs the full scan. language: python gives the hook a
+  # pre-commit-managed interpreter (`python` isn't guaranteed on the caller's
+  # PATH; the script is stdlib-only, so no additional_dependencies needed).
+  - repo: local
+    hooks:
+      - id: check-broken-imports
+        name: check broken imports
+        description: Fail on imports that would break pytest collection
+        entry: python scripts/check_broken_imports.py
+        language: python
+        files: '\.py$'
+        pass_filenames: false
+      # Dependency-declaration guard: fails when a .py change imports a
+      # third-party root that pyproject.toml doesn't declare, or when a
+      # pyproject edit drops a declaration the code still relies on. Runs on
+      # any .py OR pyproject.toml change; like the collection guard it scans
+      # the whole repo (pass_filenames: false).
+      - id: check-declared-deps
+        name: check declared dependencies
+        description: Fail on third-party imports not declared in pyproject.toml
+        entry: python scripts/check_declared_deps.py
+        language: python
+        files: '(\.py$|pyproject\.toml$)'
+        pass_filenames: false

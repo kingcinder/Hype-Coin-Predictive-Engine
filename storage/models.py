@@ -155,6 +155,36 @@ class RetentionRun(Base):
     duration_sec: Mapped[float | None] = mapped_column(Float)
 
 
+class ScoreDriftRun(Base):
+    """One persisted-drift probe measurement — the trend-series point.
+
+    Each probe that produces a comparable sample (``compared >= 2``) appends
+    a row here with the pure-numpy KS D/p, the persisted-vs-live distinct-
+    value quantization ratio, and the mean per-token |delta|, so divergence
+    is visible *growing* over time instead of only the latest ntfy page /
+    health row. Rows are pruned to the newest ``SCORE_DRIFT_RUNS_KEEP`` on
+    every probe — the table is a bounded trend series, not an archive.
+    """
+
+    __tablename__ = "score_drift_runs"
+    __table_args__ = (Index("ix_score_drift_runs_run_ts", "run_ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    sampled: Mapped[int] = mapped_column(Integer, nullable=False)
+    compared: Mapped[int] = mapped_column(Integer, nullable=False)
+    ks_d: Mapped[float] = mapped_column(Float, nullable=False)
+    ks_p: Mapped[float] = mapped_column(Float, nullable=False)
+    distinct_ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    mean_abs_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    distinct_persisted: Mapped[int] = mapped_column(Integer, nullable=False)
+    distinct_live: Mapped[int] = mapped_column(Integer, nullable=False)
+    no_features: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    errors: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ParityMismatch(Base):
     """One lake-vs-SQL divergence recorded by a parity run.
 

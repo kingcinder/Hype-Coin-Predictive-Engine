@@ -10,6 +10,7 @@ from ingestion.service import IngestionService, backoff_sleep_seconds
 from ingestion.source_clients import ensure_background_probe
 from ops.parity import maybe_run_parity
 from ops.retention import check_lake_freshness, maybe_run_retention
+from ops.score_drift import maybe_run_score_drift
 from storage.database import SessionLocal
 
 log = get_logger(__name__)
@@ -33,6 +34,15 @@ def main() -> None:
     parser.add_argument("--loop", action="store_true", help="run forever")
     args = parser.parse_args()
     settings = get_settings()
+
+    # Schema on boot: the worker is often the FIRST process against a fresh or
+    # upgraded DB (systemd starts it directly; the combined engine is only one
+    # of several run modes). Apply the alembic chain so e.g. 0020's
+    # score_drift_runs exists before the first drift probe, and existing DBs
+    # get pending column/table additions — idempotent, never blocks boot.
+    from storage.database import run_migrations
+
+    run_migrations()
 
     if args.once or not args.loop:
         result = run_once()
@@ -75,6 +85,13 @@ def main() -> None:
         parity = maybe_run_parity()
         if not parity.get("skipped"):
             log.info("parity_check_complete", result=parity)
+        # Score-distribution drift alarm: compare the persisted risk distribution
+        # (what the GUI serves) against the live formula over the latest decision
+        # window each scan, so stale quantized scores between rescore migrations
+        # are flagged instead of silently serving the GUI.
+        drift = maybe_run_score_drift()
+        if not drift.get("skipped"):
+            log.info("score_drift_check_complete", result=drift)
         time.sleep(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
 
 

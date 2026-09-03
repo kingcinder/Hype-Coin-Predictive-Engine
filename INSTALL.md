@@ -114,6 +114,45 @@ Key settings:
 - `nightcrawler_enabled=true` — enable data crawlers
 - `llm_enabled=false` — set to `true` if Ollama is running locally
 
+### Zero-container SQLite: single writer, enforced at boot
+
+The `env=local-single` (SQLite, no Docker) profile supports exactly **one
+writer** per `serpent.db`. SQLite allows only a single process to hold the
+write lock at a time, and two writers contend until one wedges the loop on
+`database is locked` — which is how the retention/phase wedge starts.
+
+That constraint is now **enforced at boot** with an advisory lock: both the
+monolithic engine (`python -m engine`) and the standalone worker loop
+(`python -m ingestion.worker --loop`) take a non-blocking `flock` on a sibling
+`<db>.lock` file and hold it for their lifetime (the OS releases it on exit or
+crash, so there is never a stale lock). You may run either the monolithic
+engine **or** one worker loop as the writer — but not both, and not two of
+either — against the same SQLite file. The optional Postgres/container
+profiles are unaffected (Postgres handles many writers itself).
+
+If a second writer tries to start, it fails fast at boot with a clear message
+and exits (code 1) instead of wedging the loop:
+
+```text
+another process already holds the SQLite writer lock (/path/to/serpent.db.lock);
+refusing to start. Keep exactly one writer per serpent.db — a second writer
+causes 'database is locked' loop wedges.
+```
+
+The monolithic engine also refuses to boot when the API port (`8000` by
+default) is already bound — the classic symptom of a second engine already
+running against the same DB:
+
+```text
+ERROR: port 8000 is already in use — another engine (or a stale server) is
+likely running against the same DB. Refusing to start to avoid wedging the
+loop with a second writer.
+```
+
+Either message means the DB (or the port) is already owned by another process.
+Find and stop the existing owner, then start again. See the retention-wedge
+diagnosis and recovery steps in [`docs/runbook.md`](docs/runbook.md).
+
 After editing:
 
 ```bash
@@ -150,6 +189,38 @@ The installer will check for Python and tell you what to install if missing:
 ```bash
 sudo apt install python3.12 python3.12-venv python3.12-dev git
 ```
+
+## Import lint gates (CI & local)
+
+For contributors: two stdlib-only guards run in the CI lint job and as
+pre-commit hooks, so a broken or undeclared import fails lint before it can
+break the Tests job or a fresh install:
+
+- `scripts/check_broken_imports.py` — fails on imports that would break
+  `pytest` collection; with `--venv PATH` it also verifies third-party roots
+  against that venv's site-packages.
+- `scripts/check_declared_deps.py` — fails on third-party imports not
+  declared in `pyproject.toml` (`[project.dependencies]` or an
+  optional-dependencies group) or registered in `KNOWN_VENV_ABSENT`.
+
+CI runs the collection guard with `--venv .venv` against the lint job's own
+install venv and runs the declaration scan right after. Reproduce that full
+coverage locally:
+
+```bash
+make check-imports VENV=.venv   # collection guard + venv resolution
+make check-deps                 # dependency-declaration guard
+```
+
+(`make check-imports` without `VENV` uses bare `python3` — the script is
+stdlib-only — so it works before `make setup`.)
+
+**Intentional optional imports** — roots the lint venv legitimately lacks,
+like the opt-in Telegram crawler's `telethon` — are registered in
+`KNOWN_VENV_ABSENT`, the commented tuple at the top of
+`scripts/check_broken_imports.py`; every entry carries a why-comment. Both
+guards honor the registry, and parametrized guard-the-guard tests fail if a
+registered row ever stops mattering.
 
 ## Troubleshooting
 

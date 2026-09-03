@@ -497,5 +497,99 @@ def notify_calibration_bias(
         return False
 
 
+def notify_score_drift(
+    reasons: list[str],
+    ks_d: float,
+    ks_p: float,
+    distinct_ratio: float,
+    mean_delta: float,
+    compared: int,
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    """Page a persisted-vs-live score-distribution drift via ntfy.
+
+    Fires when the score-distribution probe classifies the stored risk
+    distribution as red against the live formula: the GUI is serving stale
+    scores until a rescore lands. Returns False when ntfy is disabled or the
+    push fails, so the next scan retries (the health row is recorded either
+    way).
+    """
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    lines = [
+        "Score-distribution drift: the persisted risk the GUI serves diverges",
+        f"from the current formula over a {compared}-token sample.",
+        f"KS D={ks_d:.3f} (p={ks_p:.2e}), distinct-ratio={distinct_ratio:.2f}, "
+        f"mean |delta|={mean_delta:.1f}.",
+    ]
+    if reasons:
+        lines.append("Drivers: " + "; ".join(reasons) + ".")
+    lines.append("Run `python scripts/rescore.py` before trusting the served scores.")
+    try:
+        notifier._post(
+            "\n".join(lines),
+            {
+                "Title": "Serpent Circle - Score Drift Alarm",
+                "Priority": "4",
+                "Tags": "warning",
+                "Click": f"{notifier.settings.api_base_url}/health",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - drift health must not depend on ntfy.
+        log.warning("ntfy_score_drift_push_failed", error=str(exc))
+        return False
+
+
+def notify_score_drift_partial_rescue(
+    updated: int,
+    errors: int,
+    *,
+    alert_id: int | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """Follow-up page when an ``--auto-apply`` rescue only partially landed.
+
+    Fires right after a write pass that reported errors: the fleet is
+    half-fixed and must not be treated as resolved. Distinct Title/Priority/
+    Tags from the original alarm so the two pushes are tellable apart.
+    Returns False when ntfy is disabled or the push fails (the health row
+    records the partial state either way).
+    """
+    notifier = NtfyNotifier()
+    if settings is not None:
+        notifier.settings = settings
+    if not notifier.enabled:
+        return False
+    lines = [
+        "Score-drift AUTO-APPLY PARTIALLY FAILED: the rescue write pass",
+        f"rewrote {updated} scores but reported {errors} errors — the fleet",
+        "is only HALF fixed and is NOT resolved.",
+        "The score_drift alert was re-opened pending your ack.",
+        "Fix the write failures, then re-ack and rerun `python -m",
+        "ops.score_drift --once --auto-apply` to finish the rescue.",
+    ]
+    if alert_id is not None:
+        lines.append(f"Alert #{alert_id} is open awaiting your ack.")
+    try:
+        notifier._post(
+            "\n".join(lines),
+            {
+                "Title": "Serpent Circle - Score Drift PARTIAL Rescue",
+                "Priority": "4",
+                "Tags": "critical",
+                "Click": f"{notifier.settings.api_base_url}/health",
+            },
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 - rescue health must not depend on ntfy.
+        log.warning("ntfy_score_drift_partial_push_failed", error=str(exc))
+        return False
+
+
 def run_notifier(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:
     return NtfyNotifier().flush(session, decision_ts=decision_ts)

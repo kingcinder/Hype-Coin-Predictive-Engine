@@ -10,6 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
+  # Directly-imported transitive deps (declaration lint requires every
+  # imported root to be declared): websockets via `uvicorn[standard]` and use
+  # in crawlers/sources/pump_portal.py; pydantic via fastapi / pydantic-
+  # settings and use in api/schemas.py + common/config.py.
+  "websockets>=11.0",
+  "pydantic>=2.7",
   "pydantic-settings>=2.4",
   "sqlalchemy>=2.0",
   "alembic>=1.13",

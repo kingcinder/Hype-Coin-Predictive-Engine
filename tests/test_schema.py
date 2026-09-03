@@ -113,3 +113,42 @@ def test_migration_chain_builds_cleanly_on_fresh_database(tmp_path, monkeypatch)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     for expected in ("scan_results", "parity_mismatches", "risk_outcomes", "ensemble_state"):
         assert expected in tables, f"{expected} missing after clean upgrade"
+
+
+def test_run_migrations_shared_seam_is_idempotent_and_stamps_version(tmp_path) -> None:
+    """``storage.database.run_migrations`` — the boot seam shared by the engine,
+    the standalone worker, and the local bootstrap — must build the head schema
+    (including 0020's ``score_drift_runs``) on a fresh SQLite file and stamp
+    ``alembic_version``. Runs twice to prove idempotency, and runs in a
+    subprocess so the DATABASE_URL override cannot be polluted by cached
+    settings (same isolation as the chain test above).
+    """
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "run-migrations.db"
+    env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_path}"}
+    script = "from storage.database import run_migrations; run_migrations(); run_migrations()"
+    first = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert first.returncode == 0, first.stderr
+    assert db_path.exists()
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+        assert "score_drift_runs" in tables
+        assert "alembic_version" in tables
+        # Deliberately NOT pinned to a specific head string: the requirement is
+        # that the shared seam reaches whatever head is current, not a fixed
+        # revision — pinning would break on the next migration (a tripwire).
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    assert version  # alembic stamped a revision

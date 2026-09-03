@@ -152,6 +152,48 @@ def _fmt_bytes(n: float) -> str:
     return f"{n:.1f} TiB"
 
 
+def render_score_drift_badge() -> None:
+    """Compact red-vs-ok badge for the score-drift alarm, for any view.
+
+    Mirrors the full drift card on Health & Diagnostics in one line so a
+    stale-score incident is visible from Feed Health / Live Ops Console
+    without navigating. ``api_get_silent`` keeps it quiet pre-probe and
+    while the API is down — the full card owns the explanatory copy.
+    """
+    latest = api_get_silent("/score-drift/latest")
+    if latest is None:
+        return
+    state = latest.get("state") or "unknown"
+    stamp = str(latest.get("ts") or "")[:16]
+    palette = {"ok": "#00ff88", "yellow": "#eab308", "red": "#ff4444"}
+    color = palette.get(state, "#8890a0")
+    if state == "red":
+        text = (
+            "🚨 <b>STALE SCORES — won't match the live formula</b> · "
+            "review movers with <code>make rescore-compare</code> · see "
+            "<b>Health &amp; Diagnostics</b> for the drift card"
+        )
+    elif state == "yellow":
+        text = (
+            "⚠️ <b>Score drift: divergence trending</b> — run "
+            "<code>make rescore-compare</code> before it crosses red"
+        )
+    elif state == "ok":
+        text = "✅ Score drift: persisted risk matches the live formula"
+    else:
+        text = f"Score-drift state: {state}"
+    if stamp:
+        text += f" <span style='color:#6b7280;'>· {stamp}</span>"
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;'
+        f"margin-bottom:10px;border:1px solid {color};border-left:4px solid {color};"
+        f'border-radius:8px;background:rgba(0,0,0,0.25);font-size:0.82rem;">'
+        f"<span style='color:{color};'>{text}</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 @st.fragment(run_every=3)
 def render_engine_banner() -> None:
     """Persistent live engine-status banner at the top of every view.
@@ -199,6 +241,25 @@ def render_engine_banner() -> None:
         "</div>",
         unsafe_allow_html=True,
     )
+
+    # LIVE watchdog phase state from the SSE feed: show which phases are
+    # currently wedged (a run was abandoned past its deadline and the loop is
+    # skipping it) the moment it happens — no persisted alarm row required.
+    watchdog = engine.get("watchdog") or {}
+    wedged_phases = [
+        p
+        for p in (watchdog.get("phases") or [])
+        if p.get("in_flight") or p.get("consecutive_skips", 0) > 0
+    ]
+    if wedged_phases:
+        detail = ", ".join(
+            f"{p.get('stage')} (skips {p.get('consecutive_skips', 0)})" for p in wedged_phases
+        )
+        st.warning(
+            f"⏳ **Watchdog wedged: {detail}** — these phases exceeded their "
+            "deadline and are still running in the background; iterations are "
+            "being **skipped**. See **Feed Health > Watchdog alarms**."
+        )
 
     # Surface a recent phase-watchdog timeout on EVERY view (not just Feed
     # Health / Archive & Retention), so a phase that was abandoned after its
@@ -623,6 +684,7 @@ def live_ops_console() -> None:
         "Last scan's pipeline stage counts, notifier health, and most recent "
         "pushed alerts with timestamps."
     )
+    render_score_drift_badge()
     data = api_get("/ops/console")
     if not data:
         st.info("No ops data available yet. Run ingestion to populate the console.")
@@ -1340,8 +1402,28 @@ def _watchdog_alarms_panel() -> None:
     forecast / parity / nightcrawler / data-lake) exceeded its watchdog
     deadline and was abandoned in the background — the engine loop kept going,
     but an operator should investigate why. Hidden entirely when nothing has
-    ever timed out.
+    ever timed out. On top of the persisted history, a LIVE section shows which
+    phases are currently wedged / being skipped, straight from the SSE feed.
     """
+    # LIVE: which phases are currently wedged (an abandoned run still in
+    # flight) and how many consecutive iterations have been skipped. This shows
+    # the present stuck state, not just the last persisted alarm.
+    watchdog = engine_snapshot().get("watchdog") or {}
+    wedged = [
+        p
+        for p in (watchdog.get("phases") or [])
+        if p.get("in_flight") or p.get("consecutive_skips", 0) > 0
+    ]
+    if wedged:
+        st.error(
+            "🟥 **Phases currently wedged:** "
+            + ", ".join(
+                f"`{p.get('stage')}` (skips {p.get('consecutive_skips', 0)})" for p in wedged
+            )
+            + " — these exceeded their watchdog deadline and the engine is "
+            "**skipping** them until the abandoned run clears."
+        )
+
     alarms = api_get("/watchdog/alarms", params={"limit": 20})
     if not alarms:
         return
@@ -1360,6 +1442,7 @@ def _watchdog_alarms_panel() -> None:
 
 def feed_health() -> None:
     st.header("Feed Health")
+    render_score_drift_badge()
     _watchdog_alarms_panel()
     data = api_get("/health")
     if data:
