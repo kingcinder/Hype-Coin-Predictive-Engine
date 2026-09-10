@@ -223,7 +223,9 @@ def evaluate_outcomes(
         collapsed = sum(1 for o in band_outcomes if o.collapsed)
         rugged = sum(1 for o in band_outcomes if o.rugged)
         survived = sum(1 for o in band_outcomes if o.survived)
-        unknown = total - collapsed - rugged - survived
+        # NB: rugged rows are a subset of collapsed (see outcome.collapsed),
+        # so unknown must NOT subtract rugged again or it goes negative.
+        unknown = total - collapsed - survived
         precision = collapsed / total if total > 0 else 0.0
         report.bands[band.value] = BandOutcome(
             band=band,
@@ -272,7 +274,9 @@ def evaluate_outcomes(
         collapsed = sum(1 for o in band_outcomes if o.collapsed)
         rugged = sum(1 for o in band_outcomes if o.rugged)
         survived = sum(1 for o in band_outcomes if o.survived)
-        unknown = total - collapsed - rugged - survived
+        # NB: rugged rows are a subset of collapsed (see outcome.collapsed),
+        # so unknown must NOT subtract rugged again or it goes negative.
+        unknown = total - collapsed - survived
         report.ml_bands[band_name] = BandOutcome(
             band=RiskBand(band_name),
             total_flagged=total,
