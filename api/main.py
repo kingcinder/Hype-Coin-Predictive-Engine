@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 from collections import defaultdict
@@ -8,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc, func, select, text
@@ -91,6 +92,78 @@ app = FastAPI(
     version="0.1.0",
     description="Research-only crypto intelligence API with separated hype and risk scores.",
 )
+
+
+def _check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
+    """Validate the ``Authorization: Bearer <token>`` credential (H4).
+
+    Returns ``None`` when the request is authorized, else ``(status, detail)``.
+    Fail closed: when no token is configured and the local-dev bypass is off,
+    every request is refused with 403. Comparison is constant-time.
+    """
+    settings = get_settings()
+    if settings.engine_api_auth_bypass:
+        return None
+    token = (settings.engine_api_token or "").strip()
+    if not token:
+        return (
+            403,
+            "API token not configured: set ENGINE_API_TOKEN "
+            "(or ENGINE_API_AUTH_BYPASS=1 for local development only)",
+        )
+    if not authorization:
+        return 401, "missing Authorization header: expected 'Bearer <token>'"
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not credential:
+        return 401, "malformed Authorization header: expected 'Bearer <token>'"
+    if not hmac.compare_digest(credential, token):
+        return 401, "invalid API token"
+    return None
+
+
+class _RequireApiTokenMiddleware:
+    """Bearer-token gate for every HTTP and WebSocket endpoint (H4).
+
+    Pure-ASGI so it covers all routes — including the ``/ws/*`` streams,
+    which FastAPI app-level ``dependencies`` do not reach. Rejected
+    WebSocket handshakes get a 4401 close frame; the token must be sent as a
+    header during the handshake. CORS preflight (OPTIONS) is exempt.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        scope_type = scope["type"]
+        if scope_type in ("http", "websocket") and not (
+            scope_type == "http" and scope.get("method") == "OPTIONS"
+        ):
+            headers = dict(scope.get("headers", []))
+            authorization = headers.get(b"authorization", b"").decode("latin-1") or None
+            verdict = _check_bearer_token(authorization)
+            if verdict is not None:
+                status_code, detail = verdict
+                log.warning(
+                    "api_auth_rejected",
+                    path=scope.get("path"),
+                    status=status_code,
+                )
+                if scope_type == "websocket":
+                    await send({"type": "websocket.close", "code": 4401})
+                else:
+                    response = JSONResponse({"detail": detail}, status_code=status_code)
+                    await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# Registered before the CORS block: Starlette's reversed build order puts
+# earlier-added user middleware outside later-added ones, so this gate runs
+# before CORS. CORS preflight (OPTIONS) carries no credentials by design and
+# is explicitly exempt inside the middleware, so the GUI's cross-origin
+# EventSource/WebSocket handshakes keep working once they send the
+# Authorization header.
+app.add_middleware(_RequireApiTokenMiddleware)
 
 # The Streamlit GUI (typically :8501) calls this API cross-origin from the
 # browser for both httpx JSON calls and the SSE live-status bridge. Without
@@ -1765,19 +1838,31 @@ def webhook_register(
     webhook_url: str = "http://localhost:8080/webhook",
     webhook_name: str = "custom",
     webhook_events: str = "ignition_detected,lifecycle_transition,high_signal_scan",
-    webhook_secret: str | None = None,
+    webhook_secret: Annotated[str | None, Header(alias="X-Webhook-Secret")] = None,
 ) -> dict:
-    """Register a new webhook. Parameters passed via query strings for GUI compatibility."""
-    from data_lake.webhooks import register_webhook
+    """Register a new webhook. Non-secret parameters passed via query strings for GUI compatibility.
+
+    The optional HMAC signing secret is read from the ``X-Webhook-Secret``
+    request header (H5) — never from the query string, where it would leak
+    into access logs and browser history. Query-param secrets are no longer
+    accepted. The URL is validated against the SSRF policy (H6): http/https
+    only, no embedded credentials, and the resolved host must be a public IP
+    unless allowlisted via ``WEBHOOK_URL_ALLOWLIST_CSV`` or private hosts are
+    permitted via ``WEBHOOK_ALLOW_PRIVATE_HOSTS=1``.
+    """
+    from data_lake.webhooks import WebhookURLError, register_webhook
 
     event_types = [e.strip() for e in webhook_events.split(",") if e.strip()]
-    webhook = register_webhook(
-        session,
-        url=webhook_url,
-        name=webhook_name,
-        event_types=event_types,
-        secret=webhook_secret,
-    )
+    try:
+        webhook = register_webhook(
+            session,
+            url=webhook_url,
+            name=webhook_name,
+            event_types=event_types,
+            secret=webhook_secret,
+        )
+    except WebhookURLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "id": webhook.id,
         "url": webhook.url,

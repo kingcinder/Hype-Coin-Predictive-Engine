@@ -16,6 +16,22 @@ from storage import models
 from storage.database import get_session
 from tests.conftest import seed_market_asset
 
+# API auth contract (H4): every endpoint requires
+# ``Authorization: Bearer <ENGINE_API_TOKEN>``. The suite configures a test
+# token and sends it on every TestClient.
+_TEST_API_TOKEN = "test-api-token-not-a-secret"
+_AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_API_TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _api_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide ENGINE_API_TOKEN for API tests (get_settings is lru-cached)."""
+    monkeypatch.setenv("ENGINE_API_TOKEN", _TEST_API_TOKEN)
+    monkeypatch.delenv("ENGINE_API_AUTH_BYPASS", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 def test_api_endpoints_return_fixture_data(session) -> None:
     asset = seed_market_asset(session)
@@ -87,7 +103,7 @@ def test_api_endpoints_return_fixture_data(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         assert client.get("/health").status_code == 200
         top = client.get("/scores/top").json()
         assert isinstance(top, list)
@@ -197,7 +213,7 @@ def test_lifecycle_alerts_api_includes_terminal_evidence(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         response = client.get("/lifecycle/alerts")
         assert response.status_code == 200
         rows = response.json()
@@ -235,7 +251,7 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         base = next(row for row in client.get("/rpc/pool").json() if row["chain"] == "base")
         assert base["state"] == "red"
         endpoint = base["endpoints"][0]
@@ -309,7 +325,7 @@ def test_velocity_features_endpoint_reports_live_values(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         velocity = client.get("/features/velocity").json()
         row = next(item for item in velocity if item["asset_id"] == asset.id)
         assert row["symbol"] == "HYPE"
@@ -353,7 +369,7 @@ def test_alert_quality_trend_groups_weekly_rates_by_type(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        response = TestClient(app).get("/alerts/quality/trend", params={"weeks": 104})
+        response = TestClient(app, headers=_AUTH_HEADERS).get("/alerts/quality/trend", params={"weeks": 104})
         assert response.status_code == 200
         rows = response.json()["weeks"]
         ignition = next(row for row in rows if row["alert_type"] == "ignition_detected")
@@ -421,7 +437,7 @@ def test_ops_console_api(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         response = client.get("/ops/console")
         assert response.status_code == 200
         data = response.json()
@@ -460,7 +476,7 @@ def test_alert_ack_path_and_quality_ledger(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         # ACK with a quality rating.
         response = client.post(f"/alerts/{alert.id}/ack", json={"quality": "useful"})
         assert response.status_code == 200
@@ -517,7 +533,7 @@ def test_retention_growth_api_projects_disk_full_horizon(session, monkeypatch) -
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         response = client.get("/retention/growth")
         assert response.status_code == 200
         data = response.json()
@@ -545,7 +561,7 @@ def test_watchdog_alarms_endpoint(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         # No watchdog alarms yet.
         assert client.get("/watchdog/alarms").json() == []
         record_health(
@@ -592,7 +608,7 @@ def test_parity_latest_endpoint(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         assert client.get("/parity/latest").status_code == 404
         decision = datetime(2026, 5, 1, 0, 0, tzinfo=UTC)
         record_health(
@@ -666,7 +682,7 @@ def test_backtest_run_api_accepts_lake_source(session, monkeypatch) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         start = datetime(2026, 5, 1, 10, 0, tzinfo=UTC)
         end = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
         response = client.post(
@@ -745,7 +761,7 @@ def test_score_drift_history_endpoint_returns_series(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         rows = client.get("/score-drift/history").json()
         assert len(rows) == 2
         assert rows[0]["state"] == "red"  # newest first
@@ -802,7 +818,7 @@ def test_parity_mismatches_endpoint_returns_history(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        client = TestClient(app)
+        client = TestClient(app, headers=_AUTH_HEADERS)
         rows = client.get("/parity/mismatches").json()
         assert len(rows) == 2
         assert rows[0]["feature_name"] == "liquidity_depth"  # newest run first
