@@ -194,27 +194,45 @@ class EVMFactoryWatcher:
 
         symbol0 = self._token_symbol(token0) or "UNKNOWN"
         symbol1 = self._token_symbol(token1) or "UNKNOWN"
+        # H11: token0/token1 are ordered by *address*, not economic role. The
+        # codebase convention (ingestion/normalizers.py) is base = volatile
+        # target token, quote = stable. Passing token0/token1 through verbatim
+        # inverted ~half of all pairs (base=stable), making the meme token
+        # invisible to every downstream lookup keyed on Pair.base_asset_id and
+        # leaving reserve_usd=None so RUGGED/COLLAPSE detection went dead.
+        # Detect the stable side explicitly; fall back to address order when
+        # neither or both sides are stable (deterministic).
+        # Normalize before the stable check: on-chain symbols are not
+        # guaranteed uppercase ("usdc" vs "USDC").
+        stable0 = symbol0.upper() in STABLE_SYMBOLS
+        stable1 = symbol1.upper() in STABLE_SYMBOLS
+        if stable0 and not stable1:
+            base_addr, quote_addr = token1, token0
+            base_symbol, quote_symbol = symbol1, symbol0
+        else:
+            base_addr, quote_addr = token0, token1
+            base_symbol, quote_symbol = symbol0, symbol1
         base_asset = upsert_asset(
             session,
             chain_id=chain.id,
-            address=token0,
-            symbol=symbol0,
-            name=symbol0,
+            address=base_addr,
+            symbol=base_symbol,
+            name=base_symbol,
             first_seen_at=observed_at,
         )
         quote_asset = upsert_asset(
             session,
             chain_id=chain.id,
-            address=token1,
-            symbol=symbol1,
-            name=symbol1,
+            address=quote_addr,
+            symbol=quote_symbol,
+            name=quote_symbol,
             first_seen_at=observed_at,
         )
         upsert_contract(
             session,
             chain_id=chain.id,
             asset_id=base_asset.id,
-            address=token0,
+            address=base_addr,
             observed_at=observed_at,
         )
         raw = store_raw_evidence(
@@ -234,10 +252,18 @@ class EVMFactoryWatcher:
             created_at_source=observed_at,
         )
         reserve0, reserve1 = self._get_reserves(pair)
+        # Reserves are positional (reserve0 <-> token0); remap to base/quote
+        # roles following the stable-side detection above.
+        base_is_token0 = base_addr == token0
+        reserve_base = reserve0 if base_is_token0 else reserve1
+        reserve_quote = reserve1 if base_is_token0 else reserve0
         reserve_usd: float | None = None
-        if reserve1 is not None and symbol1 in STABLE_SYMBOLS:
-            decimals1 = self._token_decimals(token1)
-            reserve_usd = reserve1 / (10.0**decimals1)
+        # H11: previously only computed when *token1* was the stable; compute
+        # from whichever side is the stable quote so inverted pairs also get
+        # reserve_usd (radar/ignition.py filters reserve_usd.is_not(None)).
+        if quote_symbol.upper() in STABLE_SYMBOLS and reserve_quote is not None:
+            decimals_quote = self._token_decimals(quote_addr)
+            reserve_usd = reserve_quote / (10.0**decimals_quote)
         insert_liquidity_snapshot_once(
             session,
             pool_id=pool.id,
@@ -245,8 +271,8 @@ class EVMFactoryWatcher:
             ts=ts,
             observed_at=observed_at,
             reserve_usd=reserve_usd,
-            reserve_base=reserve0,
-            reserve_quote=reserve1,
+            reserve_base=reserve_base,
+            reserve_quote=reserve_quote,
             raw_evidence_id=raw.id,
         )
         insert_market_snapshot_once(

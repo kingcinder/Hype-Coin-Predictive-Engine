@@ -263,3 +263,144 @@ def test_narrative_engine_crawls_and_clusters(session) -> None:
     }
     assert len(keys) == 1
     assert keys != {None}
+
+
+@respx.mock
+def test_reddit_crawler_uses_post_creation_time() -> None:
+    """H14: Reddit items carry the post's created_utc, not the crawl time."""
+    created = int(datetime(2026, 5, 1, 10, 30, tzinfo=UTC).timestamp())
+    respx.get("https://www.reddit.com/r/CryptoMoonShots/new.json").mock(
+        return_value=Response(
+            200,
+            json={
+                "data": {
+                    "children": [
+                        {
+                            "data": {
+                                "title": "HYPE token presale",
+                                "permalink": "/r/CryptoMoonShots/comments/abc",
+                                "selftext": "gem",
+                                "author": "shillbot",
+                                "created_utc": created,
+                            }
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    crawler = RedditCrawler(["CryptoMoonShots"])
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 1
+    assert items[0]["published"] == datetime(2026, 5, 1, 10, 30, tzinfo=UTC)
+
+
+@respx.mock
+def test_huggingface_crawler_uses_last_modified() -> None:
+    """H14: HF items carry repoData.lastModified, not None/crawl time."""
+    from narrative.crawlers import HuggingFaceCrawler
+
+    respx.get("https://huggingface.co/api/trending").mock(
+        return_value=Response(
+            200,
+            json={
+                "recentlyTrending": [
+                    {
+                        "modelId": "acme/hype-llm",
+                        "summary": "fine-tuned for hype",
+                        "repoData": {
+                            "id": "acme/hype-llm",
+                            "author": "acme",
+                            "lastModified": "2026-04-30T08:15:00.000Z",
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    crawler = HuggingFaceCrawler()
+    try:
+        items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 1
+    assert items[0]["published"] == datetime(2026, 4, 30, 8, 15, tzinfo=UTC)
+
+
+def test_resolve_asset_by_symbol_rejects_substring_and_short_symbols(session) -> None:
+    """H13: naive substring matching attributed "AI" to any text containing
+    "said"/"air"; token-boundary matching with a 3-char minimum does not."""
+    from narrative.engine import resolve_asset_by_symbol
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+
+    chain, _ = seed_reference(session)
+    upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenAI111111111111111111111111111111111",
+        symbol="AI",
+        name="AI Token",
+        first_seen_at=NOW,
+    )
+    session.commit()
+
+    assert resolve_asset_by_symbol(session, "he said the market is up") is None
+    assert resolve_asset_by_symbol(session, "the air is thin up here") is None
+
+
+def test_resolve_asset_by_symbol_rejects_placeholders(session) -> None:
+    """H13: placeholder symbols like UNKNOWN must never match filler prose."""
+    from narrative.engine import resolve_asset_by_symbol
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+
+    chain, _ = seed_reference(session)
+    upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenUnk11111111111111111111111111111111",
+        symbol="UNKNOWN",
+        name="Unknown Token",
+        first_seen_at=NOW,
+    )
+    session.commit()
+
+    assert resolve_asset_by_symbol(session, "unknown unknowns keep piling up") is None
+
+
+def test_resolve_asset_by_symbol_matches_exact_tokens_deterministically(session) -> None:
+    """H13: exact token-boundary matches win; longest symbol breaks ties."""
+    from narrative.engine import resolve_asset_by_symbol
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+
+    chain, _ = seed_reference(session)
+    bonk = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenBonk1111111111111111111111111111111",
+        symbol="BONK",
+        name="Bonk",
+        first_seen_at=NOW,
+    )
+    bonkx = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenBonkX111111111111111111111111111111",
+        symbol="BONKX",
+        name="BonkX",
+        first_seen_at=NOW,
+    )
+    session.commit()
+
+    assert resolve_asset_by_symbol(session, "BONK is pumping today") is bonk
+    # "BONKX" contains "BONK" as a substring — longest match must win.
+    assert resolve_asset_by_symbol(session, "BONKX to the moon") is bonkx
+    # same DB, same text -> same answer every time (no DB-order dependence)
+    first = resolve_asset_by_symbol(session, "buy BONK now")
+    second = resolve_asset_by_symbol(session, "buy BONK now")
+    assert first is bonk and second is bonk

@@ -153,7 +153,13 @@ class PrelaunchQueue:
     def _maybe_alert(
         self, session: Session, asset: models.Asset, candidate: models.PrelaunchCandidate
     ) -> None:
-        ref = f"prelaunch:{candidate.id}"
+        # H16: dedup on a scan-stable key. The old key f"prelaunch:{candidate.id}"
+        # never matched because upsert_prelaunch_candidate inserts a new row
+        # (new id) for every scan with a new decision_ts — so any candidate
+        # above threshold re-fired a duplicate alert on every scan. Keying on
+        # (asset, model_version) fires once per candidate lifecycle; a new model
+        # version re-arms the alert.
+        ref = f"prelaunch:{asset.id}:{self.settings.prelaunch_model_version}"
         existing = session.scalar(
             select(models.Alert).where(
                 models.Alert.asset_id == asset.id,
