@@ -124,6 +124,7 @@ CREATE TABLE archive_manifests (
 	partition_month INTEGER NOT NULL,
 	row_count INTEGER NOT NULL,
 	byte_size INTEGER NOT NULL,
+	sha256 VARCHAR(64),
 	first_observed_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	last_observed_at TIMESTAMP WITH TIME ZONE NOT NULL,
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL,

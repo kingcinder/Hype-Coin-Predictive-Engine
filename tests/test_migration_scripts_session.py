@@ -102,20 +102,18 @@ def _snapshot_count(session: Session) -> int:
 
 
 @pytest.mark.parametrize(
-    ("provider", "fn_name", "canned_rows", "inserted_expected"),
+    ("provider", "fn_name", "canned_rows"),
     [
         pytest.param(
             "coingecko",
             "backfill_coingecko",
             [(datetime(2026, 8, 30, tzinfo=UTC), 1.5), (datetime(2026, 8, 31, tzinfo=UTC), 1.6)],
-            2,
             id="coingecko",
         ),
         pytest.param(
             "defillama",
             "backfill_defillama",
             None,  # patched per-ref below
-            1,
             id="defillama",
         ),
     ],
@@ -125,7 +123,6 @@ def test_backfill_session_none_uses_own_cycle(
     provider: str,
     fn_name: str,
     canned_rows: list[tuple[datetime, float]] | None,
-    inserted_expected: int,
 ) -> None:
     """session=None (the CLI shape) opens/owns one session_scope() cycle and
     dry-run persists nothing on the override DB."""
@@ -141,9 +138,10 @@ def test_backfill_session_none_uses_own_cycle(
     else:
         monkeypatch.setattr(
             "scripts.backfill_history._defillama_history",
-            lambda client, refs, days: {
-                ref: [(datetime(2026, 8, 30, tzinfo=UTC), 1.5)] for ref in refs
-            },
+            lambda client, refs, days: (
+                {ref: [(datetime(2026, 8, 30, tzinfo=UTC), 1.5)] for ref in refs},
+                0,
+            ),
         )
     _no_sleep(monkeypatch)
 
@@ -158,7 +156,9 @@ def test_backfill_session_none_uses_own_cycle(
     assert scope.closed is True
     assert result["dry_run"] is True
     assert result["assets_with_pairs"] == 1
-    assert result["snapshots_inserted"] == inserted_expected
+    # M18: a dry run performs no writes, so it reports zero inserts —
+    # the old phantom count (would-be rows) is gone by design.
+    assert result["snapshots_inserted"] == 0
 
     # dry-run wrote nothing: count via a fresh connection on the same engine.
     check = sessionmaker(bind=engine)()

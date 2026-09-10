@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# Serpent Circle — split-services systemd installer.
+#
+# Installs serpent-api.service, serpent-worker.service, serpent-ui.service and
+# the serpent-retention timer into /opt/serpent (or $PREFIX).
+#
+# NOTE: this is the *split-services* installer. It does NOT install the
+# `serpent` CLI (that ships with packaging/install.sh, the all-in-one
+# installer documented in INSTALL.md, which manages a single
+# serpent.service). Manage the units installed here directly with systemctl,
+# e.g. `systemctl status serpent-api serpent-worker serpent-ui`.
+# ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 PREFIX="${PREFIX:-/opt/serpent}"
@@ -22,7 +34,9 @@ fi
 
 if [[ ! -d "$PREFIX/.git" ]]; then
   [[ -n "$REPO_URL" ]] || { echo "Set REPO_URL for a fresh install" >&2; exit 1; }
-  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$PREFIX")"
+  # Create the parent directory without changing its ownership: taking over
+  # /opt (or any other parent) for the service user is overbroad (M20).
+  install -d "$(dirname "$PREFIX")"
   git clone --branch "$BRANCH" "$REPO_URL" "$PREFIX"
 fi
 
@@ -43,9 +57,20 @@ install -o root -g root -m 0644 deploy/systemd/serpent-retention.service "$UNIT_
 install -o root -g root -m 0644 deploy/systemd/serpent-retention.timer "$UNIT_DIR/serpent-retention.timer"
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$PREFIX"
+# Record the tracked branch: the `serpent update` path (packaging/install.sh)
+# reads this file, and keeping it here keeps both installers consistent.
+echo "$BRANCH" > "$PREFIX/.serpent-branch"
+chown "$SERVICE_USER:$SERVICE_USER" "$PREFIX/.serpent-branch"
+# Run migrations from $PREFIX: common/config.py resolves env_file=".env"
+# relative to the process cwd, so running alembic from anywhere else can
+# migrate the wrong database (M19).
+cd "$PREFIX"
 "$PREFIX/.venv/bin/alembic" -c "$PREFIX/storage/alembic.ini" upgrade head
 systemctl daemon-reload
 systemctl enable --now serpent-api.service serpent-worker.service serpent-ui.service serpent-retention.timer
 systemctl restart serpent-api.service serpent-worker.service serpent-ui.service
 
 echo "Serpent Circle installed at $PREFIX"
+echo "Split-services profile: manage units with systemctl, e.g."
+echo "  systemctl status serpent-api serpent-worker serpent-ui"
+echo "(The 'serpent' CLI is only installed by packaging/install.sh.)"

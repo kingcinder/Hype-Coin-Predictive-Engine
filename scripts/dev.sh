@@ -165,6 +165,26 @@ cmd_clean() {
 }
 
 cmd_clean_db() {
+    # The SQLite file is the primary data store: deleting it is unrecoverable,
+    # so a bare invocation asks first. Pass --force/-y to skip the prompt
+    # (for scripted use).
+    local force=false
+    for arg in "$@"; do
+        [[ "$arg" == "--force" || "$arg" == "-y" ]] && force=true
+    done
+    if [[ "$force" != "true" ]]; then
+        echo "⚠️  This will PERMANENTLY DELETE the local SQLite database"
+        echo "   (serpent.db + WAL files). This cannot be undone."
+        confirm=""
+        # A closed stdin (EOF) must abort, not fall through: read returns
+        # non-zero on EOF, which set -e would otherwise turn into a bare
+        # exit before the abort message prints.
+        read -r -p "Type 'yes' to continue: " confirm || true
+        if [[ "$confirm" != "yes" ]]; then
+            echo "Aborted."
+            return 0
+        fi
+    fi
     echo "Removing local SQLite database..."
     if [[ -f serpent.db ]]; then
         rm -f serpent.db serpent.db-wal serpent.db-shm
@@ -309,7 +329,7 @@ case "$COMMAND" in
     # Uninstall
     uninstall)          cmd_uninstall ;;
     clean)              cmd_clean ;;
-    clean-db)           cmd_clean_db ;;
+    clean-db)           shift; cmd_clean_db "$@" ;;
     
     # Development
     test)               cmd_test ;;

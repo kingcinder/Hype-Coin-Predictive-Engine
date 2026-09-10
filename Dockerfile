@@ -12,17 +12,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies first (layer cache)
+# Install Python dependencies first (layer cache). Runtime package only —
+# dev tooling (pytest, mypy, ruff) must not ship in the production image
+# (defect M22); CI installs ".[dev]" in its own venv instead.
 COPY pyproject.toml README.md /app/
 RUN pip install --upgrade pip \
-    && pip install -e ".[dev]"
+    && pip install -e "."
 
 # Copy application code
 COPY . /app
 
 # Create non-root user for runtime
 RUN groupadd -r serpent && useradd -r -g serpent -d /app -s /sbin/nologin serpent \
-    && mkdir -p /app/data /app/data/archive \
+    && mkdir -p /app/data /app/data/archive /app/backups \
     && chown -R serpent:serpent /app
 
 # ── All-in-one mode (default): runs API + GUI + worker in one process ──

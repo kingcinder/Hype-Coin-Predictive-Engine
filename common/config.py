@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     api_base_url: str = "http://localhost:8000"
+    # ── API authentication (H4) ──────────────────────────────────────────
+    # Bearer-token gate for every API endpoint (HTTP + WebSocket). Set
+    # ENGINE_API_TOKEN to a long random secret and send it as
+    # ``Authorization: Bearer <token>`` on every request. When unset, every
+    # request is refused with 403 (fail closed) unless
+    # ENGINE_API_AUTH_BYPASS=1 is explicitly set — a local-dev escape hatch
+    # only, never for a network-reachable deployment.
+    engine_api_token: str | None = None
+    engine_api_auth_bypass: bool = False
     # SQLite busy timeout (ms) before a write gives up on a transient lock and
     # raises "database is locked". Higher than the SQLite default so genuine
     # intra-process write collisions (worker thread + API thread on one file)
@@ -289,6 +298,18 @@ class Settings(BaseSettings):
     webhook_enabled: bool = True
     webhook_default_cooldown_seconds: int = 300
     webhook_http_timeout_seconds: float = 10.0
+    # ── Webhook URL validation (H6 SSRF) ──────────────────────────────────
+    # Registered webhook URLs must be http/https with no credentials, and the
+    # resolved IP must be a public address (private/loopback/link-local/
+    # multicast/reserved ranges are blocked). The same check runs at dispatch
+    # time. Two operator escape hatches:
+    # - WEBHOOK_URL_ALLOWLIST_CSV: comma-separated hostnames that are always
+    #   permitted (exact, case-insensitive match), e.g. a local automation
+    #   endpoint. Still requires http/https and no credentials.
+    # - WEBHOOK_ALLOW_PRIVATE_HOSTS=1: allow private/loopback/link-local
+    #   targets for homelab use. Off by default.
+    webhook_url_allowlist_csv: str | None = None
+    webhook_allow_private_hosts: bool = False
 
     # night crawlers: expanded data sources for the engine
     nightcrawler_enabled: bool = True
@@ -321,6 +342,9 @@ class Settings(BaseSettings):
     nightcrawler_pump_portal_enabled: bool = True
     nightcrawler_dexscreener_trends_enabled: bool = True
     nightcrawler_google_trends_enabled: bool = True
+    # M46: when the PumpPortal HTTP endpoint is empty/failing, fall back to a
+    # short-lived live WebSocket tap. Disable for deterministic HTTP-only runs.
+    pump_portal_ws_fallback_enabled: bool = True
     google_trends_geo: str = "US"
     farcaster_api_key: str | None = None
     farcaster_tracked_fids_csv: str = "365,fid:warpcast,fid:dwrk9611,fid:danielleecroft"

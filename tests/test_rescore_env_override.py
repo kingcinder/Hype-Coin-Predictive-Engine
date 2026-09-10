@@ -232,7 +232,7 @@ def test_cli_real_write_honors_database_url(
     now integration-testable end-to-end.
     """
     url = f"sqlite:///{throwaway_db}"
-    result = _run_cli(throwaway_db, "DATABASE_URL", url)
+    result = _run_cli(throwaway_db, "DATABASE_URL", url, "--yes")
 
     assert result.returncode == 0, result.stderr
     assert "Rescore complete (APPLIED)" in result.stdout
@@ -254,7 +254,7 @@ def test_serpent_db_path_wins_over_database_url(
 
     url = f"sqlite:///{other_db}"
     result = _run_cli(
-        throwaway_db, "SERPENT_DB_PATH", str(throwaway_db), extra_env={"DATABASE_URL": url}
+        throwaway_db, "SERPENT_DB_PATH", str(throwaway_db), "--yes", extra_env={"DATABASE_URL": url}
     )
 
     assert result.returncode == 0, result.stderr
