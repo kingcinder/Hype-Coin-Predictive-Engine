@@ -55,7 +55,10 @@ class NightCrawlerOrchestrator:
         self.heuristics = HeuristicsEngine()
         self._crawlers: dict[str, BaseCrawler] = {}
         self._last_run: dict[str, datetime] = {}
-        self._lock = threading.Lock()
+        # Reentrant: run_all() holds this lock while calling _should_run(),
+        # which re-acquires it (C3: a plain Lock deadlocked the owning thread
+        # on the first scheduled pass with force=False).
+        self._lock = threading.RLock()
         self._init_crawlers()
 
     def _init_crawlers(self) -> None:
@@ -89,7 +92,9 @@ class NightCrawlerOrchestrator:
                 keywords=self.settings.x_trends_crypto_keywords_csv.split(",")
             )
         if self.settings.nightcrawler_pump_portal_enabled:
-            self._crawlers["pump_portal"] = PumpPortalCrawler()
+            self._crawlers["pump_portal"] = PumpPortalCrawler(
+                enable_ws_fallback=self.settings.pump_portal_ws_fallback_enabled
+            )
         if self.settings.nightcrawler_dexscreener_trends_enabled:
             self._crawlers["dexscreener_trends"] = DexScreenerTrendsCrawler()
         if self.settings.nightcrawler_google_trends_enabled:

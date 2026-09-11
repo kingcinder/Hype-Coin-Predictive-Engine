@@ -100,7 +100,12 @@ class SolanaMempoolWatcher:
             asset=asset,
             source_id=asset_id_source(session, asset) or 0,
             event_type=IgnitionEventType.SNIPER_BURST.value,
-            ts=observed_at,
+            # M26: key the event on the pool-creation anchor, not the poll time.
+            # upsert_event dedups on (asset_id, event_type, ts, source_id); with
+            # ts=observed_at every poll inside the burst window inserted a new
+            # duplicate event+alert. The radar's own _sniper_burst already keys
+            # on ts=anchor.
+            ts=anchor,
             observed_at=observed_at,
             confidence=0.85,
             details={
@@ -224,9 +229,25 @@ def run_solana_watch(
         return {"skipped": True}
     decision_ts = ensure_utc(decision_ts or utc_now())
     watcher = SolanaMempoolWatcher()
+    # H12: the burst detector only fires within mempool_burst_window_seconds of
+    # pool creation, but the old query took the first N assets in unspecified
+    # DB order — almost never young enough to trigger. Watch assets that are
+    # young by discovery time or by pool creation, newest first.
+    window_start = decision_ts - timedelta(seconds=settings.mempool_burst_window_seconds)
+    young_pool = (
+        select(models.Pool.id)
+        .join(models.Pair, models.Pair.pool_id == models.Pool.id)
+        .where(models.Pair.base_asset_id == models.Asset.id)
+        .where(models.Pool.created_at_source >= window_start)
+        .exists()
+    )
     stmt = select(models.Asset).where(models.Asset.chain_id == chain.id)
     if asset_ids is not None:
         stmt = stmt.where(models.Asset.id.in_(asset_ids))
+    else:
+        stmt = stmt.where((models.Asset.first_seen_at >= window_start) | young_pool).order_by(
+            models.Asset.first_seen_at.desc()
+        )
     assets = session.scalars(stmt.limit(settings.solana_holder_scan_limit * 5 or 5)).all()
     watched = 0
     bursts = 0

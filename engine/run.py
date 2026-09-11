@@ -93,7 +93,8 @@ def _run_watchdog_phase(
     skip_alert_max_alerts: int = 5,
     skip_alert_max_minutes: float = 720.0,
     session: Any = None,
-) -> StageOutcome:
+    stop: threading.Event | None = None,
+) -> StageOutcome | None:
     """Run a blocking engine phase under the shared watchdog timeout.
 
     Mirrors the retention-stage guard: the phase runs synchronously in the
@@ -114,6 +115,12 @@ def _run_watchdog_phase(
     - a completed run clears the stage's episode state (fresh wedge = fresh
       caps).
 
+    When ``stop`` is provided (the engine's shutdown event), the watchdog
+    join runs in a daemon thread and shutdown no longer waits out the full
+    watchdog timeout (M6): if ``stop`` fires mid-phase, the phase is
+    abandoned in the background and ``None`` is returned. ``fn`` exceptions
+    still propagate to the caller when ``stop`` is not set.
+
     ``session`` is injectable for tests: when provided the alarm row is added
     to it (and flushed) instead of opening a throwaway ``SessionLocal``, so an
     integration driver can assert the red row landed.
@@ -125,7 +132,45 @@ def _run_watchdog_phase(
     )
     from storage.repository import record_health
 
-    outcome = run_stage_with_timeout(fn, timeout_seconds=timeout_seconds, stage=stage)
+    if stop is not None and stop.is_set():
+        # Shutting down: don't start new phase work at all.
+        log.info("engine_phase_skipped_on_shutdown", stage=stage)
+        return None
+
+    if stop is None:
+        outcome = run_stage_with_timeout(fn, timeout_seconds=timeout_seconds, stage=stage)
+    else:
+        # Stop-aware join: run the watchdog-guarded phase in a daemon thread
+        # so SIGINT/SIGTERM during a long phase returns promptly instead of
+        # blocking for the full timeout. The abandoned daemon thread keeps
+        # running to its own timeout and can never block process exit.
+        holder: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                holder["outcome"] = run_stage_with_timeout(
+                    fn, timeout_seconds=timeout_seconds, stage=stage
+                )
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread.
+                holder["error"] = exc
+
+        thread = threading.Thread(target=_target, name=f"engine-phase-{stage}", daemon=True)
+        thread.start()
+        # Poll at 10ms granularity: prompt shutdown response without adding
+        # meaningful latency to normally-completing phases (the in-flight
+        # registry in ops.watchdog still observes the real watchdog timeout).
+        while thread.is_alive():
+            if stop.wait(0.01):
+                log.info("engine_phase_abandoned_on_shutdown", stage=stage)
+                return None
+        error = holder.get("error")
+        if error is not None:
+            if isinstance(error, BaseException):
+                raise error
+            raise RuntimeError(str(error))
+        outcome = holder.get("outcome")
+        if outcome is None:  # defensive: thread died without recording a result
+            return None
 
     def _record(message: str) -> None:
         if session is not None:
@@ -141,9 +186,6 @@ def _run_watchdog_phase(
             except Exception as exc:  # noqa: BLE001 - an alarm must never kill the loop.
                 log.debug("stage_watchdog_alarm_failed", stage=stage, error=str(exc))
 
-    if outcome.result is not None:
-        reset_phase_skip(stage)
-        return outcome
     if outcome.timed_out:
         reset_phase_skip(stage)
         message = (
@@ -152,6 +194,13 @@ def _run_watchdog_phase(
         )
         log.error("engine_stage_watchdog_timeout", stage=stage, timeout_seconds=timeout_seconds)
         _record(message)
+        return outcome
+
+    if not outcome.skipped:
+        # Completed run. ``result`` may legitimately be None when the phase
+        # fn returned None — that is a successful completion, not a wedge
+        # (defect L2): only a still-in-flight prior run counts as a skip.
+        reset_phase_skip(stage)
         return outcome
 
     # outcome.skipped — the original timeout already alarmed. Re-alert only once
@@ -268,7 +317,10 @@ def run_engine_phases(
             skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=forecast_fn,
             session=alarm_session,
+            stop=stop,
         )
+        if forecast is None:  # shutdown requested mid-phase (M6)
+            return True, last_nc_run_monotonic
         if forecast.timed_out:
             state.mark_error("forecast: watchdog timeout")
             phase_error = True
@@ -293,7 +345,10 @@ def run_engine_phases(
             skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=retention_fn,
             session=alarm_session,
+            stop=stop,
         )
+        if retention is None:  # shutdown requested mid-phase (M6)
+            return True, last_nc_run_monotonic
         if retention.timed_out:
             state.mark_error("retention: watchdog timeout")
             phase_error = True
@@ -317,7 +372,10 @@ def run_engine_phases(
             skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=parity_fn,
             session=alarm_session,
+            stop=stop,
         )
+        if parity is None:  # shutdown requested mid-phase (M6)
+            return True, last_nc_run_monotonic
         if parity.skipped:
             log.info("engine_phase_skipped_still_wedged", stage="parity")
         elif parity.result and not parity.result.get("skipped"):
@@ -340,7 +398,10 @@ def run_engine_phases(
                     skip_alert_max_minutes=settings.skip_alert_max_minutes,
                     fn=nightcrawler_fn,
                     session=alarm_session,
+                    stop=stop,
                 )
+                if nc_result is None:  # shutdown requested mid-phase (M6)
+                    return True, last_nc_run_monotonic
                 if nc_result.timed_out:
                     state.mark_error("nightcrawler: watchdog timeout")
                     phase_error = True
@@ -370,7 +431,10 @@ def run_engine_phases(
                 skip_alert_max_minutes=settings.skip_alert_max_minutes,
                 fn=data_lake_fn,
                 session=alarm_session,
+                stop=stop,
             )
+            if dl_result is None:  # shutdown requested mid-phase (M6)
+                return True, last_nc_run_monotonic
             if dl_result.timed_out:
                 state.mark_error("data_lake: watchdog timeout")
                 phase_error = True
@@ -399,7 +463,10 @@ def run_engine_phases(
                 skip_alert_max_minutes=settings.skip_alert_max_minutes,
                 fn=score_drift_fn,
                 session=alarm_session,
+                stop=stop,
             )
+            if drift is None:  # shutdown requested mid-phase (M6)
+                return True, last_nc_run_monotonic
             if drift.skipped:
                 log.info("engine_phase_skipped_still_wedged", stage="score_drift")
             elif drift.result and not drift.result.get("skipped"):

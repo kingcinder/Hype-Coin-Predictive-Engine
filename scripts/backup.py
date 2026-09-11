@@ -19,6 +19,7 @@ restart policy rather than silently passing).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -33,6 +34,41 @@ ARCHIVE_DIR = Path(os.getenv("BACKUP_ARCHIVE_DIR", "data/archive"))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "data/backups"))
 RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "7"))
 INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS", "24"))
+
+# Must match ops/archive.py::ARCHIVE_MERGE_LOCK_NAME — the lock *filename* is
+# the cross-process contract between the compactor and this sidecar. This
+# script stays stdlib-only (importing ops.archive would bind the configured
+# DB engine at import time via storage.database), so the tiny lock
+# implementation is duplicated here rather than imported.
+_ARCHIVE_MERGE_LOCK_NAME = ".archive.merge.lock"
+
+
+@contextlib.contextmanager
+def _archive_merge_lock(timeout: float):
+    """Hold the compactor's merge lock, waiting at most ``timeout`` seconds.
+
+    Raises ``TimeoutError`` when the lock cannot be acquired in time.
+    """
+    import fcntl
+
+    path = ARCHIVE_DIR.resolve() / _ARCHIVE_MERGE_LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    with open(path, "a+b") as fh:
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out after {timeout}s waiting for archive merge lock {path}"
+                    ) from None
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _snapshot_db(dest: Path) -> int:
@@ -54,12 +90,29 @@ def _snapshot_db(dest: Path) -> int:
     return dest.stat().st_size
 
 
-def _snapshot_archive(dest: Path) -> int:
-    """Tar the Parquet archive lake into ``dest`` (gzip). Returns bytes."""
-    if not ARCHIVE_DIR.exists():
-        return 0
+def _tar_archive(dest: Path) -> None:
     with tarfile.open(dest, "w:gz") as tar:
         tar.add(str(ARCHIVE_DIR), arcname=ARCHIVE_DIR.name)
+
+
+def _snapshot_archive(dest: Path) -> int:
+    """Tar the Parquet archive lake into ``dest`` (gzip). Returns bytes.
+
+    Takes the compactor's merge lock first so the tar never races a
+    partition rewrite: with the compactor quiesced, every archived file the
+    tar sees is whole. Waits up to 10 minutes; on timeout it proceeds with a
+    warning — a torn *file* is still impossible (the compactor writes via
+    atomic rename), but the DB snapshot and the lake may then describe
+    slightly different moments.
+    """
+    if not ARCHIVE_DIR.exists():
+        return 0
+    try:
+        with _archive_merge_lock(timeout=600):
+            _tar_archive(dest)
+    except TimeoutError as exc:
+        print(f"WARNING: {exc}; tarring the lake without quiescing the compactor")
+        _tar_archive(dest)
     return dest.stat().st_size
 
 

@@ -124,9 +124,9 @@ class TestLLMPredictionEngine:
         engine._health = LLMHealth(connected=False, available=False, last_check=999999.0)
         # Close any existing client and replace with one that always fails
         engine.close()
-        import httpx
+        from common.http import build_httpx_client
 
-        engine._client = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.1)
+        engine._client = build_httpx_client(base_url="http://127.0.0.1:1", timeout=0.1)
         result = engine.predict(
             asset_id=1,
             symbol="TEST",
@@ -180,8 +180,27 @@ class TestLLMPredictionEngine:
     def test_parse_invalid_json_returns_fallback(self) -> None:
         engine = LLMPredictionEngine()
         result = engine._parse_response(1, "T", "This is not JSON at all")
-        assert result.narrative_summary == "This is not JSON at all"
+        # H15: malformed LLM output is never stored verbatim as analysis.
+        assert result.narrative_summary == ""
+        assert result.risk_assessment == ""
         assert result.confidence_delta == 0.0
+
+    def test_fallback_parse_never_stores_babble_verbatim(self) -> None:
+        # Long, non-garbage-looking prose that is not JSON must still not be
+        # persisted as narrative_summary (old behavior truncated it to 500
+        # chars and stored it as if it were analysis).
+        engine = LLMPredictionEngine()
+        babble = (
+            "The token shows remarkable momentum across several market venues "
+            "with strong community engagement and increasing holder counts."
+        )
+        assert len(babble) >= 20
+        result = engine._parse_response(7, "BABBLE", babble)
+        assert result.narrative_summary == ""
+        assert result.risk_assessment == ""
+        assert result.confidence_delta == 0.0
+        assert result.hype_delta == 0.0
+        assert result.risk_delta == 0.0
 
     def test_batch_predict_capped(self) -> None:
         engine = LLMPredictionEngine()
@@ -201,9 +220,9 @@ class TestLLMPredictionEngine:
         engine._health = LLMHealth(connected=False, available=False, last_check=999999.0)
         # Close any existing client and replace with one that always fails
         engine.close()
-        import httpx
+        from common.http import build_httpx_client
 
-        engine._client = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.1)
+        engine._client = build_httpx_client(base_url="http://127.0.0.1:1", timeout=0.1)
         narrative, risk = engine.narrative_and_risk("TEST", {"momentum": 50.0})
         assert narrative == ""
         assert risk == ""

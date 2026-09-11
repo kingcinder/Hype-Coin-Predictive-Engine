@@ -189,7 +189,10 @@ class StageOutcome:
 
     Exactly one of the three completion flags is set: ``result`` (success),
     ``timed_out`` (abandoned after the deadline), or ``skipped`` (a previous
-    wedged run of the same stage is still in flight).
+    wedged run of the same stage is still in flight). Note a successful run's
+    ``result`` may itself be ``None`` when the phase fn returned ``None`` —
+    completion is determined by neither ``timed_out`` nor ``skipped`` being
+    set, never by ``result is not None`` (defect L2).
     """
 
     result: dict[str, object] | None = None
@@ -201,6 +204,10 @@ class StageOutcome:
 # On timeout a wedged run is abandoned but stays tracked, so the next iteration
 # for that stage sees it still running and *skips* instead of piling up threads.
 _in_flight: dict[str, threading.Thread] = {}
+# Stages whose latest run was abandoned while still executing, mapped to the
+# monotonic timestamp of the abandonment. Cleared when the abandoned thread
+# finally exits (its `finally` block) or when a fresh run completes.
+_abandoned: dict[str, float] = {}
 # Consecutive skips per stage: a wedged phase re-alerts after
 # SKIP_ALERT_CYCLES consecutive skips rather than going silent for the whole
 # wedge.
@@ -226,6 +233,9 @@ def _clear_in_flight(stage: str, thread: threading.Thread) -> None:
     with _in_flight_lock:
         if _in_flight.get(stage) is thread:
             _in_flight.pop(stage, None)
+        # The abandoned run finally exited: its thread (and any DB session it
+        # held) is gone, so the stage is no longer considered abandoned.
+        _abandoned.pop(stage, None)
 
 
 def _in_flight_alive(stage: str) -> bool:
@@ -306,15 +316,21 @@ def snapshot_phase_state() -> list[dict[str, Any]]:
 
     Returns one entry per tracked phase: ``stage``, ``in_flight`` (the watchdog
     daemon thread is alive — either a run is in progress or a wedged run is
-    still abandoned in the background), and ``consecutive_skips`` (how many
-    consecutive iterations have skipped this phase because the previous run is
-    still wedged). ``in_flight`` on a phase that already timed out, or
+    still abandoned in the background), ``abandoned`` (the run exceeded its
+    deadline and was left running in the background; its resources, e.g. an
+    open DB session, are not yet reclaimed), and ``consecutive_skips`` (how
+    many consecutive iterations have skipped this phase because the previous
+    run is still wedged). ``in_flight`` on a phase that already timed out, or
     ``consecutive_skips > 0``, is how operators see that a phase is currently
     stuck and that the loop is skipping it rather than running it.
     """
     with _in_flight_lock:
         stages = sorted(
-            set(_in_flight) | set(_skip_counts) | set(_skip_alert_fires) | set(_skip_alert_started)
+            set(_in_flight)
+            | set(_skip_counts)
+            | set(_skip_alert_fires)
+            | set(_skip_alert_started)
+            | set(_abandoned)
         )
         entries: list[dict[str, Any]] = []
         for stage in stages:
@@ -323,10 +339,24 @@ def snapshot_phase_state() -> list[dict[str, Any]]:
                 {
                     "stage": stage,
                     "in_flight": thread is not None and thread.is_alive(),
+                    "abandoned": stage in _abandoned,
                     "consecutive_skips": _skip_counts.get(stage, 0),
                 }
             )
         return entries
+
+
+def abandoned_stages() -> dict[str, float]:
+    """Stages with a run abandoned while still executing.
+
+    Maps stage name to the monotonic timestamp of the abandonment. A stage
+    stays listed until its abandoned thread finally exits — while listed, the
+    thread is still alive *somewhere* (possibly inside an open DB session),
+    so operators can see which wedges have not yet unwound. Thread-safe
+    snapshot; the engine loop feeds this into the SSE health feed.
+    """
+    with _in_flight_lock:
+        return dict(_abandoned)
 
 
 def run_stage_with_timeout(
@@ -334,6 +364,7 @@ def run_stage_with_timeout(
     *,
     timeout_seconds: float,
     stage: str = "phase",
+    on_timeout: Callable[[str], None] | None = None,
 ) -> StageOutcome:
     """Run a blocking engine stage, guarding the loop against a wedge.
 
@@ -354,6 +385,22 @@ def run_stage_with_timeout(
     - a previous wedged run of the *same* stage is still in flight -> skips,
       ``StageOutcome(skipped=True)``, so repeated timeouts cannot pile up
       background daemon threads.
+
+    ``on_timeout`` (optional) is called with the stage name at the moment a
+    run is abandoned, so the caller can page/log immediately instead of
+    waiting for the skip re-alert cycle.
+
+    Abandonment caveat (inherent to threads — they cannot be killed): the
+    abandoned thread keeps running until ``fn`` returns, including inside any
+    open ``with SessionLocal()`` block, so its DB connection is not released
+    until the thread's own session block exits. If the wedge was SQLite
+    write-lock contention, the zombie can keep holding the write lock while
+    it is stuck — subsequent phases will keep failing with "database is
+    locked" until it unwinds. Mitigations belong in the stage functions
+    themselves (statement/busy timeouts so wedges are finite) and in the
+    caller (use ``on_timeout`` to page; watch :func:`abandoned_stages` to see
+    which wedges have not yet unwound). The watchdog guarantees the *loop*
+    survives a wedge; it cannot reclaim the wedged thread's resources.
     """
     if _in_flight_alive(stage):
         log.warning("stage_watchdog_skipped_inflight", stage=stage)
@@ -379,6 +426,14 @@ def run_stage_with_timeout(
     if not holder["done"]:
         # Timed out: the callable keeps running in the daemon thread and stays
         # tracked in-flight, so the next call skips instead of spawning another.
+        with _in_flight_lock:
+            _abandoned[stage] = time.monotonic()
+        log.warning("stage_watchdog_timeout_abandoned", stage=stage)
+        if on_timeout is not None:
+            try:
+                on_timeout(stage)
+            except Exception:  # noqa: BLE001 - the hook must never break the loop.
+                log.warning("stage_watchdog_on_timeout_failed", stage=stage)
         return StageOutcome(timed_out=True)
     error = holder.get("error")
     if error is not None:

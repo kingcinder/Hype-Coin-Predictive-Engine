@@ -50,10 +50,22 @@ def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: dateti
         return None
 
     # Latest snapshot observed at or before the reference point (LOCF).
+    # BOTH the market timestamp and the ingestion timestamp must be at or
+    # before the reference point: a snapshot ingested after the grid point
+    # (observed_at > target_ts) was not knowable then, even if its market ts
+    # is older. Using it would understate the true entry magnitude with
+    # information from the future. (Synthetic snapshots without observed_at
+    # fall back to ts; persisted rows always carry observed_at.)
     before = None
     for snap in snapshots:
         snap_ts = ensure_utc(snap.ts)
-        if snap_ts <= target_ts and snap.price_usd is not None and snap.price_usd > 0:
+        snap_observed = ensure_utc(getattr(snap, "observed_at", None) or snap.ts)
+        if (
+            snap_ts <= target_ts
+            and snap_observed <= target_ts
+            and snap.price_usd is not None
+            and snap.price_usd > 0
+        ):
             if before is None or snap_ts > ensure_utc(before.ts):
                 before = snap
 
@@ -213,7 +225,15 @@ def _upsert_label(
     decision_ts: datetime,
     source: str,
 ) -> bool:
-    """Upsert a label — returns True if a new label was created."""
+    """Upsert a label — returns True if a new label was created.
+
+    A dense (interpolated) label NEVER overwrites a real observed label:
+    ground truth is not destroyed by interpolation. A real label DOES replace
+    a dense one (upgrade to observed truth). The source marker is always
+    updated on overwrite — previously a dense label could overwrite a real
+    label's value while keeping the "real" source marker, contaminating the
+    real-only test readout.
+    """
     row = session.scalar(
         select(models.Label).where(
             models.Label.asset_id == asset_id,
@@ -222,8 +242,14 @@ def _upsert_label(
         )
     )
     if row:
+        existing_dense = str(row.label_source or "").startswith("dense-labels:")
+        new_dense = source.startswith("dense-labels:")
+        if new_dense and not existing_dense:
+            # Interpolated label must not destroy a real observed label.
+            return False
         row.label_value = value
         row.observed_at = decision_ts
+        row.label_source = source
         return False
 
     session.add(

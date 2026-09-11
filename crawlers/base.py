@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import utc_now
 
@@ -38,11 +39,13 @@ class CrawlerHealth:
     error_rate: float = 0.0
     reliability_score: float = 1.0  # 0.0 = unreliable, 1.0 = perfect
     priority_score: float = 1.0  # higher = crawl more often
+    consecutive_empty_runs: int = 0  # runs that succeeded but returned 0 items
 
     def record_success(self, item_count: int, duration_ms: float) -> None:
         self.total_runs += 1
         self.total_items += item_count
         self.consecutive_errors = 0
+        self.consecutive_empty_runs = 0
         self.last_run_at = utc_now()
         self.last_duration_ms = duration_ms
         self.last_error = None
@@ -52,6 +55,26 @@ class CrawlerHealth:
         # Update error rate and reliability
         self.error_rate = self.total_errors / max(1, self.total_runs)
         self.reliability_score = max(0.1, 1.0 - self.error_rate)
+
+    def record_empty_run(self, duration_ms: float) -> None:
+        """Record a run that completed without transport errors but produced
+        zero items (H26).
+
+        Repeated empty runs degrade the reliability score — a fleet-wide
+        transport failure used to look like perfect health because per-source
+        ``except Exception -> return []`` paths were recorded as successes.
+        Empty runs are *not* hard errors: they never trip the ``is_healthy``
+        skip gate, so a legitimately quiet source is deprioritized, not
+        silenced. Any non-empty run resets the streak via ``record_success``.
+        """
+        self.total_runs += 1
+        self.consecutive_empty_runs += 1
+        self.last_run_at = utc_now()
+        self.last_duration_ms = duration_ms
+        alpha = 0.3
+        self.avg_duration_ms = alpha * duration_ms + (1 - alpha) * self.avg_duration_ms
+        self.reliability_score = max(0.1, self.reliability_score - 0.15)
+        self.error_rate = self.total_errors / max(1, self.total_runs)
 
     def record_error(self, error: str) -> None:
         self.total_runs += 1
@@ -104,7 +127,11 @@ class BaseCrawler(ABC):
     @property
     def client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.Client(
+            # Centralized construction with an explicit, sanitized proxy policy
+            # (H26): a hostile proxy environment must never crash this, and any
+            # residual construction failure raises here so fetch() records it
+            # as an error instead of a silent empty success.
+            self._client = build_httpx_client(
                 timeout=self.timeout_seconds,
                 headers=self._create_client_headers(),
                 follow_redirects=True,
@@ -131,11 +158,31 @@ class BaseCrawler(ABC):
 
         for attempt in range(self.max_retries + 1):
             try:
+                # Fail fast on transport-layer construction (H26): per-source
+                # fetch_items() implementations swallow exceptions into []/None,
+                # which used to be recorded as success-with-zero-items while the
+                # whole HTTP layer was down. Touching the client here keeps any
+                # construction failure attributable, so it flows into the retry
+                # loop and record_error() below instead of a bogus success.
+                self.client  # noqa: B018 - intentional fail-fast touch
                 items = self.fetch_items()
                 # Deduplicate
                 unique_items = self._deduplicate(items)
                 duration_ms = (time.monotonic() - start) * 1000
-                self.health.record_success(len(unique_items), duration_ms)
+                if unique_items:
+                    self.health.record_success(len(unique_items), duration_ms)
+                else:
+                    # Success-with-zero-items degrades reliability (H26): N
+                    # consecutive empty runs push reliability toward 0.1 via
+                    # record_empty_run, but never trip the is_healthy skip gate.
+                    self.health.record_empty_run(duration_ms)
+                    log.info(
+                        "crawler_empty",
+                        name=self.name,
+                        raw=len(items),
+                        consecutive_empty=self.health.consecutive_empty_runs,
+                        reliability=round(self.health.reliability_score, 3),
+                    )
                 log.info(
                     "crawler_success",
                     name=self.name,

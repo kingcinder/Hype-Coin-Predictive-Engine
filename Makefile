@@ -148,4 +148,11 @@ format:
 	ruff check --fix .
 
 smoke:
+ifeq ($(OS),Windows_NT)
 	powershell -ExecutionPolicy Bypass -File scripts/dev.ps1 smoke
+else
+	bash scripts/dev.sh smoke
+endif
+
+forecast-ab:
+	python -m forecast.experiment

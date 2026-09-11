@@ -615,3 +615,55 @@ def test_latest_parity_reads_last_run(session) -> None:
     assert latest["decision_ts"] == decision
     assert latest["tolerance"] == pytest.approx(0.001)
     assert latest["compare_hours_ago"] == 96.0
+
+
+def test_parity_errors_cannot_report_ok(session, tmp_path, monkeypatch) -> None:
+    """M2: per-asset comparison errors must escalate state, never report ok.
+
+    With every asset's comparison raising, mismatches stay 0 but errors are
+    nonzero: the run must report yellow (below the alert threshold) or red
+    (at/above it) in both the result dict and the persisted health row.
+    """
+    settings = _settings(tmp_path, parity_alert_threshold=10)
+    _seed_consistent(session, tmp_path, settings)
+    session.commit()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated lake read failure")
+
+    monkeypatch.setattr(parity_module, "compare_asset", boom)
+
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    assert result["mismatches"] == 0
+    assert result["errors"] == 2  # base + quote assets both failed
+    assert result["status"] == "yellow"
+
+    row = session.scalar(
+        select(models.SystemHealth).where(models.SystemHealth.component == "parity")
+    )
+    assert row is not None
+    assert row.state == "yellow"
+    assert "errors=2" in row.message
+
+
+def test_parity_errors_at_threshold_page_red(session, tmp_path, monkeypatch) -> None:
+    """M2: errors meeting the alert threshold page exactly like mismatches."""
+    settings = _settings(tmp_path)  # parity_alert_threshold defaults to 1
+    _seed_consistent(session, tmp_path, settings)
+    session.commit()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated lake read failure")
+
+    monkeypatch.setattr(parity_module, "compare_asset", boom)
+
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    assert result["errors"] == 2
+    assert result["status"] == "red"
+
+    row = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "parity")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert row.state == "red"

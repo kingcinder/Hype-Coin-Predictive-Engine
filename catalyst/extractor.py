@@ -117,12 +117,11 @@ def extract_catalysts(session: Session, *, decision_ts: datetime | None = None) 
 
 
 def _resolve_asset_for_title(session: Session, title: str) -> models.Asset | None:
-    lowered = title.lower()
-    for asset in session.scalars(select(models.Asset)).all():
-        symbol = asset.symbol.lower()
-        if symbol and len(symbol) >= 2 and symbol in lowered:
-            return asset
-    return None
+    # H13: shared deterministic resolver (token-boundary, 3-char minimum,
+    # placeholder exclusion, longest-match-wins) — see narrative.engine.
+    from narrative.engine import resolve_asset_by_symbol
+
+    return resolve_asset_by_symbol(session, title)
 
 
 def alert_upcoming_catalysts(session: Session, *, decision_ts: datetime | None = None) -> int:

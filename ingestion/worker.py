@@ -65,33 +65,50 @@ def main() -> None:
     iteration = 0
     while True:
         iteration += 1
-        result = run_once()
-        log.info("worker_loop_complete", result=result)
+        # M5: each stage is isolated — one failing stage logs and the loop
+        # continues with the next stage instead of killing the worker.
+        try:
+            result = run_once()
+            log.info("worker_loop_complete", result=result)
+        except Exception as exc:  # noqa: BLE001 - scan failure must not kill the loop
+            log.exception("worker_scan_failed", iteration=iteration, error=str(exc))
         # The scan performs the initial/due pass before scoring; this second
         # cadence gate also lets a long-running worker retrain independently of
         # scan implementation details.
-        forecast = maybe_run_forecast()
-        if forecast.get("status") != "skipped":
-            log.info("forecast_training_complete", result=forecast)
+        try:
+            forecast = maybe_run_forecast()
+            if forecast.get("status") != "skipped":
+                log.info("forecast_training_complete", result=forecast)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("worker_forecast_failed", iteration=iteration, error=str(exc))
         # Retention autopilot: run the compaction + pruning + lake-growth pass
         # when the configured cadence has elapsed since the last pass. The scan
         # never touches the archive; this cadence fully owns compaction on the
         # per-partition schedule and reports the lake in Feed Health.
-        retention = maybe_run_retention()
-        if not retention.get("skipped"):
-            log.info("retention_autopilot_complete", result=retention)
+        try:
+            retention = maybe_run_retention()
+            if not retention.get("skipped"):
+                log.info("retention_autopilot_complete", result=retention)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("worker_retention_failed", iteration=iteration, error=str(exc))
         # Lake-vs-SQL parity CI: compare the DuckDB lake read path against the
         # live SQL path on the daily cadence and page a mismatch via ntfy.
-        parity = maybe_run_parity()
-        if not parity.get("skipped"):
-            log.info("parity_check_complete", result=parity)
+        try:
+            parity = maybe_run_parity()
+            if not parity.get("skipped"):
+                log.info("parity_check_complete", result=parity)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("worker_parity_failed", iteration=iteration, error=str(exc))
         # Score-distribution drift alarm: compare the persisted risk distribution
         # (what the GUI serves) against the live formula over the latest decision
         # window each scan, so stale quantized scores between rescore migrations
         # are flagged instead of silently serving the GUI.
-        drift = maybe_run_score_drift()
-        if not drift.get("skipped"):
-            log.info("score_drift_check_complete", result=drift)
+        try:
+            drift = maybe_run_score_drift()
+            if not drift.get("skipped"):
+                log.info("score_drift_check_complete", result=drift)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("worker_score_drift_failed", iteration=iteration, error=str(exc))
         time.sleep(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
 
 

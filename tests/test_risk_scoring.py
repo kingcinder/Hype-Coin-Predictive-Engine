@@ -620,3 +620,53 @@ def test_ml_band_precisions_in_evaluate_outcomes(session) -> None:
     # The rule band for these rows is RED (seeded risk_band), so ML and rule
     # bands are tracked independently.
     assert report.bands.get("RED", None) is not None
+
+
+def test_poor_precision_tightens_threshold_upward() -> None:
+    """H19: a band with poor precision (too many false positives) must have its
+    threshold RAISED (tightened) to flag fewer candidates — lowering it would
+    admit even more false positives."""
+    from common.enums import RiskBand
+    from risk_engine.calibrator import _ideal_thresholds_for_band
+    from risk_engine.outcomes import BandOutcome
+
+    poor = BandOutcome(
+        band=RiskBand.RED, total_flagged=100, collapsed=10, precision=0.1
+    )
+    ideal = _ideal_thresholds_for_band(poor, current_threshold=50.0)
+    assert ideal > 50.0
+
+    # ML probability scale behaves the same way.
+    ideal_ml = _ideal_thresholds_for_band(
+        poor, current_threshold=0.5, scale_max=1.0, step=0.10
+    )
+    assert ideal_ml > 0.5
+
+    # Good precision also tightens slightly (never loosens into more flags).
+    good = BandOutcome(
+        band=RiskBand.RED, total_flagged=100, collapsed=90, precision=0.9
+    )
+    assert _ideal_thresholds_for_band(good, current_threshold=50.0) >= 50.0
+
+
+def test_score_formulas_normalize_weighted_averages() -> None:
+    """H17/M30: score components whose weights sum above 1.0 are divided back
+    to a weighted average so maxed inputs yield ~100, not an inflated sum."""
+    features = {
+        "five_min_return": 20.0,
+        "one_hour_return": 20.0,
+        "volume_acceleration": 10.0,
+        "unique_buyers_estimate": 100.0,
+        "mention_velocity": 20.0,
+        "liquidity_change": 20.0,
+        "ignition_signal": 1.0,
+        "narrative_cluster_growth_7d": 100.0,
+        "kol_velocity": 10.0,
+        "suspicious_contract_flags": 0.0,
+    }
+    result = compute_scores(features)
+    # Weighted averages: all-maxed positive inputs must land at ~100: the
+    # weight sums (1.15 hype) are divided back out instead of inflating.
+    assert result.hype == 100.0
+    assert result.catalyst <= 100.0
+    assert result.exit_risk <= 100.0

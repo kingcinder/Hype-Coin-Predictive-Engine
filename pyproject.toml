@@ -37,6 +37,10 @@ dependencies = [
   "eth-utils>=5.0",
   "base58>=2.1",
   "boto3>=1.34",
+  # Directly-imported transitive dep (declaration lint requires every
+  # imported root to be declared): botocore via boto3, imported directly in
+  # tests/test_archive_s3.py.
+  "botocore>=1.34",
   "streamlit>=1.37",
   "plotly>=5.23",
   "psutil>=5.9",

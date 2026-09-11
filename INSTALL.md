@@ -51,6 +51,20 @@ The installer will:
 - Register and start a systemd service
 - Install the `serpent` CLI command
 
+### Split-services install (alternative)
+
+`deploy/install.sh` is a second installer for a split-services profile: it
+installs `serpent-api.service`, `serpent-worker.service`, `serpent-ui.service`
+plus the `serpent-retention` timer instead of the single `serpent.service`,
+and it does **not** install the `serpent` CLI — manage those units directly
+with `systemctl` (e.g. `systemctl status serpent-api`). It records the
+tracked branch in `/opt/serpent/.serpent-branch` like the all-in-one
+installer does.
+
+```bash
+sudo REPO_URL=https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git bash deploy/install.sh
+```
+
 ## After Install
 
 ```bash
@@ -80,7 +94,10 @@ Prefer containers? The stack runs API + GUI + worker in one container, plus an
 Ollama container for the local LLM layer and a backup sidecar:
 
 ```bash
-# Dev stack (includes Ollama + backup sidecar)
+# Dev stack (includes Ollama + backup sidecar).
+# The engine service reads `env_file: .env` and compose hard-errors when that
+# file is missing, so create it from the shipped example first:
+cp .env.example .env
 docker compose up -d
 
 # Production-hardened stack: read-only rootfs, dropped capabilities,

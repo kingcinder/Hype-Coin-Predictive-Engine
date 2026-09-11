@@ -5,13 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import median
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.time import ensure_utc, hours_between, utc_now
+from features.factory import FeatureFactory, FeatureValue
 from features.lake import LakeFeatureFactory
-from scoring.engine import ScoringEngine
+from scoring.formulas import compute_scores
 from storage import models
 
 # Blended + real-only forecast metrics surfaced from the most recent forecast
@@ -38,6 +39,91 @@ class BacktestConfig:
     min_forward_return_pct: float = 20.0
     collapse_return_pct: float = -70.0
     feature_source: str = "sql"  # "sql" (live tables) or "lake" (archived lake replay)
+
+
+@dataclass(frozen=True)
+class ReplayCandidate:
+    """One asset selected at one replay decision time.
+
+    Ephemeral by design: the walk-forward replay never writes Score,
+    explanation, alert, or risk-outcome rows. A backtest must be a pure
+    function of point-in-time inputs, so candidates live only in memory.
+    """
+
+    asset_id: int
+    decision_ts: datetime
+    risk_band: str
+    research_priority: float
+
+
+def build_replay_features(
+    session: Session,
+    *,
+    decision_ts: datetime,
+    asset_ids: list[int],
+    feature_source: str = "sql",
+) -> dict[int, dict[str, FeatureValue]]:
+    """Build point-in-time features for backtest replay WITHOUT persisting.
+
+    Unlike ``build_and_persist_features`` (the live scoring path), this never
+    writes Feature rows: replay must not contaminate feature history with
+    recomputed values at historical decision times, and must not read or
+    disturb any production state. ``feature_source`` selects the read path:
+    ``"sql"`` (live normalized tables) or ``"lake"`` (archived Parquet replay).
+    """
+    if feature_source == "lake":
+        assets = session.scalars(
+            select(models.Asset).where(models.Asset.id.in_(asset_ids))
+        ).all()
+        id_by_address = {asset.address: asset.id for asset in assets if asset.address}
+        by_address = LakeFeatureFactory().build_for_assets(
+            list(id_by_address), ensure_utc(decision_ts)
+        )
+        return {
+            id_by_address[address]: features
+            for address, features in by_address.items()
+            if address in id_by_address
+        }
+    if feature_source != "sql":
+        raise ValueError(f"feature_source must be 'sql' or 'lake', got {feature_source!r}")
+    assets = session.scalars(
+        select(models.Asset).where(models.Asset.id.in_(asset_ids))
+    ).all()
+    factory = FeatureFactory()
+    return {
+        asset.id: {
+            value.name: value
+            for value in factory.build_for_asset(session, asset, ensure_utc(decision_ts))
+        }
+        for asset in assets
+    }
+
+
+def _score_replay_candidates(
+    feature_map: dict[int, dict[str, FeatureValue]], *, decision_ts: datetime
+) -> list[ReplayCandidate]:
+    """Deterministic rule-methodology scoring for replay.
+
+    Uses ``compute_scores(..., session=None)``: no adaptive calibration
+    reads, no ensemble/LLM/fusion, no alerts, no risk outcomes, no
+    persistence of any kind. The replay therefore measures the default rule
+    methodology — deliberately NOT whatever adaptive production state
+    happens to be current when the backtest runs.
+    """
+    candidates = []
+    for asset_id, features in feature_map.items():
+        raw = {name: feature.value for name, feature in features.items()}
+        missing = [name for name, feature in features.items() if feature.missing]
+        result = compute_scores(raw, missing, session=None)
+        candidates.append(
+            ReplayCandidate(
+                asset_id=asset_id,
+                decision_ts=decision_ts,
+                risk_band=result.risk_band.value,
+                research_priority=result.research_priority,
+            )
+        )
+    return candidates
 
 
 def point_in_time_market_rows(
@@ -150,7 +236,6 @@ def _latest_forecast_metrics(session: Session) -> dict[str, float]:
 class BacktestRunner:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.scoring = ScoringEngine()
 
     def run(self, session: Session, config: BacktestConfig) -> models.BacktestRun:
         start = ensure_utc(config.start)
@@ -198,32 +283,40 @@ class BacktestRunner:
             ]
             if not asset_ids:
                 continue
-            self.scoring.score_assets(
+            # Replay isolation: build point-in-time features WITHOUT persisting
+            # them, then score with the deterministic rule methodology. The
+            # live ScoringEngine is deliberately NOT used here — it would
+            # persist scores/explanations/alerts/risk outcomes, read adaptive
+            # production state (calibration thresholds, ensemble weights, RPC
+            # health), and trigger LLM/fusion side effects.
+            feature_map = build_replay_features(
                 session,
                 decision_ts=decision_ts,
                 asset_ids=asset_ids,
                 feature_source=config.feature_source,
             )
-            session.flush()
-            candidates = session.scalars(
-                select(models.Score)
-                .where(
-                    models.Score.decision_ts == decision_ts,
-                    models.Score.model_version == self.settings.model_version,
-                    models.Score.risk_band != "BLACK",
-                )
-                .order_by(desc(models.Score.research_priority))
-                .limit(config.top_k)
-            ).all()
+            candidates = sorted(
+                (
+                    candidate
+                    for candidate in _score_replay_candidates(
+                        feature_map, decision_ts=decision_ts
+                    )
+                    if candidate.risk_band != "BLACK"
+                ),
+                key=lambda candidate: candidate.research_priority,
+                reverse=True,
+            )[: config.top_k]
             if not candidates:
                 continue
             total_decisions += 1
-            for score in candidates:
+            for candidate in candidates:
                 selected += 1
-                entry = _latest_price_at(session, asset_id=score.asset_id, decision_ts=decision_ts)
+                entry = _latest_price_at(
+                    session, asset_id=candidate.asset_id, decision_ts=decision_ts
+                )
                 future = _future_prices(
                     session,
-                    asset_id=score.asset_id,
+                    asset_id=candidate.asset_id,
                     start_ts=decision_ts,
                     end_ts=decision_ts + timedelta(hours=config.forward_hours),
                 )
@@ -236,7 +329,7 @@ class BacktestRunner:
                 flagged += 1
                 future_rows = _future_rows(
                     session,
-                    asset_id=score.asset_id,
+                    asset_id=candidate.asset_id,
                     start_ts=decision_ts,
                     end_ts=decision_ts + timedelta(hours=config.forward_hours),
                 )
@@ -257,7 +350,7 @@ class BacktestRunner:
                     useful += 1
                 if min_return <= config.collapse_return_pct:
                     collapses += 1
-                if score.risk_band in {"GREEN", "YELLOW"}:
+                if candidate.risk_band in {"GREEN", "YELLOW"}:
                     scam_avoided += 1
 
         metrics = {

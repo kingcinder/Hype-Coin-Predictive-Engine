@@ -33,7 +33,7 @@ NEW_TOKEN_WINDOW_MINUTES = 30
 class PumpPortalCrawler(BaseCrawler):
     """Crawls pump.fun launches via PumpPortal HTTP, falling back to WebSocket."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, enable_ws_fallback: bool = True) -> None:
         super().__init__(
             name="pump_portal",
             max_retries=1,  # retries against a live stream are not useful
@@ -41,10 +41,16 @@ class PumpPortalCrawler(BaseCrawler):
             rate_limit_pause=1.5,
             timeout_seconds=12.0,
         )
+        # M46: the WS tap opens a real live-network connection and listens for
+        # ~8s whenever the HTTP path is empty *or fails* (including transport
+        # failures). That conflates "endpoint returned nothing" with "transport
+        # is broken" and makes the HTTP path untestable in isolation, so the
+        # fallback is now opt-out (constructor arg / setting; off in tests).
+        self.enable_ws_fallback = enable_ws_fallback
 
     def fetch_items(self) -> list[dict[str, Any]]:
         items = self._fetch_http()
-        if not items:
+        if not items and self.enable_ws_fallback:
             log.debug("pump_portal_http_empty", reason="falling back to ws tap")
             items = self._fetch_ws_tap()
         return items

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import io
 import json
+import os
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 import polars as pl
 from sqlalchemy import exists, extract, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from common.config import Settings, get_settings
@@ -20,6 +27,71 @@ from storage.repository import record_health
 log = get_logger(__name__)
 
 
+class PartitionUnreadableError(Exception):
+    """A partition object exists but cannot be read/parsed.
+
+    Raised (never swallowed) so a corrupt partition fails the compaction
+    pass instead of being silently replaced by only the new batch.
+    """
+
+
+class PartitionConflictError(Exception):
+    """A concurrent compactor modified the partition between read and write.
+
+    The merge is retried against the fresh object; if retries are exhausted
+    the pass fails rather than dropping either batch.
+    """
+
+
+class ArchiveWriteError(Exception):
+    """Post-write verification showed the stored object is not what we wrote."""
+
+
+@dataclass(frozen=True)
+class ObjectStat:
+    """Post-write/read identity of a stored object."""
+
+    size: int
+    etag: str | None
+
+
+# Name of the inter-process lock file inside an archive root. The compactor
+# holds it (exclusive) for the whole merge pass; the backup sidecar holds it
+# while tarring the lake, so a backup never races a partition rewrite.
+ARCHIVE_MERGE_LOCK_NAME = ".archive.merge.lock"
+
+
+@contextlib.contextmanager
+def archive_merge_lock(root: Path | str, timeout: float | None = None) -> Iterator[None]:
+    """Exclusive inter-process lock for archive-root mutations.
+
+    ``timeout=None`` blocks until acquired; otherwise raises ``TimeoutError``
+    after ``timeout`` seconds. Implemented with ``fcntl.flock`` (Linux/macOS
+    deployment targets).
+    """
+    import fcntl
+
+    path = Path(root).resolve() / ARCHIVE_MERGE_LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with open(path, "a+b") as fh:
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out after {timeout}s waiting for archive merge lock {path}"
+                    ) from None
+                time.sleep(0.25)
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 class ArchiveStore(Protocol):
     """Object-storage surface used by the compactor.
 
@@ -28,9 +100,14 @@ class ArchiveStore(Protocol):
     """
 
     def put_object(self, key: str, data: bytes) -> int: ...
+    def put_object_if_absent(self, key: str, data: bytes) -> int: ...
     def object_exists(self, key: str) -> bool: ...
+    def read_object(self, key: str) -> bytes: ...
     def list_objects(self, prefix: str) -> list[str]: ...
     def download_to(self, key: str, dest: Path) -> Path: ...
+    def merge_lock(self) -> contextlib.AbstractContextManager[None]: ...
+    def stat_object(self, key: str) -> ObjectStat | None: ...
+    def put_object_if_match(self, key: str, data: bytes, etag: str) -> int: ...
 
 
 class LocalArchiveStore:
@@ -47,13 +124,74 @@ class LocalArchiveStore:
         return self.root.resolve()
 
     def put_object(self, key: str, data: bytes) -> int:
+        # Atomic write: temp file + fsync + rename, so a kill/OOM/disk-full
+        # mid-write can never leave a partial Parquet file behind for the
+        # next compaction pass to choke on (defect H1).
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return len(data)
+
+    def put_object_if_absent(self, key: str, data: bytes) -> int:
+        # Atomic conditional create: temp file + fsync + hard link. os.link
+        # raises FileExistsError when the target already exists, so the
+        # create-if-absent is atomic against concurrent creators — the
+        # initial-object half of the H2 read-modify-write race.
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / f".{path.name}.{os.getpid()}.new"
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise PartitionConflictError(
+                    f"partition {key} created concurrently"
+                ) from None
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            tmp.unlink(missing_ok=True)
         return len(data)
 
     def object_exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def read_object(self, key: str) -> bytes:
+        return self._path(key).read_bytes()
+
+    def merge_lock(self) -> contextlib.AbstractContextManager[None]:
+        return archive_merge_lock(self.root)
+
+    def stat_object(self, key: str) -> ObjectStat | None:
+        try:
+            stat = self._path(key).stat()
+        except FileNotFoundError:
+            return None
+        return ObjectStat(size=stat.st_size, etag=f"{stat.st_mtime_ns:x}:{stat.st_size:x}")
+
+    def put_object_if_match(self, key: str, data: bytes, etag: str) -> int:
+        # Under merge_lock() the object cannot change between stat and write,
+        # but the check is enforced anyway so a lock-bypassing writer can
+        # never silently win a read-modify-write race.
+        current = self.stat_object(key)
+        if current is None or current.etag != etag:
+            raise PartitionConflictError(f"partition {key} changed during merge")
+        return self.put_object(key, data)
 
     def list_objects(self, prefix: str) -> list[str]:
         base = self._path(prefix)
@@ -67,6 +205,26 @@ class LocalArchiveStore:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(source.read_bytes())
         return dest
+
+
+def _s3_error_code(exc: Exception) -> str:
+    response = getattr(exc, "response", None) or {}
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return str(error.get("Code", ""))
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """True when ``exc`` is an S3 404/NoSuchKey-style "object does not exist"."""
+    return _s3_error_code(exc) in {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
+
+
+def _is_precondition_failed(exc: Exception) -> bool:
+    """True when ``exc`` is an S3 412 PreconditionFailed (If-Match miss)."""
+    if _s3_error_code(exc) == "PreconditionFailed":
+        return True
+    response = getattr(exc, "response", None) or {}
+    metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    return metadata.get("HTTPStatusCode") == 412
 
 
 class S3ArchiveStore:
@@ -99,8 +257,68 @@ class S3ArchiveStore:
         try:
             client.head_object(Bucket=self.settings.minio_bucket, Key=key)
             return True
-        except Exception:  # noqa: BLE001 - any head failure means missing/unreadable.
-            return False
+        except Exception as exc:  # noqa: BLE001
+            # Fail closed: only a genuine 404 means "missing". Any other head
+            # failure (permissions, network, 500) must NOT be treated as
+            # missing, or the merge would overwrite an existing partition with
+            # only the new batch (defect C2, S3 variant).
+            if _is_not_found(exc):
+                return False
+            raise
+
+    def merge_lock(self) -> contextlib.AbstractContextManager[None]:
+        # No cross-process lock primitive on plain S3; concurrent merges are
+        # serialized by ETag conditional writes (put_object_if_match).
+        return contextlib.nullcontext()
+
+    def stat_object(self, key: str) -> ObjectStat | None:
+        client = self._get_client()
+        try:
+            head = client.head_object(Bucket=self.settings.minio_bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found(exc):
+                return None
+            raise
+        etag = head.get("ETag")
+        # Keep the ETag exactly as HEAD returned it (quotes included): the
+        # If-Match precondition compares the opaque value canonically.
+        return ObjectStat(
+            size=int(head.get("ContentLength", -1)),
+            etag=etag if etag else None,
+        )
+
+    def put_object_if_absent(self, key: str, data: bytes) -> int:
+        # S3 conditional create (IfNoneMatch="*"): atomic against concurrent
+        # creators — the initial-object half of the H2 read-modify-write race.
+        client = self._get_client()
+        try:
+            client.put_object(
+                Bucket=self.settings.minio_bucket,
+                Key=key,
+                Body=data,
+                IfNoneMatch="*",
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_precondition_failed(exc):
+                raise PartitionConflictError(
+                    f"partition {key} created concurrently"
+                ) from exc
+            raise
+        return len(data)
+
+    def put_object_if_match(self, key: str, data: bytes, etag: str) -> int:
+        client = self._get_client()
+        try:
+            client.put_object(
+                Bucket=self.settings.minio_bucket, Key=key, Body=data, IfMatch=etag
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_precondition_failed(exc):
+                raise PartitionConflictError(
+                    f"partition {key} changed during merge"
+                ) from exc
+            raise
+        return len(data)
 
     def list_objects(self, prefix: str) -> list[str]:
         client = self._get_client()
@@ -119,6 +337,15 @@ class S3ArchiveStore:
             Bucket=self.settings.minio_bucket, Key=key, Filename=str(dest)
         )
         return dest
+
+    def read_object(self, key: str) -> bytes:
+        import io
+
+        buf = io.BytesIO()
+        self._get_client().download_fileobj(
+            Bucket=self.settings.minio_bucket, Key=key, Fileobj=buf
+        )
+        return buf.getvalue()
 
 
 def make_store(settings: Settings) -> ArchiveStore:
@@ -270,51 +497,18 @@ class RawEvidenceCompactor:
 
         partitions = 0
         compacted = 0
-        for (source_id, year, month), group in groups.items():
-            source_name = source_names.get(source_id, "unknown")
-            object_key = (
-                f"{self.settings.archive_prefix}/{_partition_key(source_name, year, month)}"
-                f"/part-0.parquet"
-            )
-            frame = _evidence_frame(group)
-            # Merge with the existing partition file: a second batch landing in
-            # the same (source, year, month) must append to the lake, never
-            # clobber the rows compacted by an earlier pass.
-            if self.store.object_exists(object_key):
-                existing = self._read_partition(object_key)
-                if existing.height:
-                    frame = pl.concat([existing, frame], how="vertical_relaxed")
-            buffer = io.BytesIO()
-            frame.write_parquet(buffer)
-            byte_size = self.store.put_object(object_key, buffer.getvalue())
-            merged_rows = frame.height
-            observed_times = sorted(ensure_utc(row.observed_at) for row in group)
-            manifest = session.scalar(
-                select(models.ArchiveManifest).where(
-                    models.ArchiveManifest.object_key == object_key
+        # The whole merge pass holds the archive merge lock: two compactor
+        # processes (retention autopilot cadence + a manual --once run) must
+        # never interleave read-modify-write cycles on the same partition
+        # (defect H2). On S3 the lock is a no-op and each partition merge
+        # instead uses an ETag conditional write with retry.
+        with self.store.merge_lock():
+            for (source_id, year, month), group in groups.items():
+                self._compact_partition(
+                    session, source_names, source_id, year, month, group, decision_ts
                 )
-            )
-            if manifest:
-                manifest.row_count = merged_rows
-                manifest.byte_size = byte_size
-                manifest.last_observed_at = observed_times[-1]
-            else:
-                session.add(
-                    models.ArchiveManifest(
-                        object_key=object_key,
-                        source_id=group[0].source_id,
-                        partition_year=year,
-                        partition_month=month,
-                        row_count=merged_rows,
-                        byte_size=byte_size,
-                        first_observed_at=observed_times[0],
-                        last_observed_at=observed_times[-1],
-                    )
-                )
-            for row in group:
-                row.archived_at = decision_ts
-            partitions += 1
-            compacted += len(group)
+                partitions += 1
+                compacted += len(group)
         session.flush()
         pruned = self._prune(session, decision_ts)
         return {
@@ -325,17 +519,198 @@ class RawEvidenceCompactor:
             "due_partitions": len(groups),
         }
 
+    # Retries for a lost conditional-write race. A conflict means another
+    # compactor won the write (either the initial create or an ETag-guarded
+    # merge); re-reading and re-merging converges instead of dropping either
+    # batch. Exhaustion raises: the pass fails red, rows stay unarchived,
+    # nothing is silently lost.
+    _MERGE_RETRIES = 3
+
+    def _compact_partition(
+        self,
+        session: Session,
+        source_names: dict[int, str],
+        source_id: int,
+        year: int,
+        month: int,
+        group: list[models.RawEvidenceItem],
+        decision_ts: datetime,
+    ) -> None:
+        source_name = source_names.get(source_id, "unknown")
+        object_key = (
+            f"{self.settings.archive_prefix}/{_partition_key(source_name, year, month)}"
+            f"/part-0.parquet"
+        )
+        new_frame = _evidence_frame(group)
+        last_error: Exception | None = None
+        for attempt in range(self._MERGE_RETRIES):
+            try:
+                self._merge_one_partition(
+                    session, object_key, source_id, year, month, new_frame, group, decision_ts
+                )
+                return
+            except PartitionConflictError as exc:
+                last_error = exc
+                log.warning(
+                    "archive_partition_conflict_retry",
+                    object_key=object_key,
+                    attempt=attempt + 1,
+                )
+        assert last_error is not None
+        raise last_error
+
+    def _merge_one_partition(
+        self,
+        session: Session,
+        object_key: str,
+        source_id: int,
+        year: int,
+        month: int,
+        new_frame: pl.DataFrame,
+        group: list[models.RawEvidenceItem],
+        decision_ts: datetime,
+    ) -> None:
+        # Merge with the existing partition file: a second batch landing in
+        # the same (source, year, month) must append to the lake, never
+        # clobber the rows compacted by an earlier pass.
+        stat = self.store.stat_object(object_key)
+        if stat is not None:
+            # Raises PartitionUnreadableError on any read failure: a corrupt
+            # partition fails the pass instead of being amputated by the new
+            # batch alone (defect C2).
+            existing = self._read_partition(object_key)
+            frame = pl.concat([existing, new_frame], how="vertical_relaxed")
+            # Idempotent merge (defect M1): if a previous PUT succeeded but
+            # the DB commit failed, the rows stayed archived_at=NULL and this
+            # pass re-selects them — dedup on evidence_id so the re-merge
+            # cannot duplicate them in the lake.
+            frame = frame.unique(subset=["evidence_id"], keep="first", maintain_order=True)
+        else:
+            frame = new_frame
+        buffer = io.BytesIO()
+        frame.write_parquet(buffer)
+        payload = buffer.getvalue()
+        digest = hashlib.sha256(payload).hexdigest()
+        if stat is not None and stat.etag is not None:
+            byte_size = self.store.put_object_if_match(object_key, payload, stat.etag)
+        elif stat is not None:
+            # No ETag available (should not happen for the S3 backend, but
+            # stay safe): unconditional write would race, so treat as a
+            # conflict and let the retry loop re-stat.
+            raise PartitionConflictError(
+                f"partition {object_key} has no ETag for conditional write"
+            )
+        else:
+            # Conditional create: another compactor creating this partition
+            # between our stat and this write raises PartitionConflictError
+            # and the retry loop merges on top of their object instead of
+            # clobbering it (initial-object half of defect H2).
+            byte_size = self.store.put_object_if_absent(object_key, payload)
+        # Verify what was actually stored before trusting it (defect M3):
+        # the manifest must describe the bytes on the object, not the bytes
+        # we intended to write.
+        written = self.store.stat_object(object_key)
+        if written is None or written.size != len(payload):
+            raise ArchiveWriteError(
+                f"post-write verification failed for {object_key}: "
+                f"wrote {len(payload)} bytes, stored "
+                f"{written.size if written else 'nothing'}"
+            )
+        # Read-back hash check: size alone cannot catch same-size corruption
+        # (bit-rot, broken transfer). The manifest's sha256 must describe the
+        # stored bytes, not just the intended payload.
+        stored = self.store.read_object(object_key)
+        if hashlib.sha256(stored).hexdigest() != digest:
+            raise ArchiveWriteError(
+                f"post-write hash mismatch for {object_key}: stored bytes do "
+                "not match the payload that was written"
+            )
+        self._upsert_manifest(
+            session, object_key, source_id, year, month, group,
+            row_count=frame.height, byte_size=byte_size, digest=digest,
+        )
+        for row in group:
+            row.archived_at = decision_ts
+
+    def _upsert_manifest(
+        self,
+        session: Session,
+        object_key: str,
+        source_id: int,
+        year: int,
+        month: int,
+        group: list[models.RawEvidenceItem],
+        *,
+        row_count: int,
+        byte_size: int,
+        digest: str,
+    ) -> None:
+        observed_times = sorted(ensure_utc(row.observed_at) for row in group)
+
+        def _apply(manifest: models.ArchiveManifest) -> None:
+            manifest.row_count = row_count
+            manifest.byte_size = byte_size
+            manifest.sha256 = digest
+            manifest.last_observed_at = observed_times[-1]
+
+        try:
+            with session.begin_nested():
+                manifest = session.scalar(
+                    select(models.ArchiveManifest).where(
+                        models.ArchiveManifest.object_key == object_key
+                    )
+                )
+                if manifest is not None:
+                    _apply(manifest)
+                else:
+                    session.add(
+                        models.ArchiveManifest(
+                            object_key=object_key,
+                            source_id=source_id,
+                            partition_year=year,
+                            partition_month=month,
+                            row_count=row_count,
+                            byte_size=byte_size,
+                            sha256=digest,
+                            first_observed_at=observed_times[0],
+                            last_observed_at=observed_times[-1],
+                        )
+                    )
+                session.flush()
+        except IntegrityError:
+            # Lost a concurrent insert race on uq_archive_manifest_object_key:
+            # the winner's row is now committed and visible — update it
+            # instead of failing the pass (defect H2, manifest half).
+            log.warning("archive_manifest_insert_race", object_key=object_key)
+            manifest = session.scalar(
+                select(models.ArchiveManifest).where(
+                    models.ArchiveManifest.object_key == object_key
+                )
+            )
+            if manifest is None:
+                raise
+            _apply(manifest)
+            session.flush()
+
     def _read_partition(self, object_key: str) -> pl.DataFrame:
-        """Download a partition object and return its rows (empty on failure)."""
+        """Download a partition object and return its rows.
+
+        Raises :class:`PartitionUnreadableError` on any failure: the merge
+        must fail closed (the pass errors, rows stay unarchived) rather than
+        treat the unreadable partition as empty and permanently replace it
+        with only the new batch (defect C2).
+        """
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="serpent_merge_") as tmp:
             try:
                 dest = self.store.download_to(object_key, Path(tmp) / "part.parquet")
                 return pl.read_parquet(dest)
-            except Exception:  # noqa: BLE001 - a corrupt partition must not block the batch.
-                log.warning("archive_partition_unreadable", object_key=object_key)
-                return pl.DataFrame()
+            except Exception as exc:
+                log.warning("archive_partition_unreadable", object_key=object_key, error=str(exc))
+                raise PartitionUnreadableError(
+                    f"cannot read archive partition {object_key}: {exc}"
+                ) from exc
 
     def _prune(self, session: Session, decision_ts: datetime) -> int:
         retention_cutoff = decision_ts - timedelta(days=self.settings.archive_retention_days)

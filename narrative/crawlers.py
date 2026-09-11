@@ -43,6 +43,16 @@ def _dt(value: Any) -> datetime | None:
         return None
 
 
+def _epoch(value: Any) -> datetime | None:
+    """Reddit-style Unix-epoch-seconds timestamp -> aware UTC datetime (H14)."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), tz=UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 class RedditCrawler:
     """Public Reddit JSON endpoints (no key, requires a User-Agent)."""
 
@@ -75,7 +85,10 @@ class RedditCrawler:
                         "title": title,
                         "text": f"{title} {post.get('selftext') or ''}",
                         "url": f"{self.base_url}{post.get('permalink') or ''}",
-                        "published": _iso(None),
+                        # H14: use the post's real creation time, not crawl
+                        # time — otherwise stale posts inflate narrative
+                        # velocity as breaking news when first seen.
+                        "published": _epoch(post.get("created_utc")),
                         "author": str(post.get("author") or ""),
                         "source_domain": "reddit.com",
                         "metrics": {
@@ -197,7 +210,10 @@ class HuggingFaceCrawler:
                     "title": model_id,
                     "text": f"{model_id} {model.get('summary') or ''}".strip(),
                     "url": f"https://huggingface.co/{model_id}",
-                    "published": None,
+                    # H14: the trending payload carries repoData.lastModified
+                    # (verified against the live API); fall back to None (the
+                    # engine then stamps crawl time) only when absent.
+                    "published": _iso((model.get("repoData") or {}).get("lastModified")),
                     "author": str((model.get("repoData") or {}).get("author") or ""),
                     "source_domain": "huggingface.co",
                     "metrics": {"downloads": model.get("downloads", 0)},

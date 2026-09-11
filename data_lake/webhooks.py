@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +26,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.config import get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from storage import models
@@ -38,6 +41,76 @@ DEFAULT_EVENT_TYPES = [
     "lifecycle_transition",
     "high_signal_scan",
 ]
+
+
+class WebhookURLError(ValueError):
+    """A webhook target URL failed SSRF validation (H6)."""
+
+
+def _webhook_allowlist() -> set[str]:
+    """Operator-configured hostnames that are always permitted as targets."""
+    csv = (get_settings().webhook_url_allowlist_csv or "").strip()
+    return {h.strip().lower() for h in csv.split(",") if h.strip()}
+
+
+def validate_webhook_url(url: str) -> str:
+    """Validate a webhook target URL against the SSRF policy (H6).
+
+    Returns the normalized URL. Raises :class:`WebhookURLError` when the URL
+    is not an acceptable dispatch target:
+
+    - scheme must be ``http`` or ``https``;
+    - no credentials (``user:pass@``) may be embedded in the URL;
+    - the host must parse and resolve, and **every** resolved address must be
+      a public IP — private, loopback, link-local, multicast, reserved, and
+      unspecified ranges are blocked.
+
+    Two operator escape hatches: hosts on ``WEBHOOK_URL_ALLOWLIST_CSV`` skip
+    the IP-range check (explicit opt-in per host), and
+    ``WEBHOOK_ALLOW_PRIVATE_HOSTS=1`` disables the IP-range check entirely for
+    homelab use. The scheme/credential rules always apply.
+    """
+    settings = get_settings()
+    raw = (url or "").strip()
+    try:
+        parsed = urlparse(raw)
+    except Exception as exc:  # noqa: BLE001 - urlparse can raise on exotic input
+        raise WebhookURLError(f"unparseable webhook URL: {exc}") from exc
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise WebhookURLError(
+            f"webhook URL must use http or https (got scheme {parsed.scheme!r})"
+        )
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise WebhookURLError("webhook URL has no host")
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise WebhookURLError("webhook URL must not contain credentials")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise WebhookURLError(f"webhook URL has an invalid port: {exc}") from exc
+
+    if host in _webhook_allowlist() or settings.webhook_allow_private_hosts:
+        return raw
+
+    # Resolve the host and require every address to be publicly routable.
+    # Checking all results (not just the first) closes the DNS-rebinding
+    # variant where one record is public and another is internal.
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    try:
+        addrinfo = socket.getaddrinfo(host, port or default_port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise WebhookURLError(f"webhook host does not resolve: {host} ({exc})") from exc
+    for _family, _socktype, _proto, _canon, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not ip.is_global:
+            raise WebhookURLError(
+                f"webhook host {host} resolves to non-public IP {ip}: "
+                "private/loopback/link-local targets are blocked; add the "
+                "host to WEBHOOK_URL_ALLOWLIST_CSV or set "
+                "WEBHOOK_ALLOW_PRIVATE_HOSTS=1 to permit it"
+            )
+    return raw
 
 
 @dataclass(frozen=True)
@@ -64,7 +137,12 @@ def register_webhook(
     chain_filter: str | None = None,
     min_signal_score: float = 0.0,
 ) -> models.WebhookConfig:
-    """Register a new webhook endpoint."""
+    """Register a new webhook endpoint.
+
+    The URL is validated against the SSRF policy first (H6); raises
+    :class:`WebhookURLError` when it is not an acceptable target.
+    """
+    url = validate_webhook_url(url)
     event_types = event_types or DEFAULT_EVENT_TYPES
     webhook = models.WebhookConfig(
         url=url,
@@ -193,17 +271,37 @@ def dispatch_webhook(
     event_type: str,
     payload: dict[str, Any],
 ) -> WebhookDispatchResult:
-    """Dispatch a single webhook with signing and error handling."""
+    """Dispatch a single webhook with signing and error handling.
+
+    The target URL is re-validated against the SSRF policy at send time
+    (H6), so rows registered before the policy existed — or written through
+    any other path — can never be dispatched to an internal target.
+    """
     start = time.monotonic()
+    try:
+        validate_webhook_url(webhook.url)
+    except WebhookURLError as exc:
+        duration_ms = (time.monotonic() - start) * 1000
+        result = WebhookDispatchResult(
+            webhook_id=webhook.id,
+            url=webhook.url,
+            success=False,
+            error=f"blocked by webhook URL policy: {exc}",
+            duration_ms=round(duration_ms, 1),
+        )
+        _record_dispatch(session, webhook, result)
+        log.warning(
+            "webhook_dispatch_blocked",
+            webhook_id=webhook.id,
+            url=webhook.url,
+            error=str(exc),
+        )
+        return result
     try:
         payload_bytes = json.dumps(payload, default=str).encode()
         headers: dict[str, str] = {"Content-Type": "application/json"}
 
-        # Add HMAC signature if secret is set
-        if webhook.secret:
-            headers["X-Signature-256"] = f"sha256={_sign_payload(payload_bytes, webhook.secret)}"
-
-        # Determine endpoint-specific headers
+        # Determine endpoint-specific body FIRST ...
         parsed = urlparse(webhook.url)
         host = parsed.hostname or ""
 
@@ -221,6 +319,12 @@ def dispatch_webhook(
                 "content": _format_discord_message(payload),
             }
             payload_bytes = json.dumps(discord_payload, default=str).encode()
+
+        # ... THEN sign the exact bytes that will be transmitted. Signing
+        # before the Telegram/Discord reformatting above would leave
+        # X-Signature-256 covering a body the receiver never sees.
+        if webhook.secret:
+            headers["X-Signature-256"] = f"sha256={_sign_payload(payload_bytes, webhook.secret)}"
 
         with httpx.Client(timeout=10.0) as client:
             response = client.post(webhook.url, content=payload_bytes, headers=headers)
