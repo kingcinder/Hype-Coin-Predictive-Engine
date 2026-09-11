@@ -260,6 +260,18 @@ class Settings(BaseSettings):
     # (a fresh red watchdog row) so a long-running wedge keeps surfacing instead
     # of going dark; 0 disables re-alerting entirely.
     skip_alert_cycles: int = 20
+    # Re-alert caps per wedge episode (a completed run — or an engine restart —
+    # starts a fresh episode with fresh caps): SKIP_ALERT_MAX_ALERTS bounds how
+    # many re-alert rows one episode may record, and SKIP_ALERT_MAX_MINUTES
+    # bounds how long re-alerting continues, measured from the episode's first
+    # skipped iteration. Whichever limit is hit first mutes further re-alerts
+    # (an ``engine_stage_watchdog_skip_muted`` log marks the cutoff), so a phase
+    # wedged for many SKIP_ALERT_CYCLES cycles eventually stops paging instead
+    # of re-alerting forever. The initial timeout alarm and the live
+    # ``watchdog.phases`` SSE state are never capped. Set either knob to 0 to
+    # lift that cap (unlimited).
+    skip_alert_max_alerts: int = 5
+    skip_alert_max_minutes: float = 720.0
 
     # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
     # against the live SQL path over the archived evidence, paging a mismatch
