@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from common.config import get_settings
 from common.logging import get_logger
@@ -205,6 +205,15 @@ _in_flight: dict[str, threading.Thread] = {}
 # SKIP_ALERT_CYCLES consecutive skips rather than going silent for the whole
 # wedge.
 _skip_counts: dict[str, int] = {}
+# Re-alert bookkeeping per wedge episode (one contiguous wedge per stage): how
+# many re-alert rows this episode has recorded and when the episode's first
+# skip happened, so the caps can silence a phase that has re-alerted enough
+# times (SKIP_ALERT_MAX_ALERTS) or stayed wedged too long
+# (SKIP_ALERT_MAX_MINUTES). Cleared when the phase recovers
+# (reset_phase_skip) or on engine restart / test isolation
+# (reset_phase_skip_tracking) — a completed run starts a fresh episode.
+_skip_alert_fires: dict[str, int] = {}
+_skip_alert_started: dict[str, float] = {}
 _in_flight_lock = threading.Lock()
 
 
@@ -225,37 +234,71 @@ def _in_flight_alive(stage: str) -> bool:
         return thread is not None and thread.is_alive()
 
 
-def note_phase_skip(stage: str, threshold: int) -> bool:
-    """Track one consecutive skip for ``stage``; return True when it's time to re-alert.
+def note_phase_skip(
+    stage: str,
+    threshold: int,
+    max_alerts: int = 0,
+    max_duration_seconds: float = 0.0,
+) -> Literal["counted", "alert", "muted_alerts", "muted_duration"]:
+    """Track one consecutive skip for ``stage``; report whether to re-alert.
 
     A wedged phase alarms on its first timeout, then *skips* each iteration
     while the abandoned run is still in flight. Incrementing a per-stage skip
     counter lets the caller re-alert once the count reaches ``threshold``,
     so a long wedge doesn't stay silent for its whole duration. On hitting the
-    threshold the counter resets, so alerts repeat every ``threshold`` skips.
-    ``threshold <= 0`` disables re-alerting (always returns False, never counts).
+    threshold the counter resets, so re-alerts repeat every ``threshold``
+    skips — unless the wedge episode has hit its cap:
+
+    - ``max_alerts`` bounds the re-alert rows one episode may record;
+    - ``max_duration_seconds`` bounds how long re-alerting continues, measured
+      from the episode's first skip (0 on either lifts that cap).
+
+    Returns one of: ``"counted"`` (below the threshold — or ``threshold <= 0``,
+    which disables re-alerting entirely: never counts, never fires);
+    ``"alert"`` (the threshold was reached and the episode is within its caps:
+    record a fresh re-alert row); ``"muted_alerts"`` / ``"muted_duration"``
+    (the threshold was reached but the episode has already re-alerted
+    ``max_alerts`` times or run past ``max_duration_seconds``: stay quiet). A
+    completed run (``reset_phase_skip``) or engine restart
+    (``reset_phase_skip_tracking``) starts a fresh episode and lifts the caps.
     """
     if threshold <= 0:
-        return False
+        return "counted"
     with _in_flight_lock:
+        now = time.monotonic()
+        _skip_alert_started.setdefault(stage, now)
         n = _skip_counts.get(stage, 0) + 1
-        if n >= threshold:
-            _skip_counts[stage] = 0
-            return True
-        _skip_counts[stage] = n
-        return False
+        if n < threshold:
+            _skip_counts[stage] = n
+            return "counted"
+        _skip_counts[stage] = 0  # cycle complete; decide whether to fire
+        if max_alerts > 0 and _skip_alert_fires.get(stage, 0) >= max_alerts:
+            return "muted_alerts"
+        if max_duration_seconds > 0 and now - _skip_alert_started[stage] >= max_duration_seconds:
+            return "muted_duration"
+        _skip_alert_fires[stage] = _skip_alert_fires.get(stage, 0) + 1
+        return "alert"
 
 
 def reset_phase_skip(stage: str) -> None:
-    """Clear a stage's consecutive-skip counter (fresh timeout or completed run)."""
+    """Clear a stage's episode state (fresh timeout or completed run).
+
+    Starts a fresh wedge episode for the stage: the consecutive-skip counter,
+    the re-alert count, and the episode clock are all reset, so re-alerts
+    resume (within the caps) the next time the phase wedges.
+    """
     with _in_flight_lock:
         _skip_counts.pop(stage, None)
+        _skip_alert_fires.pop(stage, None)
+        _skip_alert_started.pop(stage, None)
 
 
 def reset_phase_skip_tracking() -> None:
-    """Clear all per-stage skip counters (test isolation, engine restart)."""
+    """Clear all per-stage episode state (test isolation, engine restart)."""
     with _in_flight_lock:
         _skip_counts.clear()
+        _skip_alert_fires.clear()
+        _skip_alert_started.clear()
 
 
 def snapshot_phase_state() -> list[dict[str, Any]]:
@@ -270,7 +313,9 @@ def snapshot_phase_state() -> list[dict[str, Any]]:
     stuck and that the loop is skipping it rather than running it.
     """
     with _in_flight_lock:
-        stages = sorted(set(_in_flight) | set(_skip_counts))
+        stages = sorted(
+            set(_in_flight) | set(_skip_counts) | set(_skip_alert_fires) | set(_skip_alert_started)
+        )
         entries: list[dict[str, Any]] = []
         for stage in stages:
             thread = _in_flight.get(stage)

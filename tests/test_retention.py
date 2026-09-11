@@ -188,25 +188,69 @@ def test_run_stage_with_timeout_skips_while_previous_wedged() -> None:
 
 
 def test_note_phase_skip_counts_then_realerts_and_resets() -> None:
-    """``note_phase_skip`` counts consecutive skips per stage, returns True (and
-    resets) once the threshold is reached so a long wedge re-alerts, and counts
-    each stage independently."""
+    """``note_phase_skip`` counts consecutive skips per stage, reports ``alert``
+    (and resets) once the threshold is reached so a long wedge re-alerts, and
+    counts each stage independently."""
     reset_phase_skip_tracking()
     try:
-        # Two skips below a threshold of 3 -> False; the third -> True (reset).
-        assert note_phase_skip("retention", 3) is False
-        assert note_phase_skip("retention", 3) is False
-        assert note_phase_skip("retention", 3) is True
+        # Two skips below a threshold of 3 -> counted; the third -> alert (reset).
+        assert note_phase_skip("retention", 3) == "counted"
+        assert note_phase_skip("retention", 3) == "counted"
+        assert note_phase_skip("retention", 3) == "alert"
         # After reset the cycle repeats.
-        assert note_phase_skip("retention", 3) is False
+        assert note_phase_skip("retention", 3) == "counted"
         # Stages are independent.
-        assert note_phase_skip("forecast", 3) is False
+        assert note_phase_skip("forecast", 3) == "counted"
         # A completed run clears the counter: next skip starts over.
         reset_phase_skip("forecast")
-        assert note_phase_skip("forecast", 3) is False
+        assert note_phase_skip("forecast", 3) == "counted"
         # Threshold <= 0 disables re-alerting entirely (never counts, never fires).
-        assert note_phase_skip("parity", 0) is False
-        assert note_phase_skip("parity", 0) is False
+        assert note_phase_skip("parity", 0) == "counted"
+        assert note_phase_skip("parity", 0) == "counted"
+    finally:
+        reset_phase_skip_tracking()
+
+
+def test_note_phase_skip_mutes_after_max_alerts_per_episode() -> None:
+    """A wedge episode stops re-alerting once it has recorded ``max_alerts``
+    re-alerts (``muted_alerts`` on later cycle completions), and a completed
+    run — a fresh episode — lets re-alerting resume."""
+    reset_phase_skip_tracking()
+    try:
+        # Threshold of 2, at most 2 re-alerts per episode.
+        assert note_phase_skip("retention", 2, max_alerts=2) == "counted"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "alert"  # re-alert 1
+        assert note_phase_skip("retention", 2, max_alerts=2) == "counted"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "alert"  # re-alert 2
+        # Third cycle completion: the 2-alert cap is hit -> muted, stays muted.
+        assert note_phase_skip("retention", 2, max_alerts=2) == "counted"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "muted_alerts"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "counted"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "muted_alerts"
+        # A completed run starts a fresh episode -> re-alerts resume.
+        reset_phase_skip("retention")
+        assert note_phase_skip("retention", 2, max_alerts=2) == "counted"
+        assert note_phase_skip("retention", 2, max_alerts=2) == "alert"
+    finally:
+        reset_phase_skip_tracking()
+
+
+def test_note_phase_skip_mutes_after_max_duration_since_first_skip() -> None:
+    """A wedge episode older than ``max_duration_seconds`` (measured from its
+    first skipped iteration) stops re-alerting even with no alert-count cap."""
+    import ops.watchdog as watchdog_mod
+
+    reset_phase_skip_tracking()
+    try:
+        # First cycle completes inside the window -> alert.
+        assert note_phase_skip("retention", 2, max_duration_seconds=3600.0) == "counted"
+        assert note_phase_skip("retention", 2, max_duration_seconds=3600.0) == "alert"
+        # Backdate the episode clock beyond the cap...
+        with watchdog_mod._in_flight_lock:  # noqa: SLF001 - unit test needs internals.
+            watchdog_mod._skip_alert_started["retention"] = _time.monotonic() - 7200.0
+        # ...the next cycle completion is muted by duration, and stays muted.
+        assert note_phase_skip("retention", 2, max_duration_seconds=3600.0) == "counted"
+        assert note_phase_skip("retention", 2, max_duration_seconds=3600.0) == "muted_duration"
     finally:
         reset_phase_skip_tracking()
 
@@ -253,8 +297,12 @@ def test_engine_phase_watchdog_timeout_config_defaults() -> None:
     assert settings.parity_timeout_seconds == settings.phase_timeout_seconds
     assert settings.data_lake_timeout_seconds == settings.phase_timeout_seconds
     assert settings.nightcrawler_timeout_seconds == 1800.0
-    # Repeatedly-stuck phases re-alert after this many consecutive skips.
+    # Repeatedly-stuck phases re-alert after this many consecutive skips,
+    # bounded per wedge episode by a re-alert-row cap and a duration cap so a
+    # phase wedged for many cycles eventually goes quiet.
     assert settings.skip_alert_cycles == 20
+    assert settings.skip_alert_max_alerts == 5
+    assert settings.skip_alert_max_minutes == 720.0
 
 
 def test_retention_first_run_records_totals_and_health(session, tmp_path) -> None:

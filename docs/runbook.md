@@ -103,8 +103,16 @@ blocking the loop forever:
   `*watchdog timeout; pass abandoned*` row with message `… still wedged after
   N consecutive skipped iterations …`, plus an
   `engine_stage_watchdog_skip_realert` log line — then the counter resets and
-  repeats every `SKIP_ALERT_CYCLES` until the wedge clears. Set `0` to disable
-  re-alerting.
+  re-alerts repeat every `SKIP_ALERT_CYCLES`. That repetition is **capped per
+  wedge episode** (a completed run starts a fresh episode with fresh caps):
+  `SKIP_ALERT_MAX_ALERTS` (default `5`) re-alert rows, or
+  `SKIP_ALERT_MAX_MINUTES` (default `720` = 12h) measured from the episode's
+  first skipped iteration — whichever is hit first. Past the cap the phase
+  goes quiet (an `engine_stage_watchdog_skip_muted` log marks the cutoff), so
+  a phase wedged for many cycles stops paging instead of re-alerting forever;
+  the initial timeout alarm and the live `watchdog.phases` SSE state are never
+  capped. Set either knob to `0` to lift that cap, or `SKIP_ALERT_CYCLES` to
+  `0` to disable re-alerting entirely.
 
 ### Detection & recovery steps
 

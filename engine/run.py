@@ -90,6 +90,8 @@ def _run_watchdog_phase(
     timeout_seconds: float,
     fn: Callable[[], dict[str, object]],
     skip_alert_cycles: int = 20,
+    skip_alert_max_alerts: int = 5,
+    skip_alert_max_minutes: float = 720.0,
     session: Any = None,
 ) -> StageOutcome:
     """Run a blocking engine phase under the shared watchdog timeout.
@@ -105,8 +107,12 @@ def _run_watchdog_phase(
     - a skip (a previous wedged run of the same phase still in flight) records
       nothing by itself, but after ``skip_alert_cycles`` consecutive skips it
       re-records a red alarm so a long wedge doesn't go silent for its whole
-      duration;
-    - a completed run clears the stage's skip counter.
+      duration. That re-alerting is capped per wedge episode by
+      ``skip_alert_max_alerts`` re-alert rows and ``skip_alert_max_minutes``
+      from the episode's first skip — past either, further re-alerts are muted
+      (``engine_stage_watchdog_skip_muted``) until the phase recovers;
+    - a completed run clears the stage's episode state (fresh wedge = fresh
+      caps).
 
     ``session`` is injectable for tests: when provided the alarm row is added
     to it (and flushed) instead of opening a throwaway ``SessionLocal``, so an
@@ -150,8 +156,17 @@ def _run_watchdog_phase(
 
     # outcome.skipped — the original timeout already alarmed. Re-alert only once
     # the phase has been stuck for skip_alert_cycles consecutive skips, so a
-    # long wedge keeps surfacing instead of going dark.
-    if note_phase_skip(stage, skip_alert_cycles):
+    # long wedge keeps surfacing instead of going dark — but stop re-alerting
+    # once the wedge episode has produced skip_alert_max_alerts re-alert rows
+    # or run for skip_alert_max_minutes, so a phase wedged for many cycles
+    # doesn't page forever.
+    verdict = note_phase_skip(
+        stage,
+        skip_alert_cycles,
+        max_alerts=skip_alert_max_alerts,
+        max_duration_seconds=skip_alert_max_minutes * 60.0,
+    )
+    if verdict == "alert":
         message = (
             f"{stage} stage still wedged after {skip_alert_cycles} consecutive "
             "skipped iterations (watchdog timeout; pass abandoned, engine loop "
@@ -163,6 +178,14 @@ def _run_watchdog_phase(
             consecutive_skips=skip_alert_cycles,
         )
         _record(message)
+    elif verdict.startswith("muted"):
+        log.warning(
+            "engine_stage_watchdog_skip_muted",
+            stage=stage,
+            reason=verdict,
+            cap_alerts=skip_alert_max_alerts,
+            cap_minutes=skip_alert_max_minutes,
+        )
     return outcome
 
 
@@ -241,6 +264,8 @@ def run_engine_phases(
             component="forecast",
             timeout_seconds=settings.forecast_timeout_seconds,
             skip_alert_cycles=settings.skip_alert_cycles,
+            skip_alert_max_alerts=settings.skip_alert_max_alerts,
+            skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=forecast_fn,
             session=alarm_session,
         )
@@ -264,6 +289,8 @@ def run_engine_phases(
             component="lake",
             timeout_seconds=settings.retention_timeout_seconds,
             skip_alert_cycles=settings.skip_alert_cycles,
+            skip_alert_max_alerts=settings.skip_alert_max_alerts,
+            skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=retention_fn,
             session=alarm_session,
         )
@@ -286,6 +313,8 @@ def run_engine_phases(
             component="parity",
             timeout_seconds=settings.parity_timeout_seconds,
             skip_alert_cycles=settings.skip_alert_cycles,
+            skip_alert_max_alerts=settings.skip_alert_max_alerts,
+            skip_alert_max_minutes=settings.skip_alert_max_minutes,
             fn=parity_fn,
             session=alarm_session,
         )
@@ -307,6 +336,8 @@ def run_engine_phases(
                     component="nightcrawler",
                     timeout_seconds=settings.nightcrawler_timeout_seconds,
                     skip_alert_cycles=settings.skip_alert_cycles,
+                    skip_alert_max_alerts=settings.skip_alert_max_alerts,
+                    skip_alert_max_minutes=settings.skip_alert_max_minutes,
                     fn=nightcrawler_fn,
                     session=alarm_session,
                 )
@@ -335,6 +366,8 @@ def run_engine_phases(
                 component="data_lake",
                 timeout_seconds=settings.data_lake_timeout_seconds,
                 skip_alert_cycles=settings.skip_alert_cycles,
+                skip_alert_max_alerts=settings.skip_alert_max_alerts,
+                skip_alert_max_minutes=settings.skip_alert_max_minutes,
                 fn=data_lake_fn,
                 session=alarm_session,
             )
@@ -362,6 +395,8 @@ def run_engine_phases(
                 component="score_drift",
                 timeout_seconds=settings.score_drift_timeout_seconds,
                 skip_alert_cycles=settings.skip_alert_cycles,
+                skip_alert_max_alerts=settings.skip_alert_max_alerts,
+                skip_alert_max_minutes=settings.skip_alert_max_minutes,
                 fn=score_drift_fn,
                 session=alarm_session,
             )

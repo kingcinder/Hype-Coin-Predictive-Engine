@@ -358,3 +358,77 @@ def test_wedged_phase_full_lifecycle_timeout_skip_recover(session, monkeypatch) 
     assert not any(
         level == "error" and event == "engine_stage_watchdog_timeout" for level, event, _ in logs3
     )
+
+
+def test_realerts_stop_after_max_alerts_until_recovery(session, monkeypatch) -> None:
+    """A phase wedged for many cycles re-alerts at most ``SKIP_ALERT_MAX_ALERTS``
+    times per wedge episode: the red-row count freezes at the cap (a
+    ``engine_stage_watchdog_skip_muted`` log marks the cutoff) while the phase
+    stays stuck, instead of re-alerting forever."""
+    import engine.run as engine_run
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(engine_run, "log", recorder)
+
+    settings = _phase_settings(skip_alert_cycles=2, skip_alert_max_alerts=2)
+    state = _FakeEngineState()
+    stop = threading.Event()
+    stuck = _blocking(30.0)  # wedged far beyond the iterations below
+
+    def _run(iteration: int) -> list[tuple[str, str, dict[str, Any]]]:
+        logs_before = len(recorder.calls)
+        run_engine_phases(
+            settings=settings,
+            iteration=iteration,
+            stop=stop,
+            last_nc_run_monotonic=0.0,
+            system_state=state,
+            alarm_session=session,
+            forecast_fn=stuck,
+            retention_fn=stuck,
+            parity_fn=stuck,
+            nightcrawler_fn=stuck,
+            data_lake_fn=stuck,
+            score_drift_fn=stuck,
+        )
+        return recorder.calls[logs_before:]
+
+    # Iteration 1: every phase times out -> one red alarm per phase.
+    _run(1)
+    assert len(_red_rows(session)) == len(WATCHDOG_COMPONENTS) == 6
+
+    # Iterations 2-3 and 4-5: each threshold of 2 consecutive skips re-alerts,
+    # doubling and tripling the rows (re-alert cap of 2 not yet reached).
+    _run(2)
+    _run(3)
+    assert len(_red_rows(session)) == 2 * len(WATCHDOG_COMPONENTS) == 12
+    _run(4)
+    _run(5)
+    assert len(_red_rows(session)) == 3 * len(WATCHDOG_COMPONENTS) == 18
+
+    # Iterations 6-7: further cycle completions hit the 2-re-alert cap -> muted.
+    # The rows freeze at 3 per component and a muted log marks the cutoff.
+    _run(6)
+    logs7 = _run(7)
+    assert len(_red_rows(session)) == 3 * len(WATCHDOG_COMPONENTS) == 18
+    muted = [
+        (level, event, kw)
+        for level, event, kw in logs7
+        if event == "engine_stage_watchdog_skip_muted"
+    ]
+    # Every wedged phase (all six) is muted at the same cutoff.
+    assert {kw.get("stage") for _, _, kw in muted} == set(
+        ["forecast", "retention", "parity", "nightcrawler", "data_lake", "score_drift"]
+    )
+    assert all(level == "warning" for level, _, _ in muted)
+    assert all(
+        kw.get("reason") == "muted_alerts" and kw.get("cap_alerts") == 2 for _, _, kw in muted
+    )
+    # No re-alert rows (nor fresh timeouts) were recorded after the cap.
+    assert not any(
+        event in ("engine_stage_watchdog_skip_realert", "engine_stage_watchdog_timeout")
+        for _, event, _ in logs7
+    )
+    for component in WATCHDOG_COMPONENTS:
+        comp_rows = [r for r in _red_rows(session) if r.component == component]
+        assert len(comp_rows) == 3  # 1 timeout + 2 re-alerts, then silent
