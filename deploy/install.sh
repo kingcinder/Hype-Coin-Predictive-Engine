@@ -37,6 +37,14 @@ if [[ ! -d "$PREFIX/.git" ]]; then
   # Create the parent directory without changing its ownership: taking over
   # /opt (or any other parent) for the service user is overbroad (M20).
   install -d "$(dirname "$PREFIX")"
+  if [[ -e "$PREFIX" ]]; then
+    # A previous install attempt left a non-repo directory behind (e.g. a
+    # failed clone). Preserve it instead of aborting: move it aside with a
+    # timestamp so no existing data is ever silently destroyed.
+    backup="${PREFIX}.bak-$(date +%Y%m%d-%H%M%S)"
+    echo "WARNING: $PREFIX exists but is not a git checkout -- moving it to $backup" >&2
+    mv "$PREFIX" "$backup"
+  fi
   git clone --branch "$BRANCH" "$REPO_URL" "$PREFIX"
 fi
 
