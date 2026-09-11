@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Uninstall Hype-Coin Engine
+GenericName=Crypto predictive engine uninstaller
+Comment=Remove the Hype-Coin Predictive Engine service, files and user
+Icon=hype-coin-uninstall
+Exec=sh -c 'exec "$(dirname "%k")/_launcher.sh" uninstall'
+Terminal=true
+Categories=System;
+Keywords=hype;coin;crypto;uninstall;remove;
+StartupNotify=false

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install Hype-Coin Engine
+GenericName=Crypto predictive engine installer
+Comment=Install the Hype-Coin Predictive Engine (double-click, follow the prompts)
+Icon=hype-coin-install
+Exec=sh -c 'exec "$(dirname "%k")/_launcher.sh" install'
+Terminal=true
+Categories=System;Finance;
+Keywords=hype;coin;crypto;install;setup;
+StartupNotify=false
