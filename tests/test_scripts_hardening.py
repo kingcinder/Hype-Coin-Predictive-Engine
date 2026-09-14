@@ -32,9 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_script_module(name: str, relative_path: str):
-    spec = importlib.util.spec_from_file_location(
-        name, REPO_ROOT / relative_path
-    )
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / relative_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -42,6 +40,7 @@ def _load_script_module(name: str, relative_path: str):
 
 
 # ── H10 ──────────────────────────────────────────────────────────────────────
+
 
 def test_rewrite_env_pool_csvs_leaves_all_down_chain_untouched(tmp_path) -> None:
     from scripts.refresh_rpc_pools import PoolProbeResult, rewrite_env_pool_csvs
@@ -79,6 +78,7 @@ def test_rewrite_env_pool_csvs_leaves_all_down_chain_untouched(tmp_path) -> None
 
 
 # ── M18 ──────────────────────────────────────────────────────────────────────
+
 
 class _FakeResponse:
     def __init__(self, payload: dict) -> None:
@@ -123,25 +123,41 @@ def _seed_backfill_pair(session):
         session, "solana", name="Solana", vm_type="solana", native_symbol="SOL"
     )
     asset = upsert_asset(
-        session, chain_id=chain.id, address="addr_hype", symbol="HYPE",
-        name="Hype Fixture", first_seen_at=now - timedelta(days=200),
+        session,
+        chain_id=chain.id,
+        address="addr_hype",
+        symbol="HYPE",
+        name="Hype Fixture",
+        first_seen_at=now - timedelta(days=200),
     )
     quote = upsert_asset(
-        session, chain_id=chain.id, address="addr_usdc", symbol="USDC",
-        name="USD Coin", first_seen_at=now - timedelta(days=400),
+        session,
+        chain_id=chain.id,
+        address="addr_usdc",
+        symbol="USDC",
+        name="USD Coin",
+        first_seen_at=now - timedelta(days=400),
     )
     _, pair = upsert_pool_and_pair(
-        session, chain_id=chain.id, dex_id="raydium",
-        pair_address="pair_hype_usdc", base_asset_id=asset.id,
-        quote_asset_id=quote.id, created_at_source=now - timedelta(days=200),
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address="pair_hype_usdc",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=now - timedelta(days=200),
     )
     source = get_or_create_source(
-        session, name="coingecko", source_type="market_data",
-        tier="public_metadata", base_url="https://api.coingecko.com/api/v3",
+        session,
+        name="coingecko",
+        source_type="market_data",
+        tier="public_metadata",
+        base_url="https://api.coingecko.com/api/v3",
     )
     # A coin-id evidence row keeps ID resolution off the live /search endpoint.
     store_raw_evidence(
-        session, source=source,
+        session,
+        source=source,
         payload={"items": [{"symbol": "HYPE", "coingecko_id": "hype-fixture"}]},
         observed_at=now - timedelta(days=1),
     )
@@ -198,6 +214,7 @@ def test_backfill_main_exit_code_on_total_failure(session, monkeypatch, capsys) 
 
 # ── M17 ──────────────────────────────────────────────────────────────────────
 
+
 def test_seed_fixtures_is_idempotent(session) -> None:
     """M17: a second seed run adds no duplicate Holder/ContractFlag rows and
     leaves exactly one fixture_seed health marker."""
@@ -210,7 +227,9 @@ def test_seed_fixtures_is_idempotent(session) -> None:
     def counts():
         return {
             "holders": session.scalar(select(func.count()).select_from(models.Holder)),
-            "flags": session.scalar(select(func.count()).select_from(models.ContractFlag)),
+            "flags": session.scalar(
+                select(func.count()).select_from(models.ContractFlag)
+            ),
             "markers": session.scalar(
                 select(func.count())
                 .select_from(models.SystemHealth)
@@ -228,7 +247,10 @@ def test_seed_fixtures_is_idempotent(session) -> None:
 
 # ── M23 ──────────────────────────────────────────────────────────────────────
 
-def _run_clean_db_function(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+
+def _run_clean_db_function(
+    tmp_path: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
     """Run the real ``cmd_clean_db`` function from scripts/dev.sh in a throwaway
     cwd. (dev.sh ``cd``s to the repo root on startup, so invoking the whole
     script with --force would target the repo's own serpent.db — extracting
@@ -245,7 +267,13 @@ def _run_clean_db_function(tmp_path: Path, *args: str) -> subprocess.CompletedPr
     assert func_text.startswith("cmd_clean_db() {"), "function not found in dev.sh"
     quoted = " ".join(f"'{a}'" for a in args)
     return subprocess.run(
-        ["bash", "-c", f"{func_text}\ncd \"$1\" && cmd_clean_db {quoted}", "_", str(tmp_path)],
+        [
+            "bash",
+            "-c",
+            f'{func_text}\ncd "$1" && cmd_clean_db {quoted}',
+            "_",
+            str(tmp_path),
+        ],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -271,6 +299,7 @@ def test_dev_sh_clean_db_force_deletes(tmp_path) -> None:
 
 
 # ── rescore confirmation ─────────────────────────────────────────────────────
+
 
 def _rescore_env(db_path: Path) -> dict[str, str]:
     return {
@@ -312,6 +341,7 @@ def test_rescore_yes_bypasses_prompt(tmp_path) -> None:
 
 # ── L1 ───────────────────────────────────────────────────────────────────────
 
+
 def test_backup_and_compactor_share_merge_lock_name() -> None:
     """L1: the backup sidecar quiesces on the same lock file as the compactor."""
     from ops.archive import ARCHIVE_MERGE_LOCK_NAME
@@ -320,7 +350,9 @@ def test_backup_and_compactor_share_merge_lock_name() -> None:
     assert backup._ARCHIVE_MERGE_LOCK_NAME == ARCHIVE_MERGE_LOCK_NAME  # noqa: SLF001
 
 
-def test_backup_lock_is_mutually_exclusive_with_compactor_lock(tmp_path, monkeypatch) -> None:
+def test_backup_lock_is_mutually_exclusive_with_compactor_lock(
+    tmp_path, monkeypatch
+) -> None:
     """While the compactor holds its merge lock, the backup sidecar's lock
     acquisition times out (and vice versa) — the tar quiesce actually works."""
     import ops.archive as archive_mod
@@ -367,7 +399,9 @@ class _FailingHttpClient:
         pass
 
 
-def test_backfill_defillama_counts_failed_days_as_resolve_errors(session, monkeypatch) -> None:
+def test_backfill_defillama_counts_failed_days_as_resolve_errors(
+    session, monkeypatch
+) -> None:
     """M18: the DeFiLlama path must populate resolve_errors like CoinGecko —
     a fully-failed backfill must be distinguishable from a successful one."""
     import scripts.backfill_history as bh
