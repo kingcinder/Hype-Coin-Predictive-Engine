@@ -120,7 +120,9 @@ def rewrite_env_pool_csvs(
             )
             continue
         value = ",".join(healthy)
-        pattern = re.compile(rf"^(\s*(?:export\s+)?{re.escape(field)}\s*=\s*).*$", re.MULTILINE)
+        pattern = re.compile(
+            rf"^(\s*(?:export\s+)?{re.escape(field)}\s*=\s*).*$", re.MULTILINE
+        )
         replacement = rf"\g<1>{value}"
         if pattern.search(updated):
             updated = pattern.sub(replacement, updated, count=1)
