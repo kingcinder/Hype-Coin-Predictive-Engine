@@ -132,7 +132,9 @@ class TestLLMCalibratorSnapshot:
             total_predictions=100,
             total_improved=60,
             total_degraded=40,
-            weight_history=[{"ts": "2026-01-01T00:00:00", "old_weight": 0.10, "new_weight": 0.15}],
+            weight_history=[
+                {"ts": "2026-01-01T00:00:00", "old_weight": 0.10, "new_weight": 0.15}
+            ],
         )
         session.add(state)
         session.flush()
@@ -220,7 +222,9 @@ class TestLLMCalibrationRegression:
         session.add_all([old, fresh])
         session.commit()
         assert (
-            session.scalar(select(func.count()).select_from(models.LLMCalibrationRecord))
+            session.scalar(
+                select(func.count()).select_from(models.LLMCalibrationRecord)
+            )
             == 2
         )
 
