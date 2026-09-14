@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Start Docker profile dependencies
-        run: docker compose up -d postgres redis minio
+        run: docker compose -f docker-compose.ci.yml up -d postgres redis minio
       - name: Wait for MinIO
         run: |
           for i in $(seq 1 30); do
@@ -49,17 +49,17 @@ jobs:
           done
           exit 1
       - name: Run migrations
-        run: docker compose run --rm migrate
+        run: docker compose -f docker-compose.ci.yml run --rm migrate
       - name: Seed Docker profile fixture data
-        run: docker compose run --rm worker python scripts/seed_fixtures.py
+        run: docker compose -f docker-compose.ci.yml run --rm worker python scripts/seed_fixtures.py
       - name: Run live MinIO archive smoke
         run: |
-          docker compose run --rm worker python -m ops.archive --once
+          docker compose -f docker-compose.ci.yml run --rm worker python -m ops.archive --once
       - name: Run parity against Docker MinIO profile
-        run: docker compose run --rm worker python -m ops.parity --once
+        run: docker compose -f docker-compose.ci.yml run --rm worker python -m ops.parity --once
       - name: Show dependency logs on failure
         if: failure()
-        run: docker compose logs --no-color minio postgres migrate
+        run: docker compose -f docker-compose.ci.yml logs --no-color minio postgres migrate
       - name: Stop Docker profile
         if: always()
-        run: docker compose down -v
+        run: docker compose -f docker-compose.ci.yml down -v
