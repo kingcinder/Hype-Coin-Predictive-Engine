@@ -62,7 +62,9 @@ ARCHIVE_MERGE_LOCK_NAME = ".archive.merge.lock"
 
 
 @contextlib.contextmanager
-def archive_merge_lock(root: Path | str, timeout: float | None = None) -> Iterator[None]:
+def archive_merge_lock(
+    root: Path | str, timeout: float | None = None
+) -> Iterator[None]:
     """Exclusive inter-process lock for archive-root mutations.
 
     ``timeout=None`` blocks until acquired; otherwise raises ``TimeoutError``
@@ -182,7 +184,9 @@ class LocalArchiveStore:
             stat = self._path(key).stat()
         except FileNotFoundError:
             return None
-        return ObjectStat(size=stat.st_size, etag=f"{stat.st_mtime_ns:x}:{stat.st_size:x}")
+        return ObjectStat(
+            size=stat.st_size, etag=f"{stat.st_mtime_ns:x}:{stat.st_size:x}"
+        )
 
     def put_object_if_match(self, key: str, data: bytes, etag: str) -> int:
         # Under merge_lock() the object cannot change between stat and write,
@@ -198,7 +202,10 @@ class LocalArchiveStore:
         if not base.is_dir():
             return []
         root = self._root_resolved
-        return [str(path.relative_to(root)).replace("\\", "/") for path in base.rglob("*.parquet")]
+        return [
+            str(path.relative_to(root)).replace("\\", "/")
+            for path in base.rglob("*.parquet")
+        ]
 
     def download_to(self, key: str, dest: Path) -> Path:
         source = self._path(key)
@@ -223,7 +230,9 @@ def _is_precondition_failed(exc: Exception) -> bool:
     if _s3_error_code(exc) == "PreconditionFailed":
         return True
     response = getattr(exc, "response", None) or {}
-    metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    metadata = (
+        response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+    )
     return metadata.get("HTTPStatusCode") == 412
 
 
@@ -249,7 +258,9 @@ class S3ArchiveStore:
         return self._client
 
     def put_object(self, key: str, data: bytes) -> int:
-        self._get_client().put_object(Bucket=self.settings.minio_bucket, Key=key, Body=data)
+        self._get_client().put_object(
+            Bucket=self.settings.minio_bucket, Key=key, Body=data
+        )
         return len(data)
 
     def object_exists(self, key: str) -> bool:
@@ -324,7 +335,9 @@ class S3ArchiveStore:
         client = self._get_client()
         keys: list[str] = []
         paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self.settings.minio_bucket, Prefix=prefix):
+        for page in paginator.paginate(
+            Bucket=self.settings.minio_bucket, Prefix=prefix
+        ):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 if key.endswith(".parquet"):
@@ -451,7 +464,9 @@ class RawEvidenceCompactor:
         still prunes expired rows.
         """
         decision_ts = ensure_utc(decision_ts or utc_now())
-        cutoff = decision_ts - timedelta(hours=self.settings.archive_compact_after_hours)
+        cutoff = decision_ts - timedelta(
+            hours=self.settings.archive_compact_after_hours
+        )
         if partition_filter is not None and not partition_filter:
             # Nothing due on the per-partition schedule: no compaction work.
             pruned = self._prune(session, decision_ts)
@@ -484,7 +499,9 @@ class RawEvidenceCompactor:
         source_names = {
             source.id: source.name
             for source in session.scalars(
-                select(models.Source).where(models.Source.id.in_({row.source_id for row in rows}))
+                select(models.Source).where(
+                    models.Source.id.in_({row.source_id for row in rows})
+                )
             )
         }
         groups: dict[tuple[int, int, int], list[models.RawEvidenceItem]] = {}
@@ -546,7 +563,14 @@ class RawEvidenceCompactor:
         for attempt in range(self._MERGE_RETRIES):
             try:
                 self._merge_one_partition(
-                    session, object_key, source_id, year, month, new_frame, group, decision_ts
+                    session,
+                    object_key,
+                    source_id,
+                    year,
+                    month,
+                    new_frame,
+                    group,
+                    decision_ts,
                 )
                 return
             except PartitionConflictError as exc:
@@ -584,7 +608,9 @@ class RawEvidenceCompactor:
             # the DB commit failed, the rows stayed archived_at=NULL and this
             # pass re-selects them — dedup on evidence_id so the re-merge
             # cannot duplicate them in the lake.
-            frame = frame.unique(subset=["evidence_id"], keep="first", maintain_order=True)
+            frame = frame.unique(
+                subset=["evidence_id"], keep="first", maintain_order=True
+            )
         else:
             frame = new_frame
         buffer = io.BytesIO()
@@ -626,8 +652,15 @@ class RawEvidenceCompactor:
                 "not match the payload that was written"
             )
         self._upsert_manifest(
-            session, object_key, source_id, year, month, group,
-            row_count=frame.height, byte_size=byte_size, digest=digest,
+            session,
+            object_key,
+            source_id,
+            year,
+            month,
+            group,
+            row_count=frame.height,
+            byte_size=byte_size,
+            digest=digest,
         )
         for row in group:
             row.archived_at = decision_ts
@@ -707,18 +740,32 @@ class RawEvidenceCompactor:
                 dest = self.store.download_to(object_key, Path(tmp) / "part.parquet")
                 return pl.read_parquet(dest)
             except Exception as exc:
-                log.warning("archive_partition_unreadable", object_key=object_key, error=str(exc))
+                log.warning(
+                    "archive_partition_unreadable",
+                    object_key=object_key,
+                    error=str(exc),
+                )
                 raise PartitionUnreadableError(
                     f"cannot read archive partition {object_key}: {exc}"
                 ) from exc
 
     def _prune(self, session: Session, decision_ts: datetime) -> int:
-        retention_cutoff = decision_ts - timedelta(days=self.settings.archive_retention_days)
+        retention_cutoff = decision_ts - timedelta(
+            days=self.settings.archive_retention_days
+        )
         referenced = or_(
-            exists().where(models.MarketSnapshot.raw_evidence_id == models.RawEvidenceItem.id),
-            exists().where(models.LiquiditySnapshot.raw_evidence_id == models.RawEvidenceItem.id),
-            exists().where(models.ContractFlag.evidence_id == models.RawEvidenceItem.id),
-            exists().where(models.NewsItem.raw_evidence_id == models.RawEvidenceItem.id),
+            exists().where(
+                models.MarketSnapshot.raw_evidence_id == models.RawEvidenceItem.id
+            ),
+            exists().where(
+                models.LiquiditySnapshot.raw_evidence_id == models.RawEvidenceItem.id
+            ),
+            exists().where(
+                models.ContractFlag.evidence_id == models.RawEvidenceItem.id
+            ),
+            exists().where(
+                models.NewsItem.raw_evidence_id == models.RawEvidenceItem.id
+            ),
         )
         rows = session.scalars(
             select(models.RawEvidenceItem).where(
@@ -827,8 +874,12 @@ def run_archive(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Serpent Circle archive & retention jobs")
-    parser.add_argument("--once", action="store_true", help="run compaction + prune once")
+    parser = argparse.ArgumentParser(
+        description="Serpent Circle archive & retention jobs"
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="run compaction + prune once"
+    )
     parser.add_argument(
         "--query",
         metavar="SQL",
