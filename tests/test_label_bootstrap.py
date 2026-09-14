@@ -115,10 +115,13 @@ def test_seed_labels_generates_labels_at_feature_timestamps(session) -> None:
     # Should have generated labels at hours 11 and 13
     assert counts["decision_points"] == 2
     # Check labels exist at the feature timestamps
-    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
+    labels = session.scalars(
+        select(models.Label).where(models.Label.asset_id == asset.id)
+    ).all()
     assert len(labels) >= 4  # 2 timestamps × 2 label types (ignition + collapse)
     label_timestamps = {
-        label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts for label in labels
+        label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts
+        for label in labels
     }
     assert T0 + timedelta(hours=11) in label_timestamps
     assert T0 + timedelta(hours=13) in label_timestamps
@@ -174,7 +177,9 @@ def test_seed_labels_skips_forward_window_not_elapsed(session) -> None:
     session.commit()
 
     assert counts["decision_points"] == 0
-    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
+    labels = session.scalars(
+        select(models.Label).where(models.Label.asset_id == asset.id)
+    ).all()
     assert len(labels) == 0
 
 
@@ -296,15 +301,31 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
     decision = ts + timedelta(hours=25)
 
     # Real label first, then a dense label tries to overwrite it.
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts, label_type="collapse", value="1",
-        decision_ts=decision, source="forecast:gbm-hist-v1",
-    ) is True
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts,
+            label_type="collapse",
+            value="1",
+            decision_ts=decision,
+            source="forecast:gbm-hist-v1",
+        )
+        is True
+    )
     session.commit()
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts, label_type="collapse", value="0",
-        decision_ts=decision, source="dense-labels:gbm-hist-v1",
-    ) is False
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts,
+            label_type="collapse",
+            value="0",
+            decision_ts=decision,
+            source="dense-labels:gbm-hist-v1",
+        )
+        is False
+    )
     session.commit()
     row = session.scalar(
         select(models.Label).where(
@@ -318,15 +339,31 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
 
     # Dense label first, then the real observation upgrades it with source.
     ts2 = ts + timedelta(hours=1)
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts2, label_type="collapse", value="0",
-        decision_ts=decision, source="dense-labels:gbm-hist-v1",
-    ) is True
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts2,
+            label_type="collapse",
+            value="0",
+            decision_ts=decision,
+            source="dense-labels:gbm-hist-v1",
+        )
+        is True
+    )
     session.commit()
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts2, label_type="collapse", value="1",
-        decision_ts=decision, source="forecast:gbm-hist-v1",
-    ) is False
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts2,
+            label_type="collapse",
+            value="1",
+            decision_ts=decision,
+            source="forecast:gbm-hist-v1",
+        )
+        is False
+    )
     session.commit()
     row2 = session.scalar(
         select(models.Label).where(
