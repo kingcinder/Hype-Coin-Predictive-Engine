@@ -132,7 +132,7 @@ jobs:
           SERPENT_DB_PATH: ${{ runner.temp }}/rescore-smoke.db
           LLM_ENABLED: "false"
         run: |
-          .venv/bin/python scripts/rescore.py > /tmp/rescore-apply.log 2>&1
+          .venv/bin/python scripts/rescore.py --yes > /tmp/rescore-apply.log 2>&1
           grep -q "Rescore complete (APPLIED)" /tmp/rescore-apply.log
           # The seed fixture has exactly 2 scored tokens and every row carries
           # features, so the write loop must update both with zero errors — the
