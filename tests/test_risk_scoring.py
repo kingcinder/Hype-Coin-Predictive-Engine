@@ -11,7 +11,10 @@ from risk_engine.rules import assess_risk, band_from_collapse_probability
 from scoring.engine import ScoringEngine, score_current_assets
 from scoring.formulas import compute_scores
 from storage import models
-from storage.repository import insert_liquidity_snapshot_once, insert_market_snapshot_once
+from storage.repository import (
+    insert_liquidity_snapshot_once,
+    insert_market_snapshot_once,
+)
 from tests.conftest import seed_market_asset
 
 
@@ -86,7 +89,8 @@ def test_rpc_pool_health_is_a_persisted_feature_and_score_driver(session) -> Non
     )
     session.commit()
     values = {
-        value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision)
+        value.name: value
+        for value in FeatureFactory().build_for_asset(session, asset, decision)
     }
     assert values["rpc_pool_health"].value == 0.5
     assert values["rpc_pool_health"].missing is False
@@ -109,13 +113,16 @@ def test_website_presence_is_evidence_gated(session) -> None:
     # the decision -> both read as UNKNOWN/missing (no live-state leak, no
     # silent zero).
     values = {
-        value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision)
+        value.name: value
+        for value in FeatureFactory().build_for_asset(session, asset, decision)
     }
     assert values["website_presence"].value == 0.0
     assert values["github_presence_public"].value == 0.0
 
     # Evidence observed at the decision time flips website presence on.
-    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    source = session.scalar(
+        select(models.Source).where(models.Source.name == "dexscreener")
+    )
     session.add(
         models.SocialMention(
             asset_id=asset.id,
@@ -129,7 +136,8 @@ def test_website_presence_is_evidence_gated(session) -> None:
     )
     session.commit()
     values = {
-        value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision)
+        value.name: value
+        for value in FeatureFactory().build_for_asset(session, asset, decision)
     }
     assert values["website_presence"].value == 1.0
     # github still absent — no evidence referencing the github URL yet.
@@ -140,7 +148,9 @@ def test_website_presence_ignores_future_evidence(session) -> None:
     """Evidence observed AFTER the decision time must not count (no lookahead)."""
     asset = seed_market_asset(session)
     decision = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    source = session.scalar(
+        select(models.Source).where(models.Source.name == "dexscreener")
+    )
     session.add(
         models.SocialMention(
             asset_id=asset.id,
@@ -154,7 +164,8 @@ def test_website_presence_ignores_future_evidence(session) -> None:
     )
     session.commit()
     values = {
-        value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision)
+        value.name: value
+        for value in FeatureFactory().build_for_asset(session, asset, decision)
     }
     assert values["website_presence"].value == 0.0
 
@@ -240,9 +251,15 @@ def test_score_explanation_records_changed_features(session) -> None:
     asset = seed_market_asset(session)
     first_decision = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     score_current_assets(session, decision_ts=first_decision, asset_ids=[asset.id])
-    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
-    pool = session.scalar(select(models.Pool).where(models.Pool.base_asset_id == asset.id))
-    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    pair = session.scalar(
+        select(models.Pair).where(models.Pair.base_asset_id == asset.id)
+    )
+    pool = session.scalar(
+        select(models.Pool).where(models.Pool.base_asset_id == asset.id)
+    )
+    source = session.scalar(
+        select(models.Source).where(models.Source.name == "dexscreener")
+    )
     assert pair is not None
     assert pool is not None
     assert source is not None
@@ -268,9 +285,13 @@ def test_score_explanation_records_changed_features(session) -> None:
         observed_at=second_decision,
         reserve_usd=160_000,
     )
-    scores = score_current_assets(session, decision_ts=second_decision, asset_ids=[asset.id])
+    scores = score_current_assets(
+        session, decision_ts=second_decision, asset_ids=[asset.id]
+    )
     explanation = session.scalar(
-        select(models.ScoreExplanation).where(models.ScoreExplanation.score_id == scores[0].id)
+        select(models.ScoreExplanation).where(
+            models.ScoreExplanation.score_id == scores[0].id
+        )
     )
     assert explanation is not None
     assert "liquidity_depth" in explanation.changed_features
@@ -420,7 +441,9 @@ def test_collapse_probability_contribution_follows_default_band_boundaries() -> 
     assert any("collapse probability" in r.lower() for r in black.reasons)
 
 
-def test_collapse_probability_contribution_uses_calibrated_ml_red_threshold(session) -> None:
+def test_collapse_probability_contribution_uses_calibrated_ml_red_threshold(
+    session,
+) -> None:
     """A calibrated ML red threshold shifts the RED collapse contribution with it.
 
     The ORANGE tier keeps graduating on the *default* orange boundary (0.30)
@@ -525,13 +548,18 @@ def test_red_never_exceeds_black_across_calibrated_thresholds(session) -> None:
         # Nothing below 0.75 can ever be BLACK.
         for p in prob_samples:
             if p < 0.75:
-                assert band_from_collapse_probability(p, session=session).value != "BLACK", (
+                assert (
+                    band_from_collapse_probability(p, session=session).value != "BLACK"
+                ), (
                     f"p={p} mapped to BLACK at thresholds Y={ml_yellow} O={ml_orange} R={ml_red}"
                 )
         # The RED boundary is clamped to at most 0.74, so RED stays
         # reachable strictly below BLACK (no band collapse).
         effective_red = min(ml_red, 0.74)
-        assert band_from_collapse_probability(effective_red, session=session).value == "RED"
+        assert (
+            band_from_collapse_probability(effective_red, session=session).value
+            == "RED"
+        )
 
 
 def _seed_evaluated_ml_outcomes(
@@ -548,7 +576,9 @@ def _seed_evaluated_ml_outcomes(
     now = datetime.now(UTC)
     decision = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     score_current_assets(session, decision_ts=decision, asset_ids=[asset.id])
-    base_score = session.scalar(select(models.Score).where(models.Score.asset_id == asset.id))
+    base_score = session.scalar(
+        select(models.Score).where(models.Score.asset_id == asset.id)
+    )
     for index in range(total):
         score_ts = decision + timedelta(minutes=index + 1)
         score_current_assets(session, decision_ts=score_ts, asset_ids=[asset.id])
@@ -568,11 +598,15 @@ def _seed_evaluated_ml_outcomes(
         )
         target_score_id = score.id if score else base_score.id
         outcome = session.scalar(
-            select(models.RiskOutcome).where(models.RiskOutcome.score_id == target_score_id)
+            select(models.RiskOutcome).where(
+                models.RiskOutcome.score_id == target_score_id
+            )
         )
         outcome.evaluated_at = now
         outcome.collapsed = index < collapsed
-        outcome.lifecycle_phase_at_eval = "collapse" if index < collapsed else "survivor"
+        outcome.lifecycle_phase_at_eval = (
+            "collapse" if index < collapsed else "survivor"
+        )
     session.commit()
 
 
@@ -601,7 +635,10 @@ def test_run_calibration_learns_ml_thresholds_from_ml_outcomes(session) -> None:
     assert ml_orange == 0.30  # no ORANGE ML samples -> default
     assert ml_red == result.ml_red_threshold
     assert band_from_collapse_probability(ml_red, session=session).value == "RED"
-    assert band_from_collapse_probability(ml_red - 0.001, session=session).value == "ORANGE"
+    assert (
+        band_from_collapse_probability(ml_red - 0.001, session=session).value
+        == "ORANGE"
+    )
 
 
 def test_ml_band_precisions_in_evaluate_outcomes(session) -> None:
