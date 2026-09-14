@@ -85,7 +85,9 @@ def build_replay_features(
             if address in id_by_address
         }
     if feature_source != "sql":
-        raise ValueError(f"feature_source must be 'sql' or 'lake', got {feature_source!r}")
+        raise ValueError(
+            f"feature_source must be 'sql' or 'lake', got {feature_source!r}"
+        )
     assets = session.scalars(
         select(models.Asset).where(models.Asset.id.in_(asset_ids))
     ).all()
@@ -93,7 +95,9 @@ def build_replay_features(
     return {
         asset.id: {
             value.name: value
-            for value in factory.build_for_asset(session, asset, ensure_utc(decision_ts))
+            for value in factory.build_for_asset(
+                session, asset, ensure_utc(decision_ts)
+            )
         }
         for asset in assets
     }
@@ -147,8 +151,12 @@ def point_in_time_market_rows(
     )
 
 
-def _latest_price_at(session: Session, *, asset_id: int, decision_ts: datetime) -> float | None:
-    rows = point_in_time_market_rows(session, asset_id=asset_id, decision_ts=decision_ts)
+def _latest_price_at(
+    session: Session, *, asset_id: int, decision_ts: datetime
+) -> float | None:
+    rows = point_in_time_market_rows(
+        session, asset_id=asset_id, decision_ts=decision_ts
+    )
     rows = [row for row in rows if row.price_usd and row.price_usd > 0]
     if not rows:
         return None
@@ -187,17 +195,24 @@ def _future_prices(
 ) -> list[float]:
     return [
         price
-        for _, price in _future_rows(session, asset_id=asset_id, start_ts=start_ts, end_ts=end_ts)
+        for _, price in _future_rows(
+            session, asset_id=asset_id, start_ts=start_ts, end_ts=end_ts
+        )
     ]
 
 
 def _lead_time_minutes(
-    rows: list[tuple[datetime, float]], decision_ts: datetime, entry: float, target_pct: float
+    rows: list[tuple[datetime, float]],
+    decision_ts: datetime,
+    entry: float,
+    target_pct: float,
 ) -> float | None:
     """Minutes from the flag until the price first crosses ``target_pct``."""
     threshold = entry * (1.0 + target_pct / 100.0)
     for ts, price in rows:
-        if (target_pct >= 0 and price >= threshold) or (target_pct < 0 and price <= threshold):
+        if (target_pct >= 0 and price >= threshold) or (
+            target_pct < 0 and price <= threshold
+        ):
             return max(0.0, (ts - decision_ts).total_seconds() / 60.0)
     return None
 
@@ -225,7 +240,9 @@ def _latest_forecast_metrics(session: Session) -> dict[str, float]:
     if run is None:
         return {}
     rows = session.execute(
-        select(models.BacktestResult.metric_name, models.BacktestResult.metric_value).where(
+        select(
+            models.BacktestResult.metric_name, models.BacktestResult.metric_value
+        ).where(
             models.BacktestResult.run_id == run.id,
             models.BacktestResult.metric_name.in_(_FORECAST_METRIC_NAMES),
         )
@@ -271,14 +288,18 @@ class BacktestRunner:
         # run can report how many DuckDB queries the (asset, hour) cache saved
         # (replay runs over a warm cache hit instead of re-querying DuckDB).
         lake_cache_before = (
-            LakeFeatureFactory.cache_stats() if config.feature_source == "lake" else None
+            LakeFeatureFactory.cache_stats()
+            if config.feature_source == "lake"
+            else None
         )
 
         for decision_ts in hours_between(start, end):
             asset_ids = [
                 asset.id
                 for asset in session.scalars(
-                    select(models.Asset).where(models.Asset.first_seen_at <= decision_ts)
+                    select(models.Asset).where(
+                        models.Asset.first_seen_at <= decision_ts
+                    )
                 ).all()
             ]
             if not asset_ids:
@@ -363,7 +384,9 @@ class BacktestRunner:
                 median(ignition_lead_minutes) if ignition_lead_minutes else 0.0
             ),
             "median_collapse_warning_lead_minutes": (
-                median(collapse_warning_lead_minutes) if collapse_warning_lead_minutes else 0.0
+                median(collapse_warning_lead_minutes)
+                if collapse_warning_lead_minutes
+                else 0.0
             ),
             "false_alarm_rate": (flagged - collapses) / flagged if flagged else 0.0,
             "alerts_evaluated": float(selected),
@@ -374,7 +397,9 @@ class BacktestRunner:
             lake_cache = {key: after[key] - lake_cache_before[key] for key in after}
             metrics["lake_cache.hits"] = float(lake_cache.get("hits", 0))
             metrics["lake_cache.misses"] = float(lake_cache.get("misses", 0))
-            metrics["lake_cache.saved_queries"] = float(lake_cache.get("saved_queries", 0))
+            metrics["lake_cache.saved_queries"] = float(
+                lake_cache.get("saved_queries", 0)
+            )
         for name, value in metrics.items():
             session.add(
                 models.BacktestResult(
@@ -430,7 +455,9 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Replay-safe backtest runner")
-    parser.add_argument("--start", required=True, help="ISO datetime, e.g. 2026-05-01T10:00:00Z")
+    parser.add_argument(
+        "--start", required=True, help="ISO datetime, e.g. 2026-05-01T10:00:00Z"
+    )
     parser.add_argument("--end", help="ISO datetime (default: now)")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--forward-hours", type=int, default=24)
@@ -459,7 +486,9 @@ def main() -> None:
         metrics = {
             row.metric_name: row.metric_value
             for row in session.scalars(
-                select(models.BacktestResult).where(models.BacktestResult.run_id == run.id)
+                select(models.BacktestResult).where(
+                    models.BacktestResult.run_id == run.id
+                )
             )
         }
     print(f"backtest run {run.id}: {run.status} (git {run.git_sha or 'n/a'})")
