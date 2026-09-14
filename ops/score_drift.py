@@ -772,6 +772,10 @@ def latest_score_drift(session: Session) -> ScoreDriftLatest | None:
             "distinct_ratio": None,
             "mean_abs_delta": None,
         }
+    ks_d: float | None
+    ks_p: float | None
+    distinct_ratio: float | None
+    mean_abs_delta: float | None
     try:
         ks_d = float(match.group(3))
         ks_p = float(match.group(4))
