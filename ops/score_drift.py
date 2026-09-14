@@ -866,8 +866,10 @@ def main() -> None:
         session.commit()
     print(json.dumps(result, default=str))
 
-    rescued = bool((result.get("auto_apply") or {}).get("applied"))
-    outcome = result.get("auto_apply") or {}
+    auto_apply_raw = result.get("auto_apply")
+    auto_apply: dict[str, object] = auto_apply_raw if isinstance(auto_apply_raw, dict) else {}
+    rescued = bool(auto_apply.get("applied"))
+    outcome = auto_apply
     if args.auto_apply and outcome.get("partial"):
         print(
             "auto-apply: PARTIAL rescue — the write pass reported errors; the "
