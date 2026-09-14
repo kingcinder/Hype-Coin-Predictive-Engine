@@ -168,9 +168,10 @@ def _run_watchdog_phase(
             if isinstance(error, BaseException):
                 raise error
             raise RuntimeError(str(error))
-        outcome = holder.get("outcome")
-        if outcome is None:  # defensive: thread died without recording a result
+        outcome_raw = holder.get("outcome")
+        if outcome_raw is None:  # defensive: thread died without recording a result
             return None
+        outcome = cast("StageOutcome", outcome_raw)
 
     def _record(message: str) -> None:
         if session is not None:
