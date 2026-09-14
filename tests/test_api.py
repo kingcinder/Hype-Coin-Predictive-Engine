@@ -42,9 +42,13 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         pair_address="Pair222222222222222222222222222222222222",
     )
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
-    score_current_assets(session, decision_ts=decision_ts, asset_ids=[asset.id, similar_asset.id])
+    score_current_assets(
+        session, decision_ts=decision_ts, asset_ids=[asset.id, similar_asset.id]
+    )
     IgnitionRadar().scan(session, decision_ts=decision_ts)
-    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    source = session.scalar(
+        select(models.Source).where(models.Source.name == "dexscreener")
+    )
     session.add(
         models.Holder(
             asset_id=asset.id,
@@ -171,7 +175,8 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         )
         velocity = client.get("/features/velocity").json()
         assert any(
-            item["asset_id"] == asset.id and item["github_star_velocity_missing"] is True
+            item["asset_id"] == asset.id
+            and item["github_star_velocity_missing"] is True
             for item in velocity
         )
     finally:
@@ -252,7 +257,9 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
     app.dependency_overrides[get_session] = override_session
     try:
         client = TestClient(app, headers=_AUTH_HEADERS)
-        base = next(row for row in client.get("/rpc/pool").json() if row["chain"] == "base")
+        base = next(
+            row for row in client.get("/rpc/pool").json() if row["chain"] == "base"
+        )
         assert base["state"] == "red"
         endpoint = base["endpoints"][0]
         assert endpoint["url"] == "https://persisted-base.example.com"
@@ -281,7 +288,10 @@ def test_velocity_features_endpoint_reports_live_values(session) -> None:
         session, name="youtube_rss", source_type="social", tier="public_metadata"
     )
     github = get_or_create_source(
-        session, name="github_public", source_type="public_metadata", tier="public_metadata"
+        session,
+        name="github_public",
+        source_type="public_metadata",
+        tier="public_metadata",
     )
     repo_url = "https://github.com/example/hype"
     upsert_social_mention(
@@ -369,7 +379,9 @@ def test_alert_quality_trend_groups_weekly_rates_by_type(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        response = TestClient(app, headers=_AUTH_HEADERS).get("/alerts/quality/trend", params={"weeks": 104})
+        response = TestClient(app, headers=_AUTH_HEADERS).get(
+            "/alerts/quality/trend", params={"weeks": 104}
+        )
         assert response.status_code == 200
         rows = response.json()["weeks"]
         ignition = next(row for row in rows if row["alert_type"] == "ignition_detected")
@@ -489,7 +501,10 @@ def test_alert_ack_path_and_quality_ledger(session) -> None:
         assert response.status_code == 200
         assert response.json()["ack_quality"] == "noise"
         # Invalid quality and missing alerts are rejected.
-        assert client.post(f"/alerts/{alert.id}/ack", json={"quality": "meh"}).status_code == 422
+        assert (
+            client.post(f"/alerts/{alert.id}/ack", json={"quality": "meh"}).status_code
+            == 422
+        )
         assert client.post("/alerts/999999/ack", json={}).status_code == 404
         # The ledger reflects operator feedback.
         ledger = client.get("/alerts/quality").json()
@@ -592,7 +607,9 @@ def test_watchdog_alarms_endpoint(session) -> None:
         # Ordinary phase rows are still present in the general feed-health list
         # (latest per component), and the watchdog alarm is a separate signal.
         latest_by_component = {c.component: c for c in latest_health(session)}
-        assert latest_by_component["lake"].state == "ok"  # the ok row is the latest lake row
+        assert (
+            latest_by_component["lake"].state == "ok"
+        )  # the ok row is the latest lake row
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
@@ -827,7 +844,9 @@ def test_parity_mismatches_endpoint_returns_history(session) -> None:
         assert rows[1]["feature_name"] == "holder_count"
         assert rows[1]["lake_missing"] is True
         assert rows[1]["symbol"] == asset.symbol
-        filtered = client.get("/parity/mismatches", params={"feature": "holder_count"}).json()
+        filtered = client.get(
+            "/parity/mismatches", params={"feature": "holder_count"}
+        ).json()
         assert len(filtered) == 1
         assert filtered[0]["feature_name"] == "holder_count"
     finally:
