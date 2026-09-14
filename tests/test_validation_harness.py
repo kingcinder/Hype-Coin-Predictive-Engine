@@ -64,7 +64,9 @@ def test_self_test_2_random_noise_matches_naive_baseline() -> None:
     d = make_noise_dataset()
     probs, labels = d.probs, d.labels
     # Uniform(0,1) noise has expected Brier exactly 1/3 (design-doc erratum).
-    assert brier_score(probs, labels) == pytest.approx(NOISE_BRIER_EXPECTED, abs=NOISE_BRIER_TOL)
+    assert brier_score(probs, labels) == pytest.approx(
+        NOISE_BRIER_EXPECTED, abs=NOISE_BRIER_TOL
+    )
     assert abs(concordance_index(probs, labels) - 0.5) <= NOISE_CONCORDANCE_TOL
     cells = evaluate_probabilities(
         probs, labels, output="collapse_probability_24h", regime="synthetic"
@@ -165,19 +167,24 @@ def test_ensemble_weight_tracking_detects_drift() -> None:
     # Weights must VARY (a constant weight series has zero variance, so the
     # correlation is undefined — exactly what the harness must not report).
     history = [
-        {"ts": f"2026-01-0{i}T00:00:00+00:00", "weights": {"rule": 0.4 + 0.1 * i, "ml": 0.3}}
+        {
+            "ts": f"2026-01-0{i}T00:00:00+00:00",
+            "weights": {"rule": 0.4 + 0.1 * i, "ml": 0.3},
+        }
         for i in range(1, 6)
     ]
     acc_series = {
         "rule": [
-            {"ts": f"2026-01-0{i}T00:00:00+00:00", "accuracy": 0.4 + 0.1 * i} for i in range(1, 6)
+            {"ts": f"2026-01-0{i}T00:00:00+00:00", "accuracy": 0.4 + 0.1 * i}
+            for i in range(1, 6)
         ]
     }
     corr = ensemble_weight_tracking(history, acc_series, scorer_names=("rule",))
     assert corr["rule"] > 0.5
     # Constant weight series -> undefined (nan), never a fabricated number.
     flat_history = [
-        {"ts": f"2026-01-0{i}T00:00:00+00:00", "weights": {"rule": 0.5}} for i in range(1, 6)
+        {"ts": f"2026-01-0{i}T00:00:00+00:00", "weights": {"rule": 0.5}}
+        for i in range(1, 6)
     ]
     result = ensemble_weight_tracking(flat_history, acc_series, scorer_names=("rule",))
     assert np.isnan(result["rule"])
