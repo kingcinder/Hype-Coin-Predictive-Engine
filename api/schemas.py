@@ -500,6 +500,7 @@ class EngineStatusResponse(BaseModel):
     total_iterations: int
     scan_interval_seconds: int
     scan: EngineScanProgressRow
+    watchdog: dict[str, Any] | None = None
 
 
 class SeedResponse(BaseModel):

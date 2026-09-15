@@ -318,39 +318,10 @@ def _live_activity_feed() -> None:
 
     st.markdown(_activity_ws_bridge_js(API_BASE_URL), unsafe_allow_html=True)
 
-    # Fetch activity data ONCE (shared between filter and display)
+    # Fetch activity data (shared between filter and display). The fragment
+    # reruns every 30s, so the REST fetch is the live path — the WS bridge
+    # above only caches the feed tail in the browser for page refreshes.
     activities = api_get("/nightcrawlers/activity", params={"limit": 200}) or []
-
-    # Merge any WebSocket-cached items from localStorage
-    try:
-        ws_items_raw = st.session_state.get("_ws_activity_items")
-        if ws_items_raw:
-            import json as _json
-
-            ws_items = _json.loads(ws_items_raw) if isinstance(ws_items_raw, str) else ws_items_raw
-            if ws_items:
-                # Merge WS items into activities, deduplicating by source+observed
-                seen = {(a.get("source", ""), a.get("observed_at", "")) for a in activities}
-                for item in ws_items:
-                    if item.get("type") == "activity":
-                        key = (item.get("source", ""), item.get("observed_at", ""))
-                        if key not in seen:
-                            seen.add(key)
-                            activities.append(
-                                {
-                                    "source": item.get("source", "unknown"),
-                                    "platform": item.get("platform", ""),
-                                    "item_count": item.get("item_count", 0),
-                                    "observed_at": item.get("observed_at", ""),
-                                    "signal_score": item.get("signal_score", 0),
-                                    "token_mentions": item.get("token_mentions", []),
-                                    "total_engagement": item.get("total_engagement", 0),
-                                },
-                            )
-                # Sort by observed_at descending after merging
-                activities.sort(key=lambda a: a.get("observed_at", ""), reverse=True)
-    except Exception:  # noqa: BLE001
-        pass  # WS merge is best-effort
 
     # Build filter options from fetched data
     source_options = ["All Sources"] + sorted(
@@ -483,8 +454,13 @@ def _live_activity_feed() -> None:
 
 def _activity_ws_bridge_js(api_base: str) -> str:
     """Return JavaScript that maintains a persistent WebSocket connection to the
-    activity stream and writes new items into localStorage so Streamlit can read
-    them without making a new HTTP request on every rerun."""
+    activity stream on the *API* host (not the Streamlit host) and caches new
+    items in the browser's localStorage so a page refresh does not lose the
+    tail of the feed. Note: Python/Streamlit cannot read browser localStorage
+    directly; the server-side feed below is refreshed via the REST endpoint on
+    the 30s fragment timer. True instant WS->Python delivery would need a
+    Streamlit component, which this bridge does not implement."""
+    ws_base = api_base.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
     return (
         "<script>\n"
         "(function() {\n"
@@ -492,8 +468,7 @@ def _activity_ws_bridge_js(api_base: str) -> str:
         "  let retryMs = 1000;\n"
         "  const MAX_RETRY = 30000;\n\n"
         "  function connect() {\n"
-        "    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';\n"
-        "    const wsUrl = protocol + '//' + window.location.host + '/ws/nightcrawlers/activity';\n"
+        "    const wsUrl = '" + ws_base + "/ws/nightcrawlers/activity';\n"
         "    const ws = new WebSocket(wsUrl);\n\n"
         "    ws.onmessage = function(e) {\n"
         "      try {\n"

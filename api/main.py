@@ -1512,6 +1512,7 @@ def engine_status() -> EngineStatusResponse:
         uptime_sec=snap["uptime_sec"],
         total_iterations=snap["total_iterations"],
         scan_interval_seconds=snap["scan_interval_seconds"],
+        watchdog=snap.get("watchdog"),
         scan=EngineScanProgressRow(
             phase=scan_snap["phase"],
             phase_message=scan_snap["phase_message"],

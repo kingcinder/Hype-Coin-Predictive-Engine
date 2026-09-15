@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
@@ -1873,9 +1874,15 @@ def webhook_manager() -> None:
         if st.form_submit_button("Register Webhook"):
             if webhook_url and webhook_name:
                 events_str = ",".join(webhook_events)
-                result = api_get(
-                    f"/webhooks/register/custom?webhook_url={webhook_url}"
-                    f"&webhook_name={webhook_name}&webhook_events={events_str}"
+                result = api_post(
+                    "/webhooks/register?"
+                    + urlencode(
+                        {
+                            "webhook_url": webhook_url,
+                            "webhook_name": webhook_name,
+                            "webhook_events": events_str,
+                        }
+                    )
                 )
                 if result and result.get("status") == "registered":
                     st.success(f"✅ Webhook registered: {result.get('name')}")
