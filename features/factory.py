@@ -18,6 +18,11 @@ from features.definitions import FEATURE_NAMES
 from pump_physics.engine import phase_rank
 from storage import models
 from storage.repository import upsert_feature
+from validation.leakage_guard import (
+    check_rows_point_in_time,
+    frozen_decision_ts,
+    require_decision_ts,
+)
 
 
 @dataclass(frozen=True)
@@ -242,6 +247,7 @@ def _volatility(market_rows: Sequence[Any]) -> float | None:
 
 
 class FeatureFactory:
+    @require_decision_ts
     def build_for_asset(
         self,
         session: Session,
@@ -281,6 +287,11 @@ class FeatureFactory:
                     .order_by(models.LiquiditySnapshot.ts)
                 )
             )
+        # Point-in-time enforcement (plan #8): the SQL filters above are the
+        # first net; this assertion is the second - a query that ever loses
+        # its observed_at filter fails the build instead of leaking.
+        check_rows_point_in_time(market_rows, decision_ts, feature_name="market_block")
+        check_rows_point_in_time(liquidity_rows, decision_ts, feature_name="market_block")
         market_block = compute_market_block(
             asset=asset,
             pairs=pairs,
@@ -423,6 +434,7 @@ class FeatureFactory:
         assert {value.name for value in values} == set(FEATURE_NAMES)
         return values
 
+    @require_decision_ts
     def persist_for_assets(
         self, session: Session, *, decision_ts: datetime, asset_ids: list[int] | None = None
     ) -> dict[int, dict[str, FeatureValue]]:
@@ -435,21 +447,26 @@ class FeatureFactory:
         # share it across every per-asset build instead of reloading the whole
         # ``sources`` table inside each asset's velocity features.
         source_names = _load_source_names(session) if assets else {}
-        for asset in assets:
-            values = self.build_for_asset(session, asset, decision_ts, source_names=source_names)
-            output[asset.id] = {value.name: value for value in values}
-            for value in values:
-                upsert_feature(
-                    session,
-                    asset_id=asset.id,
-                    decision_ts=decision_ts,
-                    feature_name=value.name,
-                    feature_value=value.value,
-                    source_count=value.source_count,
-                    freshness_score=value.freshness_score,
-                    missing_flag=value.missing,
-                    source_refs=value.source_refs,
+        # Freeze the decision time for the whole scan: every per-asset build
+        # inside this scope must carry exactly this value (plan #8).
+        with frozen_decision_ts(decision_ts):
+            for asset in assets:
+                values = self.build_for_asset(
+                    session, asset, decision_ts, source_names=source_names
                 )
+                output[asset.id] = {value.name: value for value in values}
+                for value in values:
+                    upsert_feature(
+                        session,
+                        asset_id=asset.id,
+                        decision_ts=decision_ts,
+                        feature_name=value.name,
+                        feature_value=value.value,
+                        source_count=value.source_count,
+                        freshness_score=value.freshness_score,
+                        missing_flag=value.missing,
+                        source_refs=value.source_refs,
+                    )
         return output
 
     def _holder_features(

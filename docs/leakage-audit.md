@@ -248,3 +248,42 @@ changes are committed; this document was updated in the same push)._
   `pool_created_at` payloads) — data coverage on legacy archives, not a
   leakage-pattern divergence. The finding-2/4 fields are not in `LAKE_FEATURE_NAMES`
   and are not parity-compared.
+
+## Automated enforcement (fabrication plan item #8)
+
+The findings above were fixed query-by-query; this section records the
+**automated guardrails** that keep them fixed. New module
+`validation/leakage_guard.py` (exported from `validation/__init__.py`):
+
+- `frozen_decision_ts(decision_ts)` — context manager freezing one decision
+  time for a feature-build scope (contextvars, so parallel backtest workers
+  don't collide).
+- `require_decision_ts` — decorator making `decision_ts` a hard requirement
+  on feature entry points: `None`/missing raises `LeakageViolation`, and a
+  value disagreeing with the frozen scope raises too.
+- `check_rows_point_in_time(rows, decision_ts, ts_attr="observed_at")` —
+  asserts every input row was observed at/before the decision time; the
+  defensive second net behind the SQL filters.
+- `record_leakage_violation(session, ...)` — logs to `SystemHealth`
+  (component `leakage_guard`, state `violation`) via
+  `storage.repository.record_health`; fail-safe so logging never masks the
+  original violation.
+
+Wiring:
+
+- `features/factory.py` — `build_for_asset` / `persist_for_assets` carry
+  `@require_decision_ts`; the fetched market/liquidity rows are asserted
+  point-in-time before `compute_market_block`; `persist_for_assets` wraps the
+  whole scan in `frozen_decision_ts`.
+- `features/lake.py` — `build_for_asset(s)` carry `@require_decision_ts`;
+  every reconstructed market/liquidity row is asserted point-in-time after
+  reconstruction (second net behind the `observed_at <= $decision_ts` SQL
+  filters).
+
+Regression tests: `tests/test_leakage.py` (13 tests) — an intentionally leaky
+pipeline (future-observed rows) MUST raise `LeakageViolation`; a clean seeded
+pipeline MUST pass and persist the full feature set; violations MUST land in
+`SystemHealth`.
+
+Enforcement status: **ACTIVE** — any feature build that consumes data newer
+than its `decision_ts` now fails loudly instead of leaking silently.

@@ -58,6 +58,7 @@ from features.factory import FeatureValue, _feature, compute_market_block
 from ops.archive import ArchiveStore, make_store
 from storage import models
 from storage.repository import upsert_feature
+from validation.leakage_guard import check_rows_point_in_time, require_decision_ts
 
 log = get_logger(__name__)
 
@@ -385,6 +386,7 @@ class LakeFeatureFactory:
             return ("local", settings.archive_local_dir, settings.archive_prefix)
         return ("s3", settings.minio_endpoint, settings.minio_bucket, settings.archive_prefix)
 
+    @require_decision_ts
     def build_for_asset(
         self, *, asset_address: str, decision_ts: datetime
     ) -> dict[str, FeatureValue]:
@@ -392,8 +394,13 @@ class LakeFeatureFactory:
         market/liquidity block plus the on-chain holder and contract-flag
         features, with the same missing semantics the SQL path reports."""
         recon = self._reconstruct(asset_address, decision_ts)
+        check_rows_point_in_time(recon.market_rows, decision_ts, feature_name="lake_market_block")
+        check_rows_point_in_time(
+            recon.liquidity_rows, decision_ts, feature_name="lake_market_block"
+        )
         return self._values_for_reconstruction(recon, decision_ts)
 
+    @require_decision_ts
     def build_for_assets(
         self, addresses: list[str], decision_ts: datetime
     ) -> dict[str, dict[str, FeatureValue]]:
@@ -434,6 +441,16 @@ class LakeFeatureFactory:
                         if len(self._cache) >= self.cache_max_entries:
                             self._cache.popitem(last=False)
                         self._cache[(store_key, address, hour)] = recon
+        # Point-in-time enforcement (plan #8): defensive second net behind
+        # the ``observed_at <= $decision_ts`` SQL filters - a future-observed
+        # row fails the replay instead of leaking into the features.
+        for recon in recons.values():
+            check_rows_point_in_time(
+                recon.market_rows, decision_ts, feature_name="lake_market_block"
+            )
+            check_rows_point_in_time(
+                recon.liquidity_rows, decision_ts, feature_name="lake_market_block"
+            )
         return {
             address: self._values_for_reconstruction(recons[address], decision_ts)
             for address in addresses
