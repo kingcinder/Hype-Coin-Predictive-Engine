@@ -47,6 +47,12 @@ _BAND_CONFIDENCE: dict[RiskBand, float] = {
     RiskBand.BLACK: 5.0,
 }
 
+# E1 feature-completeness: maximum confidence penalty (points) when every
+# feature is missing/defaulted. Scales linearly with the missing-feature
+# ratio so a token scored on mostly-defaulted inputs cannot report the same
+# confidence as a fully evidenced one.
+_COVERAGE_PENALTY_MAX = 30.0
+
 
 @dataclass(frozen=True)
 class ScoreResult:
@@ -75,6 +81,10 @@ def compute_scores(
 ) -> ScoreResult:
     missing_features = missing_features or []
     risk_assessment = assess_risk(features, session=session)
+    # E1: the honest coverage set is the union of factory-flagged missing
+    # features and the inputs that silently hit their rule-engine default
+    # (e.g. collapse_probability_24h after mask_unreliable_forecast pops it).
+    all_missing = sorted(set(missing_features) | set(risk_assessment.missing_features))
 
     r5 = score_return(features.get("five_min_return", 0.0))
     r1 = score_return(features.get("one_hour_return", 0.0))
@@ -147,7 +157,14 @@ def compute_scores(
         + 0.05 * clamp(max(0.0, 100.0 - channel_diversity * 25.0))
     )
 
-    available_ratio = 1.0 - (len(missing_features) / len(FEATURE_NAMES))
+    missing_ratio = len(all_missing) / len(FEATURE_NAMES)
+    available_ratio = 1.0 - missing_ratio
+    # E1 feature-coverage-weighted confidence penalty: confidence decreases
+    # as the missing-feature count rises. A fully defaulted feature vector
+    # previously reported band-calibrated confidence with no data behind it;
+    # now the missing ratio linearly erodes confidence up to
+    # _COVERAGE_PENALTY_MAX points.
+    coverage_penalty = missing_ratio * _COVERAGE_PENALTY_MAX
     data_layer_uncertainty = clamp(data_layer_uncertainty)
     # Confidence derives from the risk band to calibrate against survival:
     # GREEN tokens have high survival probability, BLACK tokens have near-zero.
@@ -158,9 +175,14 @@ def compute_scores(
     confidence = clamp(
         0.85 * raw_confidence
         + 0.15 * (100.0 * available_ratio)
+        - coverage_penalty
         - flag_penalty * 0.10
         - data_layer_uncertainty
     )
+    # Uncertainty keeps the original factory-missing semantics: the union
+    # above already erodes confidence via the coverage penalty, and adding
+    # the union count here as well would double-count and clamp degenerate
+    # inputs to 100 (see test_rpc_data_layer_degradation_widens_uncertainty).
     uncertainty = clamp(100.0 - confidence + len(missing_features) * 2.0 + data_layer_uncertainty)
     # Weighted average of the catalyst components (weights sum to 1.25, so the
     # sum is divided by 1.25) — keeps catalyst on the 0-100 scale instead of
@@ -245,5 +267,5 @@ def compute_scores(
         risk_band=risk_assessment.band,
         drivers=drivers,
         risk_reasons=risk_assessment.reasons,
-        missing_features=missing_features,
+        missing_features=all_missing,
     )

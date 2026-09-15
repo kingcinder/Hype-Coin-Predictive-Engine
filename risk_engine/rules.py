@@ -21,13 +21,36 @@ class RiskAssessment:
     score: float
     reasons: list[str] = field(default_factory=list)
     hard_reject: bool = False
+    # Names of features that hit their silent default inside assess_risk()
+    # (missing key, None, or non-numeric value) - E1 feature-completeness.
+    missing_features: list[str] = field(default_factory=list)
 
 
-def _feature(features: dict[str, float], name: str, default: float = 0.0) -> float:
-    value = features.get(name, default)
+def _feature(
+    features: dict[str, float],
+    name: str,
+    default: float = 0.0,
+    *,
+    defaulted: set[str] | None = None,
+) -> float:
+    """Look up a feature, falling back to ``default`` when absent/unparseable.
+
+    When ``defaulted`` is provided, ``name`` is added to it every time the
+    fallback path is taken (missing key, ``None`` value, or non-numeric
+    value).  The returned value is identical with or without tracking, so
+    existing scoring behavior is preserved while callers can learn which
+    inputs were actually missing instead of silently reading 0.0.
+    """
+    if name not in features:
+        if defaulted is not None:
+            defaulted.add(name)
+        return default
+    value = features[name]
     try:
         return float(value)
     except (TypeError, ValueError):
+        if defaulted is not None:
+            defaulted.add(name)
         return default
 
 
@@ -148,6 +171,8 @@ def assess_risk(
     reasons: list[str] = []
     risk_points = 0.0
     hard_reject = False
+    # E1: track which rule-engine inputs silently fell back to defaults.
+    defaulted: set[str] = set()
 
     # Load adaptive thresholds and reason weights if session is available
     yellow_threshold = 25.0
@@ -163,19 +188,19 @@ def assess_risk(
         except Exception:  # noqa: BLE001 - calibration lookup must not break scoring.
             pass
 
-    liquidity = _feature(features, "liquidity_depth")
-    suspicious_flags = _feature(features, "suspicious_contract_flags")
-    concentration = _feature(features, "top_holder_concentration")
-    pair_age = _feature(features, "pair_age_minutes")
-    spread = _feature(features, "spread_estimate")
-    buy_sell_ratio = _feature(features, "buy_sell_ratio", 1.0)
-    holder_count = _feature(features, "holder_count")
-    volatility = _feature(features, "volatility")
-    withdrawal_signal = _feature(features, "liquidity_withdrawal_signal")
-    lp_removal_signal = _feature(features, "lp_removal_signal")
-    recidivism = _feature(features, "recidivism_score")
-    collapse_probability = _feature(features, "collapse_probability_24h")
-    lifecycle_phase = _feature(features, "lifecycle_phase", 1.0)
+    liquidity = _feature(features, "liquidity_depth", defaulted=defaulted)
+    suspicious_flags = _feature(features, "suspicious_contract_flags", defaulted=defaulted)
+    concentration = _feature(features, "top_holder_concentration", defaulted=defaulted)
+    pair_age = _feature(features, "pair_age_minutes", defaulted=defaulted)
+    spread = _feature(features, "spread_estimate", defaulted=defaulted)
+    buy_sell_ratio = _feature(features, "buy_sell_ratio", 1.0, defaulted=defaulted)
+    holder_count = _feature(features, "holder_count", defaulted=defaulted)
+    volatility = _feature(features, "volatility", defaulted=defaulted)
+    withdrawal_signal = _feature(features, "liquidity_withdrawal_signal", defaulted=defaulted)
+    lp_removal_signal = _feature(features, "lp_removal_signal", defaulted=defaulted)
+    recidivism = _feature(features, "recidivism_score", defaulted=defaulted)
+    collapse_probability = _feature(features, "collapse_probability_24h", defaulted=defaulted)
+    lifecycle_phase = _feature(features, "lifecycle_phase", 1.0, defaulted=defaulted)
 
     if lifecycle_phase >= 4:
         pts = _apply_reason_weights(25.0, "Lifecycle collapse phase", reason_weights)
@@ -321,11 +346,18 @@ def assess_risk(
         # low-risk score for a hard-rejected token — but the floor is well
         # below the old 90.0, preserving proportional variance.
         score = max(score, 40.0)
-        return RiskAssessment(RiskBand.BLACK, score, reasons, True)
+        return RiskAssessment(
+            RiskBand.BLACK, score, reasons, True, missing_features=sorted(defaulted)
+        )
     if score >= red_threshold:
-        return RiskAssessment(RiskBand.RED, score, reasons)
+        return RiskAssessment(RiskBand.RED, score, reasons, missing_features=sorted(defaulted))
     if score >= orange_threshold:
-        return RiskAssessment(RiskBand.ORANGE, score, reasons)
+        return RiskAssessment(RiskBand.ORANGE, score, reasons, missing_features=sorted(defaulted))
     if score >= yellow_threshold:
-        return RiskAssessment(RiskBand.YELLOW, score, reasons)
-    return RiskAssessment(RiskBand.GREEN, score, reasons or ["No major structural danger detected"])
+        return RiskAssessment(RiskBand.YELLOW, score, reasons, missing_features=sorted(defaulted))
+    return RiskAssessment(
+        RiskBand.GREEN,
+        score,
+        reasons or ["No major structural danger detected"],
+        missing_features=sorted(defaulted),
+    )

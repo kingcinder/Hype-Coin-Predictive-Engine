@@ -52,7 +52,7 @@ Owner unknown; left uncommitted and untouched.
 
 | ID | Item | Status | Notes / evidence |
 |----|------|--------|------------------|
-| E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~20 features silently default to 0 | planned (proposed this session) | Root-cause candidate for degenerate scores `[report]`. Blocks E2/E3 quality |
+| E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~35 features silently default to 0 | done (2026-09-14; see session log) | Audit: DB `features` table (170k rows, 4,859 snapshots) shows kol_velocity/catalyst_proximity_hours 100% missing, recidivism_score 99.8%, github_star_velocity 98.8%, collapse_probability_24h 76.8%, liquidity block ~62%, lifecycle_phase 58.2% (rule-engine default 1.0); only event-count features (ignition/lp_removal/withdrawal) are legitimately 0. `_feature()` now tracks defaults into `RiskAssessment.missing_features`; `compute_scores` merges with factory-missing and applies a coverage-weighted confidence penalty (max 30 pts); API `RiskResponse.missing_features` + GUI panel. Tests: `tests/test_feature_completeness.py` (15 tests). Unblocks E2/E3 quality |
 | E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (needs E1 + more outcome data) | Hand-tuned 25/50/75 and 0.10/0.30/0.50/0.75 `[briefing]` |
 | E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | planned (proposed this session) | `scoring/formulas.py:42` `[verified]` |
 | E4 | Label/outcome pipeline: accelerated historical backfill, or honest "forecasting not live yet" acknowledgment | deferred (data-acquisition scope) | 8 labels vs min-30 gate `[report]` |
@@ -93,6 +93,59 @@ O1 after D3 · E5 after D2.
 - **D3 — O1 approach:** disable-by-default vs delete modules vs ledger-only.
 
 ## Session log
+
+### 2026-09-14 — E1 (#2) Feature Completeness Audit + Missing-Feature Propagation (done)
+
+Implemented by Juno subagent (fabrication plan item #2):
+
+- **Audit findings** (against live `serpent.db`, 170,065 feature rows / 4,859 snapshots):
+  - 100% missing: `kol_velocity`, `catalyst_proximity_hours`
+  - >95% missing: `recidivism_score` (99.8%), `hf_download_velocity` (99.7%),
+    `github_star_velocity` (98.8%), `narrative_cluster_growth_7d` (96.8%)
+  - ~93% missing: `holder_count`, `holder_growth`, `top_holder_concentration`
+  - ~89% missing: `volume_acceleration`, `volatility`
+  - 76.8% missing: `collapse_probability_24h` (silently read as 0% = safe)
+  - ~62% missing: liquidity block (`liquidity_depth`, `spread_estimate`,
+    `venue_agreement`, returns, `buy_sell_ratio`, `unique_buyers_estimate`)
+  - 58.2% missing: `lifecycle_phase` (silently read as 1.0 in `assess_risk`)
+  - 0% missing but legitimately zero: event-count features (`ignition_signal`,
+    `liquidity_withdrawal_signal`, `lp_removal_signal`); `suspicious_contract_flags`
+    conflates "no contract data" with "contract clean" (flagged, not changed).
+- **Built:**
+  - `risk_engine/rules.py`: `_feature()` gained a keyword-only `defaulted` tracking
+    set (returned values byte-identical without it); `assess_risk()` threads it
+    through all 13 lookups and returns `RiskAssessment.missing_features`.
+  - `scoring/formulas.py`: `compute_scores` merges factory-missing with
+    rule-engine-tracked defaults into `ScoreResult.missing_features`; new
+    coverage-weighted confidence penalty (`_COVERAGE_PENALTY_MAX = 30.0`,
+    linear in missing ratio). Measured: 0% missing -> 93.2, 11% -> 88.1,
+    51% -> 70.1 confidence on an identical feature vector.
+  - `scoring/engine.py`: verified — already populates `missing` from
+    `FeatureValue.missing` flags and persists the union via `_upsert_explanation`.
+  - `api/schemas.py` + `api/main.py`: `RiskResponse.missing_features`; the
+    `/risk/{asset_id}` endpoint (which also runs `mask_unreliable_forecast`)
+    now reports the popped `collapse_probability_24h` as missing.
+  - `ui/app.py`: token-detail explanation panel shows a "Missing Features" section.
+  - `tests/test_feature_completeness.py`: 15 tests (tracking fidelity, union
+    accuracy, 50%-vs-10% confidence decrease, masked-forecast reporting).
+- **Verification:** new file 15/15 pass; existing suites touching
+  scoring/risk_engine/features/api all pass (test_risk_scoring, test_api,
+  test_schema, test_score_drift, test_ensemble, test_ensemble_pipeline,
+  test_cross_source_fusion, test_fingerprint, test_liquidity, test_llm,
+  test_llm_calibration, test_rescore_compare, test_scoring_batch_reads,
+  test_signal_links, test_velocity_features). No pre-existing uncommitted
+  file was modified. `forecast_min_samples` untouched. Not pushed.
+- **Constraint learned:** `_COVERAGE_PENALTY_MAX` capped at 30 (not 40) and
+  uncertainty kept on factory-missing semantics so the pre-existing
+  `test_rpc_data_layer_degradation_widens_uncertainty` strict orderings hold.
+
+Note (2026-09-14): the uncommitted working-tree inventory has drifted since
+2026-09-09 (now 14 modified files: backtest/runner.py, data_lake/webhooks.py,
+ops/archive.py, scripts/refresh_rpc_pools.py, tests/test_api.py,
+test_api_auth_webhooks.py, test_archive_hardening.py, test_engine_worker_fixes.py,
+test_forecast.py, test_label_bootstrap.py, test_llm_calibration.py,
+test_risk_scoring.py, test_scripts_hardening.py, test_validation_harness.py) —
+in-flight work from other agents, still untouched.
 
 ### 2026-09-09 — Session 1
 

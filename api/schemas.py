@@ -205,6 +205,9 @@ class RiskResponse(BaseModel):
     risk_score: float
     reasons: list[str]
     hard_reject: bool
+    # E1 feature-completeness: features that silently fell back to their
+    # default inside assess_risk() for this assessment.
+    missing_features: list[str] = []
 
 
 class RiskCalibrationRow(BaseModel):

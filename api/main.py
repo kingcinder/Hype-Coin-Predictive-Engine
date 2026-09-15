@@ -752,6 +752,7 @@ def risk(asset_id: int, session: DbSession) -> RiskResponse:
             risk_score=25,
             reasons=["No feature snapshot exists yet; risk is unknown, not safe."],
             hard_reject=False,
+            missing_features=[],
         )
     features = {
         row.feature_name: row.feature_value
@@ -770,6 +771,7 @@ def risk(asset_id: int, session: DbSession) -> RiskResponse:
         risk_score=assessment.score,
         reasons=assessment.reasons,
         hard_reject=assessment.hard_reject,
+        missing_features=assessment.missing_features,
     )
 
 

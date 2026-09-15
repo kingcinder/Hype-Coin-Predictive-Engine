@@ -485,6 +485,18 @@ def render_token_detail(asset_id: int | None) -> None:
     else:
         st.info("No risk explanation has been generated for this score.")
 
+    # E1 feature-completeness: surface which inputs silently defaulted so a
+    # GREEN band on thin data reads as thin data, not as safety.
+    missing = explanation.get("missing_features") or []
+    if missing:
+        st.markdown("**Missing Features**")
+        st.caption(
+            f"{len(missing)} input(s) fell back to defaults during scoring — "
+            "confidence is discounted accordingly."
+        )
+        for name in missing:
+            st.write(f"- {name}")
+
     drivers = explanation.get("drivers") or {}
     if drivers:
         st.markdown("**Why It Ranked**")
