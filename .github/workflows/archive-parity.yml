@@ -51,7 +51,9 @@ jobs:
       - name: Run migrations
         run: docker compose -f docker-compose.ci.yml run --rm migrate
       - name: Seed Docker profile fixture data
-        run: docker compose -f docker-compose.ci.yml run --rm worker python scripts/seed_fixtures.py
+        # scripts/ is excluded from the Docker image by .dockerignore (keeps
+        # the runtime image lean), so mount it read-only for this one-shot.
+        run: docker compose -f docker-compose.ci.yml run --rm -v ./scripts:/app/scripts:ro worker python scripts/seed_fixtures.py
       - name: Run live MinIO archive smoke
         run: |
           docker compose -f docker-compose.ci.yml run --rm worker python -m ops.archive --once
