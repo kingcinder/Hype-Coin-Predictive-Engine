@@ -109,17 +109,13 @@ def test_corrupt_partition_fails_closed_and_keeps_original_rows(session, tmp_pat
     # batch was NOT marked archived.
     assert (tmp_path / key).read_bytes() == b"this is not parquet"
     unarchived = session.scalars(
-        select(models.RawEvidenceItem).where(
-            models.RawEvidenceItem.archived_at.is_(None)
-        )
+        select(models.RawEvidenceItem).where(models.RawEvidenceItem.archived_at.is_(None))
     ).all()
     assert len(unarchived) == 1
     assert unarchived[0].payload["batch"] == "b"
 
 
-def test_atomic_write_leaves_no_temp_files_and_preserves_prior_object(
-    session, tmp_path
-):
+def test_atomic_write_leaves_no_temp_files_and_preserves_prior_object(session, tmp_path):
     """H1: put_object lands via atomic rename; no temp file survives."""
     store = LocalArchiveStore(tmp_path)
     key = "evidence/source=x/year=2026/month=06/data.parquet"
@@ -205,9 +201,7 @@ def test_manifest_records_sha256_of_stored_bytes(session, tmp_path):
     assert manifest.sha256 == expected
 
 
-def test_post_write_tamper_is_rejected_and_rows_stay_unarchived(
-    session, tmp_path, monkeypatch
-):
+def test_post_write_tamper_is_rejected_and_rows_stay_unarchived(session, tmp_path, monkeypatch):
     """M3: post-write size verification catches a tampered object."""
     settings = _settings(tmp_path)
     store = LocalArchiveStore(tmp_path)
@@ -225,15 +219,11 @@ def test_post_write_tamper_is_rejected_and_rows_stay_unarchived(
 
     monkeypatch.setattr(LocalArchiveStore, "put_object_if_absent", tampering_put)
     with pytest.raises(ArchiveWriteError):
-        RawEvidenceCompactor(store=store, settings=settings).compact(
-            session, DECISION_TS
-        )
+        RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
     session.rollback()
 
     unarchived = session.scalars(
-        select(models.RawEvidenceItem).where(
-            models.RawEvidenceItem.archived_at.is_(None)
-        )
+        select(models.RawEvidenceItem).where(models.RawEvidenceItem.archived_at.is_(None))
     ).all()
     assert len(unarchived) == 1
 
@@ -259,14 +249,10 @@ def test_post_write_same_size_corruption_is_rejected(session, tmp_path, monkeypa
 
     monkeypatch.setattr(LocalArchiveStore, "put_object_if_absent", corrupting_put)
     with pytest.raises(ArchiveWriteError, match="hash mismatch"):
-        RawEvidenceCompactor(store=store, settings=settings).compact(
-            session, DECISION_TS
-        )
+        RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
     session.rollback()
 
     unarchived = session.scalars(
-        select(models.RawEvidenceItem).where(
-            models.RawEvidenceItem.archived_at.is_(None)
-        )
+        select(models.RawEvidenceItem).where(models.RawEvidenceItem.archived_at.is_(None))
     ).all()
     assert len(unarchived) == 1

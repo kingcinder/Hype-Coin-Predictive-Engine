@@ -64,9 +64,7 @@ def test_rewrite_env_pool_csvs_leaves_all_down_chain_untouched(tmp_path) -> None
             healthy=("https://base.example",),
             failed=(),
         ),
-        "ethereum": PoolProbeResult(
-            chain="ethereum", configured=(), healthy=(), failed=()
-        ),
+        "ethereum": PoolProbeResult(chain="ethereum", configured=(), healthy=(), failed=()),
     }
     rewrite_env_pool_csvs(env_file, results)
     content = env_file.read_text(encoding="utf-8")
@@ -227,9 +225,7 @@ def test_seed_fixtures_is_idempotent(session) -> None:
     def counts():
         return {
             "holders": session.scalar(select(func.count()).select_from(models.Holder)),
-            "flags": session.scalar(
-                select(func.count()).select_from(models.ContractFlag)
-            ),
+            "flags": session.scalar(select(func.count()).select_from(models.ContractFlag)),
             "markers": session.scalar(
                 select(func.count())
                 .select_from(models.SystemHealth)
@@ -248,9 +244,7 @@ def test_seed_fixtures_is_idempotent(session) -> None:
 # ── M23 ──────────────────────────────────────────────────────────────────────
 
 
-def _run_clean_db_function(
-    tmp_path: Path, *args: str
-) -> subprocess.CompletedProcess[str]:
+def _run_clean_db_function(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     """Run the real ``cmd_clean_db`` function from scripts/dev.sh in a throwaway
     cwd. (dev.sh ``cd``s to the repo root on startup, so invoking the whole
     script with --force would target the repo's own serpent.db — extracting
@@ -350,9 +344,7 @@ def test_backup_and_compactor_share_merge_lock_name() -> None:
     assert backup._ARCHIVE_MERGE_LOCK_NAME == ARCHIVE_MERGE_LOCK_NAME  # noqa: SLF001
 
 
-def test_backup_lock_is_mutually_exclusive_with_compactor_lock(
-    tmp_path, monkeypatch
-) -> None:
+def test_backup_lock_is_mutually_exclusive_with_compactor_lock(tmp_path, monkeypatch) -> None:
     """While the compactor holds its merge lock, the backup sidecar's lock
     acquisition times out (and vice versa) — the tar quiesce actually works."""
     import ops.archive as archive_mod
@@ -399,9 +391,7 @@ class _FailingHttpClient:
         pass
 
 
-def test_backfill_defillama_counts_failed_days_as_resolve_errors(
-    session, monkeypatch
-) -> None:
+def test_backfill_defillama_counts_failed_days_as_resolve_errors(session, monkeypatch) -> None:
     """M18: the DeFiLlama path must populate resolve_errors like CoinGecko —
     a fully-failed backfill must be distinguishable from a successful one."""
     import scripts.backfill_history as bh

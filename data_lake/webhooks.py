@@ -77,9 +77,7 @@ def validate_webhook_url(url: str) -> str:
     except Exception as exc:  # noqa: BLE001 - urlparse can raise on exotic input
         raise WebhookURLError(f"unparseable webhook URL: {exc}") from exc
     if parsed.scheme.lower() not in ("http", "https"):
-        raise WebhookURLError(
-            f"webhook URL must use http or https (got scheme {parsed.scheme!r})"
-        )
+        raise WebhookURLError(f"webhook URL must use http or https (got scheme {parsed.scheme!r})")
     host = (parsed.hostname or "").strip().lower()
     if not host:
         raise WebhookURLError("webhook URL has no host")
@@ -98,9 +96,7 @@ def validate_webhook_url(url: str) -> str:
     # variant where one record is public and another is internal.
     default_port = 443 if parsed.scheme.lower() == "https" else 80
     try:
-        addrinfo = socket.getaddrinfo(
-            host, port or default_port, type=socket.SOCK_STREAM
-        )
+        addrinfo = socket.getaddrinfo(host, port or default_port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise WebhookURLError(f"webhook host does not resolve: {host} ({exc})") from exc
     for _family, _socktype, _proto, _canon, sockaddr in addrinfo:
@@ -166,9 +162,7 @@ def list_webhooks(session: Session) -> list[models.WebhookConfig]:
     """List all registered webhooks."""
     return list(
         session.scalars(
-            select(models.WebhookConfig).order_by(
-                models.WebhookConfig.created_at.desc()
-            )
+            select(models.WebhookConfig).order_by(models.WebhookConfig.created_at.desc())
         ).all()
     )
 
@@ -328,9 +322,7 @@ def dispatch_webhook(
         # before the Telegram/Discord reformatting above would leave
         # X-Signature-256 covering a body the receiver never sees.
         if webhook.secret:
-            headers["X-Signature-256"] = (
-                f"sha256={_sign_payload(payload_bytes, webhook.secret)}"
-            )
+            headers["X-Signature-256"] = f"sha256={_sign_payload(payload_bytes, webhook.secret)}"
 
         with httpx.Client(timeout=10.0) as client:
             response = client.post(webhook.url, content=payload_bytes, headers=headers)

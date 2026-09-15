@@ -5,9 +5,8 @@ from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from storage import models
 from storage.database import Base
@@ -97,12 +96,29 @@ class TrackingScope:
 
 
 @pytest.fixture()
-def session() -> Generator[Session, None, None]:
+def session(tmp_path) -> Generator[Session, None, None]:
+    # File-backed SQLite (one DB file per test) instead of a shared in-memory
+    # database: the default QueuePool then hands each thread its own DBAPI
+    # connection to the same database. The old StaticPool ``:memory:`` engine
+    # shared ONE sqlite connection across threads, so any two racing sessions
+    # (e.g. the concurrent-compaction hardening test) died with
+    # ``sqlite3.InterfaceError: bad parameter or other API misuse``. WAL plus
+    # a busy timeout mirror production (``storage.database.make_engine``) so
+    # racing readers/writers converge instead of wedging on
+    # "database is locked".
     engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
+        f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
     )
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(
         bind=engine, autoflush=False, autocommit=False, expire_on_commit=False

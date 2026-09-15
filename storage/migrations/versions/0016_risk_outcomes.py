@@ -30,9 +30,9 @@ def upgrade() -> None:
             sa.Column("evaluated_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("lifecycle_phase_at_eval", sa.String(32), nullable=True),
             sa.Column("price_change_pct", sa.Float(), nullable=True),
-            sa.Column("collapsed", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-            sa.Column("rugged", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-            sa.Column("survived", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("collapsed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+            sa.Column("rugged", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+            sa.Column("survived", sa.Boolean(), nullable=False, server_default=sa.text("false")),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         )
         op.create_index("ix_risk_outcomes_score_id", "risk_outcomes", ["score_id"])
@@ -51,7 +51,7 @@ def upgrade() -> None:
             sa.Column("red_threshold", sa.Float(), nullable=False),
             sa.Column("reason_weights", sa.JSON(), nullable=False, server_default=sa.text("'{}'")),
             sa.Column("band_precisions", sa.JSON(), nullable=False, server_default=sa.text("'{}'")),
-            sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         )
         op.create_index("ix_risk_calibrations_version", "risk_calibrations", ["version"])

@@ -115,13 +115,10 @@ def test_seed_labels_generates_labels_at_feature_timestamps(session) -> None:
     # Should have generated labels at hours 11 and 13
     assert counts["decision_points"] == 2
     # Check labels exist at the feature timestamps
-    labels = session.scalars(
-        select(models.Label).where(models.Label.asset_id == asset.id)
-    ).all()
+    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
     assert len(labels) >= 4  # 2 timestamps × 2 label types (ignition + collapse)
     label_timestamps = {
-        label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts
-        for label in labels
+        label.ts.replace(tzinfo=None) if label.ts.tzinfo else label.ts for label in labels
     }
     assert T0 + timedelta(hours=11) in label_timestamps
     assert T0 + timedelta(hours=13) in label_timestamps
@@ -177,9 +174,7 @@ def test_seed_labels_skips_forward_window_not_elapsed(session) -> None:
     session.commit()
 
     assert counts["decision_points"] == 0
-    labels = session.scalars(
-        select(models.Label).where(models.Label.asset_id == asset.id)
-    ).all()
+    labels = session.scalars(select(models.Label).where(models.Label.asset_id == asset.id)).all()
     assert len(labels) == 0
 
 
@@ -285,8 +280,8 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
     from datetime import UTC
 
     from data_lake.labels import _upsert_label
-    from tests.conftest import seed_reference
     from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
 
     chain, _source = seed_reference(session)
     asset = upsert_asset(

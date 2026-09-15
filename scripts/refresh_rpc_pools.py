@@ -114,15 +114,12 @@ def rewrite_env_pool_csvs(
             # The existing line is left untouched; the operator re-runs once
             # endpoints recover.
             print(
-                f"WARNING: {chain}: no healthy endpoints probed — "
-                f"leaving {field} unchanged",
+                f"WARNING: {chain}: no healthy endpoints probed — leaving {field} unchanged",
                 file=sys.stderr,
             )
             continue
         value = ",".join(healthy)
-        pattern = re.compile(
-            rf"^(\s*(?:export\s+)?{re.escape(field)}\s*=\s*).*$", re.MULTILINE
-        )
+        pattern = re.compile(rf"^(\s*(?:export\s+)?{re.escape(field)}\s*=\s*).*$", re.MULTILINE)
         replacement = rf"\g<1>{value}"
         if pattern.search(updated):
             updated = pattern.sub(replacement, updated, count=1)

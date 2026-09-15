@@ -46,9 +46,7 @@ def test_broker_broadcast_from_foreign_thread(broker_cls) -> None:
     assert ready.wait(timeout=10)
     loop: asyncio.AbstractEventLoop = box["loop"]
     # connect() must execute ON the running loop, as the FastAPI handlers do.
-    queue: asyncio.Queue = asyncio.run_coroutine_threadsafe(_connect(), loop).result(
-        timeout=10
-    )
+    queue: asyncio.Queue = asyncio.run_coroutine_threadsafe(_connect(), loop).result(timeout=10)
     try:
         # The loop recorded at connect() time must be the draining loop.
         assert broker._loops[id(queue)] is loop  # noqa: SLF001 - white-box check
@@ -92,9 +90,7 @@ def test_broker_broadcast_drops_queue_whose_loop_closed(broker_cls) -> None:
     thread.start()
     assert ready.wait(timeout=10)
     loop: asyncio.AbstractEventLoop = box["loop"]
-    queue: asyncio.Queue = asyncio.run_coroutine_threadsafe(_connect(), loop).result(
-        timeout=10
-    )
+    queue: asyncio.Queue = asyncio.run_coroutine_threadsafe(_connect(), loop).result(timeout=10)
     assert broker._loops[id(queue)] is loop  # noqa: SLF001 - white-box check
 
     # Kill the subscriber's loop, then broadcast from this thread: no
@@ -151,9 +147,7 @@ def test_worker_loop_isolates_stage_failures(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(sys, "argv", ["worker", "--loop"])
     monkeypatch.setattr("storage.database.run_migrations", lambda: None)
-    monkeypatch.setattr(
-        "storage.database.acquire_sqlite_writer_lock", lambda settings: 42
-    )
+    monkeypatch.setattr("storage.database.acquire_sqlite_writer_lock", lambda settings: 42)
     monkeypatch.setattr(worker_mod, "ensure_background_probe", lambda: None)
 
     calls = {"run_once": 0, "forecast": 0, "retention": 0, "parity": 0, "drift": 0}

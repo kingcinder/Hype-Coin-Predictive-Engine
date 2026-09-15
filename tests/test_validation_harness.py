@@ -64,9 +64,7 @@ def test_self_test_2_random_noise_matches_naive_baseline() -> None:
     d = make_noise_dataset()
     probs, labels = d.probs, d.labels
     # Uniform(0,1) noise has expected Brier exactly 1/3 (design-doc erratum).
-    assert brier_score(probs, labels) == pytest.approx(
-        NOISE_BRIER_EXPECTED, abs=NOISE_BRIER_TOL
-    )
+    assert brier_score(probs, labels) == pytest.approx(NOISE_BRIER_EXPECTED, abs=NOISE_BRIER_TOL)
     assert abs(concordance_index(probs, labels) - 0.5) <= NOISE_CONCORDANCE_TOL
     cells = evaluate_probabilities(
         probs, labels, output="collapse_probability_24h", regime="synthetic"
@@ -175,16 +173,14 @@ def test_ensemble_weight_tracking_detects_drift() -> None:
     ]
     acc_series = {
         "rule": [
-            {"ts": f"2026-01-0{i}T00:00:00+00:00", "accuracy": 0.4 + 0.1 * i}
-            for i in range(1, 6)
+            {"ts": f"2026-01-0{i}T00:00:00+00:00", "accuracy": 0.4 + 0.1 * i} for i in range(1, 6)
         ]
     }
     corr = ensemble_weight_tracking(history, acc_series, scorer_names=("rule",))
     assert corr["rule"] > 0.5
     # Constant weight series -> undefined (nan), never a fabricated number.
     flat_history = [
-        {"ts": f"2026-01-0{i}T00:00:00+00:00", "weights": {"rule": 0.5}}
-        for i in range(1, 6)
+        {"ts": f"2026-01-0{i}T00:00:00+00:00", "weights": {"rule": 0.5}} for i in range(1, 6)
     ]
     result = ensemble_weight_tracking(flat_history, acc_series, scorer_names=("rule",))
     assert np.isnan(result["rule"])
@@ -218,8 +214,6 @@ def test_run_harness_wires_feature_leakage_audit(session) -> None:
     concordant, observed after its decision time) must surface in the
     feature_leakage cell and in suspicious_results."""
     from datetime import UTC, datetime, timedelta
-
-    from sqlalchemy import select
 
     from storage import models
     from storage.repository import upsert_asset
@@ -299,9 +293,7 @@ def test_run_harness_wires_feature_leakage_audit(session) -> None:
     assert cell.n == n, "the audit must run over the eval outcome samples"
     assert cell.leakage_suspected is True
     leaked = [
-        entry
-        for entry in report.suspicious_results
-        if entry.get("output") == "feature:future_peek"
+        entry for entry in report.suspicious_results if entry.get("output") == "feature:future_peek"
     ]
     assert leaked, "the leaking feature must land in suspicious_results"
     assert "observed after" in leaked[0]["reason"]
@@ -311,7 +303,7 @@ def test_load_forecasts_uses_source_features_ts(session) -> None:
     """H25: the forecast's true decision point is details['source_features_ts']
     (when the features were actually computed), not the later training-run
     timestamp — outcome joins must use it, with a legacy fallback."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from storage import models
     from storage.repository import upsert_asset
