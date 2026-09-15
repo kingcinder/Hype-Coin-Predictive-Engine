@@ -494,6 +494,16 @@ def main() -> None:
 
     _bootstrap()
 
+    # --- Write serialization queue -------------------------------------------
+    # One dedicated writer thread owns all serialized DB write transactions, so
+    # the worker loop, the REST API thread, and background probes never contend
+    # for SQLite's single write lock (the "database is locked" wedge the
+    # watchdog used to paper over with restarts). Readers keep using their own
+    # sessions — WAL mode allows concurrent readers alongside the writer.
+    from storage.write_queue import start_write_queue, stop_write_queue
+
+    start_write_queue()
+
     settings = get_settings()
 
     stop = threading.Event()
@@ -649,6 +659,12 @@ def main() -> None:
                 ui.kill()
         api_server.should_exit = True
         api_thread.join(timeout=10)
+        # Drain the write queue: every submitted write commits before exit, so
+        # shutdown loses no point-in-time evidence.
+        try:
+            stop_write_queue()
+        except Exception:  # noqa: BLE001 - never fail shutdown on queue drain.
+            log.exception("engine_write_queue_stop_failed")
         log.info("engine_stopped")
 
 

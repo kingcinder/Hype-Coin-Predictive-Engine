@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 
@@ -606,6 +606,27 @@ def upsert_forecast(
     return row
 
 
+def queued_write[T](fn: Callable[[Session], T], *, timeout: float | None = None) -> T:
+    """Run ``fn(session)`` as one serialized write transaction on the writer thread.
+
+    This is the preferred write path for contended writers: the callable runs on
+    the process-wide write queue's dedicated thread (see :mod:`storage.write_queue`),
+    so concurrent threads never wedge on SQLite's single write lock. ``fn`` may
+    ``session.flush()`` but must not commit/rollback/close the session — the queue
+    owns the transaction boundary — and must return plain data (ids, dicts,
+    primitives), never live ORM instances, which stay bound to the writer
+    thread's session.
+
+    Raises :class:`storage.write_queue.WriteQueueNotRunning` when the queue was
+    never started (``engine/run.py`` starts it with the engine lifecycle).
+    """
+    from storage.write_queue import (
+        require_write_queue,  # noqa: PLC0415 - lazy, avoids import cycle.
+    )
+
+    return require_write_queue().submit_sync(fn, timeout=timeout)
+
+
 def record_health(
     session: Session,
     *,
@@ -616,7 +637,40 @@ def record_health(
     lag_sec: float | None = None,
     error_count: int = 0,
     ts: datetime | None = None,
-) -> models.SystemHealth:
+) -> models.SystemHealth | None:
+    """Persist a SystemHealth telemetry row.
+
+    When the process-wide write queue (:mod:`storage.write_queue`) is running
+    and the caller is not the writer thread itself, the row is routed through
+    the queue instead of the passed session, so health telemetry never contends
+    for SQLite's single write lock. Routing is fire-and-forget: the row commits
+    in its own transaction on the writer thread and this call returns None.
+    When no queue is running (tests, CLIs, direct-DB scripts) the row is written
+    directly on ``session`` exactly as before and returned.
+    """
+    from storage.write_queue import get_write_queue  # noqa: PLC0415 - lazy, avoids import cycle.
+
+    write_queue = get_write_queue()
+    if write_queue is not None and not write_queue.is_writer_thread():
+        # Health telemetry must never block a scan on a busy writer: submit
+        # fire-and-forget, falling back to the direct write if submission fails
+        # (e.g. the queue is mid-shutdown).
+        try:
+            write_queue.submit(
+                lambda wsession: record_health(
+                    wsession,
+                    component=component,
+                    state=state,
+                    message=message,
+                    freshness_sec=freshness_sec,
+                    lag_sec=lag_sec,
+                    error_count=error_count,
+                    ts=ts or utc_now(),
+                )
+            )
+            return None
+        except Exception:  # noqa: BLE001 - fall through to the direct write.
+            pass
     row = models.SystemHealth(
         component=component,
         ts=ts or utc_now(),
