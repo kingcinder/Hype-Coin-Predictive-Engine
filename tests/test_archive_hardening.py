@@ -133,7 +133,10 @@ def test_concurrent_compactions_do_not_lose_batches(session, tmp_path):
     store = LocalArchiveStore(tmp_path)
     _seed_evidence(session, days_ago=11.0, count=2, batch="a")
     _seed_evidence(session, days_ago=12.0, count=2, batch="b")
-    session.flush()
+    # Commit: the racing threads open their own connections, so they can only
+    # see committed rows (the fixture DB is file-backed, one connection per
+    # thread — sharing uncommitted state across connections is impossible).
+    session.commit()
 
     bind = session.get_bind()
     errors: list[BaseException] = []
