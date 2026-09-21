@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="520" height="140" viewBox="0 0 520 140">
   <rect width="100%" height="100%" fill="#1a1f2e"/>
-  <path d="M 24.0,102.9 L 83.0,102.9 L 142.0,102.9 L 201.0,93.6 L 260.0,97.2 L 319.0,85.0 L 378.0,85.0 L 437.0,37.2 L 496.0,37.1 L 496,116 L 24,116 Z" fill="rgba(0,212,255,0.12)" stroke="none"/>
-  <path d="M 24.0,102.9 L 83.0,102.9 L 142.0,102.9 L 201.0,93.6 L 260.0,97.2 L 319.0,85.0 L 378.0,85.0 L 437.0,37.2 L 496.0,37.1" fill="none" stroke="#00d4ff" stroke-width="2"/>
+  <path d="M 24.0,102.9 L 76.4,102.9 L 128.9,102.9 L 181.3,93.6 L 233.8,97.2 L 286.2,85.0 L 338.7,85.0 L 391.1,37.2 L 443.6,37.1 L 496.0,37.1 L 496,116 L 24,116 Z" fill="rgba(0,212,255,0.12)" stroke="none"/>
+  <path d="M 24.0,102.9 L 76.4,102.9 L 128.9,102.9 L 181.3,93.6 L 233.8,97.2 L 286.2,85.0 L 338.7,85.0 L 391.1,37.2 L 443.6,37.1 L 496.0,37.1" fill="none" stroke="#00d4ff" stroke-width="2"/>
   <circle cx="496.0" cy="37.1" r="3.5" fill="#00ff88"/>
   <text x="466.0" y="29.1" font-size="11" font-weight="700" fill="#00ff88">74.6%</text>
   <text x="24" y="24.0" font-size="9" fill="#8890a0">76%</text><text x="24" y="47.0" font-size="9" fill="#8890a0">73%</text><text x="24" y="70.0" font-size="9" fill="#8890a0">70%</text><text x="24" y="93.0" font-size="9" fill="#8890a0">68%</text><text x="24" y="116.0" font-size="9" fill="#8890a0">65%</text>
