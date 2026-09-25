@@ -39,6 +39,20 @@ jobs:
       NTFY_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
+      - name: Pull dependency images (retried)
+        run: |
+          # Shared runners hit third-party registry flakes (quay.io 401s on a
+          # healthy commit, 2026-09-25). Retry pulls with backoff so a
+          # registry-side error cannot fail the gate; the final attempt fails
+          # honestly.
+          for attempt in 1 2 3 4 5; do
+            if docker compose -f docker-compose.ci.yml pull postgres redis minio createbuckets; then
+              exit 0
+            fi
+            echo "image pull failed (attempt $attempt/5); backing off before retry"
+            [ "$attempt" -eq 5 ] && exit 1
+            sleep $((attempt * 60))
+          done
       - name: Start Docker profile dependencies
         run: docker compose -f docker-compose.ci.yml up -d postgres redis minio
       - name: Wait for MinIO
