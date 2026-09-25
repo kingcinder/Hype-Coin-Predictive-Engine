@@ -547,7 +547,6 @@ class ForecastEngine:
         test_x = self._matrix(test)
         train_ignition = np.array([sample.y_ignition for sample in train])
         train_collapse = np.array([sample.y_collapse for sample in train])
-        test_ignition = np.array([sample.y_ignition for sample in test])
         test_collapse = np.array([sample.y_collapse for sample in test])
 
         ignition_model = self._fit_classifier(train_x, train_ignition)

@@ -23,6 +23,7 @@ from validation.baselines import (
     random_ranking_concordance,
     random_topk_precision_ci,
 )
+from validation.leakage import LeakageReport, check_feature_leakage
 from validation.metrics import (
     BAND_RANKS,
     WilsonCI,
@@ -41,7 +42,6 @@ from validation.metrics import (
 from validation.metrics import (
     bootstrap_ci as _bootstrap_ci,
 )
-from validation.leakage import LeakageReport, check_feature_leakage
 from validation.report import MetricCell, ValidationReport
 
 # Design doc §2.1.3: embargo must be >= the 24h forward horizon.
