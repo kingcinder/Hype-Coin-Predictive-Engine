@@ -151,9 +151,7 @@ def test_forecast_engine_trains_and_predicts_collapse(session) -> None:
                 # Real ignition signal: dev-activity velocity separates the
                 # pump asset from FLAT (the old test-fit calibration overfit
                 # this distinction, so the fixture must carry it honestly).
-                _seed_velocity_features(
-                    session, asset, hour, kol=2.0, stars=20.0, downloads=500.0
-                )
+                _seed_velocity_features(session, asset, hour, kol=2.0, stars=20.0, downloads=500.0)
     session.commit()
 
     engine = ForecastEngine()
@@ -649,9 +647,7 @@ def test_calibration_fits_on_train_labels_only() -> None:
     fit_labels = np.array([0, 0, 1, 1])
     transform_probs = np.array([0.15, 0.85])
 
-    calibrator, calibrated = ForecastEngine._calibrate(
-        fit_probs, fit_labels, transform_probs
-    )
+    calibrator, calibrated = ForecastEngine._calibrate(fit_probs, fit_labels, transform_probs)
     # The returned values are the transform inputs mapped through the fit...
     assert calibrated.shape == transform_probs.shape
     assert np.allclose(calibrated, calibrator.predict(transform_probs))

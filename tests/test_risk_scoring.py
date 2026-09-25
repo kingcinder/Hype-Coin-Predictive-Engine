@@ -630,22 +630,16 @@ def test_poor_precision_tightens_threshold_upward() -> None:
     from risk_engine.calibrator import _ideal_thresholds_for_band
     from risk_engine.outcomes import BandOutcome
 
-    poor = BandOutcome(
-        band=RiskBand.RED, total_flagged=100, collapsed=10, precision=0.1
-    )
+    poor = BandOutcome(band=RiskBand.RED, total_flagged=100, collapsed=10, precision=0.1)
     ideal = _ideal_thresholds_for_band(poor, current_threshold=50.0)
     assert ideal > 50.0
 
     # ML probability scale behaves the same way.
-    ideal_ml = _ideal_thresholds_for_band(
-        poor, current_threshold=0.5, scale_max=1.0, step=0.10
-    )
+    ideal_ml = _ideal_thresholds_for_band(poor, current_threshold=0.5, scale_max=1.0, step=0.10)
     assert ideal_ml > 0.5
 
     # Good precision also tightens slightly (never loosens into more flags).
-    good = BandOutcome(
-        band=RiskBand.RED, total_flagged=100, collapsed=90, precision=0.9
-    )
+    good = BandOutcome(band=RiskBand.RED, total_flagged=100, collapsed=90, precision=0.9)
     assert _ideal_thresholds_for_band(good, current_threshold=50.0) >= 50.0
 
 

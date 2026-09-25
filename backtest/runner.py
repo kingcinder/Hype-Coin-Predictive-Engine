@@ -72,9 +72,7 @@ def build_replay_features(
     ``"sql"`` (live normalized tables) or ``"lake"`` (archived Parquet replay).
     """
     if feature_source == "lake":
-        assets = session.scalars(
-            select(models.Asset).where(models.Asset.id.in_(asset_ids))
-        ).all()
+        assets = session.scalars(select(models.Asset).where(models.Asset.id.in_(asset_ids))).all()
         id_by_address = {asset.address: asset.id for asset in assets if asset.address}
         by_address = LakeFeatureFactory().build_for_assets(
             list(id_by_address), ensure_utc(decision_ts)
@@ -86,9 +84,7 @@ def build_replay_features(
         }
     if feature_source != "sql":
         raise ValueError(f"feature_source must be 'sql' or 'lake', got {feature_source!r}")
-    assets = session.scalars(
-        select(models.Asset).where(models.Asset.id.in_(asset_ids))
-    ).all()
+    assets = session.scalars(select(models.Asset).where(models.Asset.id.in_(asset_ids))).all()
     factory = FeatureFactory()
     return {
         asset.id: {
@@ -298,9 +294,7 @@ class BacktestRunner:
             candidates = sorted(
                 (
                     candidate
-                    for candidate in _score_replay_candidates(
-                        feature_map, decision_ts=decision_ts
-                    )
+                    for candidate in _score_replay_candidates(feature_map, decision_ts=decision_ts)
                     if candidate.risk_band != "BLACK"
                 ),
                 key=lambda candidate: candidate.research_priority,

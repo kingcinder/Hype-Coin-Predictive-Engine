@@ -212,8 +212,6 @@ def test_run_harness_wires_feature_leakage_audit(session) -> None:
     feature_leakage cell and in suspicious_results."""
     from datetime import UTC, datetime, timedelta
 
-    from sqlalchemy import select
-
     from storage import models
     from storage.repository import upsert_asset
     from tests.conftest import seed_reference
@@ -292,9 +290,7 @@ def test_run_harness_wires_feature_leakage_audit(session) -> None:
     assert cell.n == n, "the audit must run over the eval outcome samples"
     assert cell.leakage_suspected is True
     leaked = [
-        entry
-        for entry in report.suspicious_results
-        if entry.get("output") == "feature:future_peek"
+        entry for entry in report.suspicious_results if entry.get("output") == "feature:future_peek"
     ]
     assert leaked, "the leaking feature must land in suspicious_results"
     assert "observed after" in leaked[0]["reason"]
@@ -304,7 +300,7 @@ def test_load_forecasts_uses_source_features_ts(session) -> None:
     """H25: the forecast's true decision point is details['source_features_ts']
     (when the features were actually computed), not the later training-run
     timestamp — outcome joins must use it, with a legacy fallback."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from storage import models
     from storage.repository import upsert_asset

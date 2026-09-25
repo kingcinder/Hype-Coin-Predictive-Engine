@@ -91,9 +91,7 @@ def test_api_fail_closed_when_token_unset(monkeypatch: pytest.MonkeyPatch) -> No
         get_settings.cache_clear()
 
 
-def test_api_bypass_flag_allows_unauthenticated(
-    session, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_api_bypass_flag_allows_unauthenticated(session, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ENGINE_API_TOKEN", raising=False)
     monkeypatch.setenv("ENGINE_API_AUTH_BYPASS", "1")
     get_settings.cache_clear()
@@ -303,9 +301,7 @@ def test_validate_webhook_url_private_hosts_opt_in(monkeypatch: pytest.MonkeyPat
 def test_register_webhook_function_validates_url(session) -> None:
     """Direct callers of register_webhook get the same SSRF policy."""
     with pytest.raises(WebhookURLError):
-        register_webhook(
-            session, url="http://169.254.169.254/", name="x", secret=None
-        )
+        register_webhook(session, url="http://169.254.169.254/", name="x", secret=None)
 
 
 def test_dispatch_webhook_blocks_ssrf_url_at_send_time(
@@ -337,13 +333,13 @@ class _CapturingHttpClient:
     sending it. Kept here (not shared) because dispatch_webhook constructs the
     client inline."""
 
-    instances: list["_CapturingHttpClient"] = []
+    instances: list[_CapturingHttpClient] = []
 
     def __init__(self, *args, **kwargs) -> None:
         self.posts: list[dict] = []
         _CapturingHttpClient.instances.append(self)
 
-    def __enter__(self) -> "_CapturingHttpClient":
+    def __enter__(self) -> _CapturingHttpClient:
         return self
 
     def __exit__(self, *args) -> None:
@@ -359,7 +355,7 @@ class _CapturingHttpClient:
 
 
 def _dispatch_with_capture(
-    session, monkeypatch: pytest.MonkeyPatch, webhook: "models.WebhookConfig"
+    session, monkeypatch: pytest.MonkeyPatch, webhook: models.WebhookConfig
 ) -> dict:
     """Run dispatch_webhook with a stubbed URL policy + HTTP client; return
     the captured POST."""
@@ -393,9 +389,7 @@ def test_dispatch_webhook_signature_covers_transmitted_body(
     session.flush()
 
     post = _dispatch_with_capture(session, monkeypatch, webhook)
-    expected = "sha256=" + hmac.new(
-        secret.encode(), post["content"], hashlib.sha256
-    ).hexdigest()
+    expected = "sha256=" + hmac.new(secret.encode(), post["content"], hashlib.sha256).hexdigest()
     assert post["headers"].get("X-Signature-256") == expected
 
 
@@ -426,9 +420,7 @@ def test_dispatch_webhook_signature_covers_reformatted_telegram_body(
     assert "text" in body
     # ... and the signature verifies against THOSE bytes, not the generic
     # payload (this failed before the sign-after-reformat fix).
-    expected = "sha256=" + hmac.new(
-        secret.encode(), post["content"], hashlib.sha256
-    ).hexdigest()
+    expected = "sha256=" + hmac.new(secret.encode(), post["content"], hashlib.sha256).hexdigest()
     assert post["headers"].get("X-Signature-256") == expected
 
 

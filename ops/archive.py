@@ -156,9 +156,7 @@ class LocalArchiveStore:
             try:
                 os.link(tmp, path)
             except FileExistsError:
-                raise PartitionConflictError(
-                    f"partition {key} created concurrently"
-                ) from None
+                raise PartitionConflictError(f"partition {key} created concurrently") from None
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
@@ -300,23 +298,17 @@ class S3ArchiveStore:
             )
         except Exception as exc:  # noqa: BLE001
             if _is_precondition_failed(exc):
-                raise PartitionConflictError(
-                    f"partition {key} created concurrently"
-                ) from exc
+                raise PartitionConflictError(f"partition {key} created concurrently") from exc
             raise
         return len(data)
 
     def put_object_if_match(self, key: str, data: bytes, etag: str) -> int:
         client = self._get_client()
         try:
-            client.put_object(
-                Bucket=self.settings.minio_bucket, Key=key, Body=data, IfMatch=etag
-            )
+            client.put_object(Bucket=self.settings.minio_bucket, Key=key, Body=data, IfMatch=etag)
         except Exception as exc:  # noqa: BLE001
             if _is_precondition_failed(exc):
-                raise PartitionConflictError(
-                    f"partition {key} changed during merge"
-                ) from exc
+                raise PartitionConflictError(f"partition {key} changed during merge") from exc
             raise
         return len(data)
 
@@ -342,9 +334,7 @@ class S3ArchiveStore:
         import io
 
         buf = io.BytesIO()
-        self._get_client().download_fileobj(
-            Bucket=self.settings.minio_bucket, Key=key, Fileobj=buf
-        )
+        self._get_client().download_fileobj(Bucket=self.settings.minio_bucket, Key=key, Fileobj=buf)
         return buf.getvalue()
 
 
@@ -626,8 +616,15 @@ class RawEvidenceCompactor:
                 "not match the payload that was written"
             )
         self._upsert_manifest(
-            session, object_key, source_id, year, month, group,
-            row_count=frame.height, byte_size=byte_size, digest=digest,
+            session,
+            object_key,
+            source_id,
+            year,
+            month,
+            group,
+            row_count=frame.height,
+            byte_size=byte_size,
+            digest=digest,
         )
         for row in group:
             row.archived_at = decision_ts

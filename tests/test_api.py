@@ -369,7 +369,9 @@ def test_alert_quality_trend_groups_weekly_rates_by_type(session) -> None:
 
     app.dependency_overrides[get_session] = override_session
     try:
-        response = TestClient(app, headers=_AUTH_HEADERS).get("/alerts/quality/trend", params={"weeks": 104})
+        response = TestClient(app, headers=_AUTH_HEADERS).get(
+            "/alerts/quality/trend", params={"weeks": 104}
+        )
         assert response.status_code == 200
         rows = response.json()["weeks"]
         ignition = next(row for row in rows if row["alert_type"] == "ignition_detected")

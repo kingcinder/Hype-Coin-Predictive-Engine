@@ -170,9 +170,7 @@ def test_failed_commit_retry_does_not_duplicate_rows(session, tmp_path):
     session.commit()
 
     # Simulate the M1 scenario: object PUT succeeded, DB commit was lost.
-    session.execute(
-        models.RawEvidenceItem.__table__.update().values(archived_at=None)
-    )
+    session.execute(models.RawEvidenceItem.__table__.update().values(archived_at=None))
     session.commit()
 
     compactor.compact(session, DECISION_TS)
@@ -181,9 +179,7 @@ def test_failed_commit_retry_does_not_duplicate_rows(session, tmp_path):
     frame = pl.read_parquet(tmp_path / _partition_key(store))
     assert frame.height == 3
     assert frame["evidence_id"].n_unique() == 3
-    manifest = session.scalar(
-        select(func.sum(models.ArchiveManifest.row_count))
-    )
+    manifest = session.scalar(select(func.sum(models.ArchiveManifest.row_count)))
     assert manifest == 3
 
 

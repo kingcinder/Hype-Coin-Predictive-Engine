@@ -114,8 +114,7 @@ def rewrite_env_pool_csvs(
             # The existing line is left untouched; the operator re-runs once
             # endpoints recover.
             print(
-                f"WARNING: {chain}: no healthy endpoints probed — "
-                f"leaving {field} unchanged",
+                f"WARNING: {chain}: no healthy endpoints probed — leaving {field} unchanged",
                 file=sys.stderr,
             )
             continue

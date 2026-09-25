@@ -77,9 +77,7 @@ def validate_webhook_url(url: str) -> str:
     except Exception as exc:  # noqa: BLE001 - urlparse can raise on exotic input
         raise WebhookURLError(f"unparseable webhook URL: {exc}") from exc
     if parsed.scheme.lower() not in ("http", "https"):
-        raise WebhookURLError(
-            f"webhook URL must use http or https (got scheme {parsed.scheme!r})"
-        )
+        raise WebhookURLError(f"webhook URL must use http or https (got scheme {parsed.scheme!r})")
     host = (parsed.hostname or "").strip().lower()
     if not host:
         raise WebhookURLError("webhook URL has no host")

@@ -280,8 +280,8 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
     from datetime import UTC
 
     from data_lake.labels import _upsert_label
-    from tests.conftest import seed_reference
     from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
 
     chain, _source = seed_reference(session)
     asset = upsert_asset(
@@ -296,15 +296,31 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
     decision = ts + timedelta(hours=25)
 
     # Real label first, then a dense label tries to overwrite it.
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts, label_type="collapse", value="1",
-        decision_ts=decision, source="forecast:gbm-hist-v1",
-    ) is True
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts,
+            label_type="collapse",
+            value="1",
+            decision_ts=decision,
+            source="forecast:gbm-hist-v1",
+        )
+        is True
+    )
     session.commit()
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts, label_type="collapse", value="0",
-        decision_ts=decision, source="dense-labels:gbm-hist-v1",
-    ) is False
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts,
+            label_type="collapse",
+            value="0",
+            decision_ts=decision,
+            source="dense-labels:gbm-hist-v1",
+        )
+        is False
+    )
     session.commit()
     row = session.scalar(
         select(models.Label).where(
@@ -318,15 +334,31 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
 
     # Dense label first, then the real observation upgrades it with source.
     ts2 = ts + timedelta(hours=1)
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts2, label_type="collapse", value="0",
-        decision_ts=decision, source="dense-labels:gbm-hist-v1",
-    ) is True
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts2,
+            label_type="collapse",
+            value="0",
+            decision_ts=decision,
+            source="dense-labels:gbm-hist-v1",
+        )
+        is True
+    )
     session.commit()
-    assert _upsert_label(
-        session, asset_id=asset.id, ts=ts2, label_type="collapse", value="1",
-        decision_ts=decision, source="forecast:gbm-hist-v1",
-    ) is False
+    assert (
+        _upsert_label(
+            session,
+            asset_id=asset.id,
+            ts=ts2,
+            label_type="collapse",
+            value="1",
+            decision_ts=decision,
+            source="forecast:gbm-hist-v1",
+        )
+        is False
+    )
     session.commit()
     row2 = session.scalar(
         select(models.Label).where(
