@@ -367,6 +367,28 @@ python -m pytest tests/ -q --cov=. --cov-report=xml
 python scripts/coverage_history.py
 ```
 
+## History guard (no accidental force-pushes to main)
+
+Shared history on `main` is protected at three layers:
+
+1. **Pre-push hook** — `check-history-divergence` in `.pre-commit-config.yaml`
+   fails any push that would rewrite `origin/main` (the remote tip must be an
+   ancestor of the local tip — a fast-forward). A deliberate rewrite is
+   acknowledged explicitly:
+   `ALLOW_HISTORY_REWRITE=1 git push --force-with-lease origin main`.
+   Install the hook with `pre-commit install --hook-type pre-push`. pre-commit
+   exposes only the first pushed ref, so a multi-ref push that includes `main`
+   after another branch slips past the local hook (noted in
+   `scripts/check_history_divergence.py`).
+2. **CI backstop** — the `History guard` job in `.github/workflows/ci.yml`
+   fails a push event whose `github.event.before` is not an ancestor of the
+   new tip. Hooks are skippable (`--no-verify`); CI is not. A deliberate
+   rewrite carries `[history-rewrite]` in the head commit message and passes
+   loudly as the audit trail.
+3. **Branch protection** (repo owner, Settings > Branches > main) — require
+   the status checks listed in the `ci.yml` header and disable "Allow force
+   pushes" / "Allow deletions"; Settings cannot be set from a file.
+
 ## Configuration
 
 Key environment variables (set in `.env`):

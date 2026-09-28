@@ -7,12 +7,18 @@ on:
     branches: [main]
 
 # Required status checks for branch protection (GitHub Settings > Branches):
-#   "Lint & Format", "Type Check (mypy)", "Tests", "Docker build"
+#   "Lint & Format", "Type Check (mypy)", "Tests", "Docker build",
+#   "History guard"
 # The "Rescore CLI smoke (throwaway DB)" job below is recommended as a status
 # check too: it drives the migration CLI's real __main__ against a throwaway
 # DB on every PR, so a regression in the write path fails fast in CI.
-# Every job below must pass before a PR can merge — enabling the protection
-# rule is the final, repo-owner step (Settings cannot be set from a file).
+# While in the protection rule, also disable "Allow force pushes" and "Allow
+# deletions" for main: the "History guard" job is only a CI backstop (the
+# pre-push hook `check-history-divergence` catches a diverged push locally,
+# but hooks are skippable with --no-verify); branch protection is what
+# actually rejects the rewrite at the ref level. Every job below must pass
+# before a PR can merge — enabling the protection rule is the final,
+# repo-owner step (Settings cannot be set from a file).
 
 jobs:
   lint:
@@ -177,3 +183,29 @@ jobs:
           tags: serpent-hype-coin-engine:ci
       - name: Verify image metadata
         run: docker image inspect serpent-hype-coin-engine:ci --format "Image {{.Id}} built OK"
+
+  history-guard:
+    name: History guard
+    runs-on: ubuntu-latest
+    # Backstop for the pre-push hook (scripts/check_history_divergence.py):
+    # fails the push-event run when the branch tip BEFORE the push is not an
+    # ancestor of the new tip — the force-push signature. Hooks are skippable
+    # (--no-verify, machines without `pre-commit install`); CI is not.
+    # A deliberate rewrite carries [history-rewrite] in the head commit
+    # message and passes loudly. Skipped on PRs: the merge push itself is what
+    # moves main, and that arrives as a push event, which this job grades.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The guard resolves the pre-push tip (github.event.before) against
+          # the new one; the default shallow clone (depth 1) would misreport
+          # every fast-forward push as a rewrite because the old tip wouldn't
+          # be in the fetched history.
+          fetch-depth: 0
+      - name: Verify push is a fast-forward
+        run: |
+          head_msg="$(git log -1 --format=%B)"
+          python3 scripts/check_history_divergence.py --check \
+            "${{ github.event.before }}" "${{ github.sha }}" \
+            --commit-message "$head_msg"

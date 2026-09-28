@@ -36,3 +36,19 @@ repos:
         language: python
         files: '(\.py$|pyproject\.toml$)'
         pass_filenames: false
+      # History-divergence guard (pre-push only): fails any push that would
+      # rewrite origin/main — the remote tip must be an ancestor of the local
+      # tip (fast-forward). A diverged remote is the signature of a pending
+      # force-push; the hook fails with the recovery commands instead.
+      # Deliberate rewrites opt in via ALLOW_HISTORY_REWRITE=1 (documented in
+      # scripts/check_history_divergence.py; CI carries the --check backstop).
+      # always_run: true — the hook grades the pushed refs from stdin, not the
+      # changed files, so it must fire on every push regardless of content.
+      - id: check-history-divergence
+        name: check history divergence (no force-push to main)
+        description: Fail pushes that would rewrite origin/main (non-fast-forward)
+        entry: python scripts/check_history_divergence.py
+        language: python
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
