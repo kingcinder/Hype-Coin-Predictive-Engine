@@ -28,10 +28,10 @@ worker:
 	python -m ingestion.worker --once
 
 api:
-	uvicorn api.main:app --host 0.0.0.0 --port 8000
+	python -m scripts.serve_api
 
 ui:
-	streamlit run ui/app.py --server.port=8501
+	python -m scripts.serve_ui
 
 # Single-command engine: one process runs bootstrap + worker loop + API + GUI.
 engine:
@@ -45,10 +45,10 @@ local-worker:
 	ENV=local-single python -m ingestion.worker --loop
 
 local-api:
-	ENV=local-single uvicorn api.main:app --host 0.0.0.0 --port 8000
+	ENV=local-single python -m scripts.serve_api
 
 local-ui:
-	ENV=local-single streamlit run ui/app.py --server.port=8501
+	ENV=local-single python -m scripts.serve_ui
 
 archive:
 	python -m ops.archive --once

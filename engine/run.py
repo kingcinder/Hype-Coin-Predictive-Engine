@@ -480,14 +480,18 @@ def run_engine_phases(
 
 def main() -> None:
     from common.config import get_settings
+    from common.network import validate_network_exposure
     from storage.database import acquire_sqlite_writer_lock
+
+    settings = get_settings()
+    validate_network_exposure(settings)
 
     # Single-writer guard: fail fast at boot if another engine process already
     # owns the SQLite file, rather than contending for SQLite's single write
     # lock and wedging the loop on "database is locked".
     _db_lock: int | None = None
     try:
-        _db_lock = acquire_sqlite_writer_lock(get_settings())
+        _db_lock = acquire_sqlite_writer_lock(settings)
     except RuntimeError as exc:  # noqa: BLE001
         log.critical("engine_sqlite_writer_conflict", error=str(exc))
         print(str(exc))
@@ -504,8 +508,6 @@ def main() -> None:
     from storage.write_queue import start_write_queue, stop_write_queue
 
     start_write_queue()
-
-    settings = get_settings()
 
     stop = threading.Event()
 
@@ -563,6 +565,8 @@ def main() -> None:
             str(ui_path),
             "--server.port",
             str(settings.ui_port),
+            "--server.address",
+            settings.ui_host,
             "--server.headless",
             "true",
             "--browser.gatherUsageStats",

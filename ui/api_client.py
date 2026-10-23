@@ -12,13 +12,23 @@ from typing import Any
 import httpx
 import streamlit as st
 
+from common.config import get_settings
+
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def api_auth_headers() -> dict[str, str]:
+    """Return the configured bearer credential without exposing it in logs."""
+    token = (get_settings().engine_api_token or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def api_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
     try:
         with httpx.Client(timeout=10.0) as client:
-            response = client.get(f"{API_BASE_URL}{path}", params=params)
+            response = client.get(
+                f"{API_BASE_URL}{path}", params=params, headers=api_auth_headers()
+            )
             response.raise_for_status()
             return response.json()
     except Exception as exc:  # noqa: BLE001 - visible operator state.
@@ -29,7 +39,7 @@ def api_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
 def api_post(path: str, *, json: dict[str, Any] | None = None) -> Any:
     try:
         with httpx.Client(timeout=30.0) as client:
-            response = client.post(f"{API_BASE_URL}{path}", json=json)
+            response = client.post(f"{API_BASE_URL}{path}", json=json, headers=api_auth_headers())
             response.raise_for_status()
             return response.json()
     except Exception as exc:  # noqa: BLE001 - visible operator state.
@@ -46,7 +56,9 @@ def api_get_silent(path: str, *, params: dict[str, Any] | None = None, timeout: 
     """
     try:
         with httpx.Client(timeout=timeout) as client:
-            response = client.get(f"{API_BASE_URL}{path}", params=params)
+            response = client.get(
+                f"{API_BASE_URL}{path}", params=params, headers=api_auth_headers()
+            )
             if response.status_code != 200:
                 return None
             return response.json()
@@ -63,7 +75,7 @@ def api_status(timeout: float = 2.0) -> tuple[str, str]:
     """
     try:
         with httpx.Client(timeout=timeout) as client:
-            response = client.get(f"{API_BASE_URL}/health")
+            response = client.get(f"{API_BASE_URL}/health", headers=api_auth_headers())
             if response.status_code == 200:
                 data = response.json()
                 state = data.get("status", "ok")

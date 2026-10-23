@@ -58,16 +58,18 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "raw-evidence"
 
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_base_url: str = "http://localhost:8000"
+    ui_host: str = "127.0.0.1"
+    engine_allow_lan: bool = False
     # ── API authentication (H4) ──────────────────────────────────────────
     # Bearer-token gate for every API endpoint (HTTP + WebSocket). Set
     # ENGINE_API_TOKEN to a long random secret and send it as
     # ``Authorization: Bearer <token>`` on every request. When unset, every
     # request is refused with 403 (fail closed) unless
-    # ENGINE_API_AUTH_BYPASS=1 is explicitly set — a local-dev escape hatch
-    # only, never for a network-reachable deployment.
+    # ENGINE_API_AUTH_BYPASS=1 is explicitly set. Non-loopback binds also
+    # require ENGINE_ALLOW_LAN=1, a token, and bypass disabled.
     engine_api_token: str | None = None
     engine_api_auth_bypass: bool = False
     # SQLite busy timeout (ms) before a write gives up on a transient lock and

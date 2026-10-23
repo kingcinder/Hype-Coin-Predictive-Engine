@@ -5,6 +5,8 @@ import hmac
 import json
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Annotated
@@ -68,6 +70,7 @@ from api.schemas import (
 from common.config import get_settings
 from common.enums import AlertState
 from common.logging import get_logger
+from common.network import validate_network_exposure
 from common.time import utc_now
 from engine.activity_stream import activity_stream_broker, compute_activity_signal_score
 from engine.price_stream import price_stream_broker
@@ -87,10 +90,18 @@ from storage.repository import (
 
 log = get_logger(__name__)
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    validate_network_exposure(get_settings())
+    yield
+
+
 app = FastAPI(
     title="Serpent Circle Hype-Coin Predictive Engine",
     version="0.1.0",
     description="Research-only crypto intelligence API with separated hype and risk scores.",
+    lifespan=_lifespan,
 )
 
 
@@ -157,12 +168,10 @@ class _RequireApiTokenMiddleware:
         await self.app(scope, receive, send)
 
 
-# Registered before the CORS block: Starlette's reversed build order puts
-# earlier-added user middleware outside later-added ones, so this gate runs
-# before CORS. CORS preflight (OPTIONS) carries no credentials by design and
-# is explicitly exempt inside the middleware, so the GUI's cross-origin
-# EventSource/WebSocket handshakes keep working once they send the
-# Authorization header.
+# Auth is registered before CORS. Starlette wraps middleware in reverse
+# registration order, so CORS is outermost and adds headers to auth failures.
+# CORS preflight is exempt from auth; the server-side GUI SSE client uses the
+# bearer header like the regular API client.
 app.add_middleware(_RequireApiTokenMiddleware)
 
 # The Streamlit GUI (typically :8501) calls this API cross-origin from the

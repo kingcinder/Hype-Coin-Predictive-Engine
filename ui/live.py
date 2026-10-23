@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from ui.api_client import API_BASE_URL
+from ui.api_client import API_BASE_URL, api_auth_headers
 
 _engine_state: dict[str, Any] = {}
 _lock = threading.Lock()
@@ -35,7 +35,11 @@ def _sse_worker() -> None:
     while True:
         try:
             with httpx.Client(timeout=None) as client:
-                with client.stream("GET", f"{API_BASE_URL}/engine/stream") as response:
+                with client.stream(
+                    "GET",
+                    f"{API_BASE_URL}/engine/stream",
+                    headers=api_auth_headers(),
+                ) as response:
                     if response.status_code != 200:
                         raise RuntimeError(f"SSE HTTP {response.status_code}")
                     retry = 1.0

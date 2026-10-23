@@ -61,7 +61,7 @@ checkout state and is no longer current. Work for this task is on
 | E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | planned (T6) | Forecast gate remains 30 in `common/config.py:377`; `scripts/backfill_history.py` has provider history fetchers but no label replay path `[verified 2026-10-23]` |
 | E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | done (2026-09-14; re-audited 2026-10-23) | `storage/write_queue.py`, `storage/repository.py`, `engine/run.py`; behavior coverage in `tests/test_write_queue.py` `[verified 2026-10-23]` |
 | E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (T7) | `llm/engine.py` still calls the Ollama API; provider abstraction not present `[verified 2026-10-23]` |
-| E7 | API authentication (bearer-token middleware; fail-closed when unset, explicit bypass) | done (2026-10-23) | `_check_bearer_token` and `_RequireApiTokenMiddleware` in `api/main.py:97-166`; `tests/test_api_auth_webhooks.py` `[verified 2026-10-23]` |
+| E7 | API authentication and network exposure (loopback defaults; explicit authenticated LAN binds) | done (2026-10-23) | Bearer middleware in `api/main.py:97-166`; `common/network.py` validates API/UI bind settings; GUI API/SSE clients send the configured token; tests cover CORS, startup rejection, defaults, and SSE `[verified 2026-10-23]` |
 | E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
 
 ### N — Whole new modules
@@ -176,3 +176,19 @@ in-flight work from other agents, still untouched.
   and `git diff --check` passed. Post-task checks: pytest 752 tests, 0 failures,
   8 skipped; Ruff passed; mypy passed (52 files); broken-import scan passed
   (229 files); declared-deps scan passed (28 roots, 229 files).
+
+### 2026-10-23 — T1: Network exposure hardening
+
+- Changed API/UI default hosts to loopback. Added startup validation: any
+  non-loopback bind requires `ENGINE_ALLOW_LAN=1`, a nonempty token, and bypass
+  disabled; the validator emits a warning before accepting the configuration.
+- Updated Makefile/systemd launchers and Compose. Compose uses explicit
+  container binds, requires a token, and publishes ports on host loopback.
+- Confirmed Starlette places CORS outside the auth gate: allowed-origin 401s
+  have CORS headers and disallowed origins do not. Replaced the incorrect order
+  comment. Added bearer headers to the GUI's API and SSE clients.
+- TDD evidence: new startup/SSE tests failed before implementation for missing
+  startup refusal and missing `Authorization`, then passed after implementation.
+- Post-task checks: pytest 763 tests, 0 failures, 10 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (233 files); declared-deps scan
+  passed (28 roots, 233 files); Compose config passed with a test token.

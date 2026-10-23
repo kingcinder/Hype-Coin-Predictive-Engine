@@ -7,14 +7,19 @@ services:
         required: false
     environment:
       ENV: local
+      API_HOST: 0.0.0.0
+      API_BASE_URL: http://127.0.0.1:8000
+      UI_HOST: 0.0.0.0
+      ENGINE_ALLOW_LAN: "1"
+      ENGINE_API_TOKEN: ${ENGINE_API_TOKEN:?Set ENGINE_API_TOKEN in .env before starting Compose}
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/serpent
       # Trained forecast models also persist in the data volume.
       MODEL_ARTIFACT_DIR: /app/data/models
       # Ollama runs as its own container on the compose network.
       LLM_OLLAMA_URL: http://ollama:11434
     ports:
-      - "8000:8000"
-      - "8501:8501"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8501:8501"
     volumes:
       - serpent-data:/app/data
     restart: unless-stopped
@@ -108,9 +113,9 @@ services:
   # api:
   #   build: .
   #   env_file: .env
-  #   command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+  #   command: python -m scripts.serve_api
   #   ports:
-  #     - "8000:8000"
+  #     - "127.0.0.1:8000:8000"
   #   volumes:
   #     - serpent-data:/app/data
   #   restart: unless-stopped
@@ -127,9 +132,9 @@ services:
   # gui:
   #   build: .
   #   env_file: .env
-  #   command: streamlit run ui/app.py --server.address=0.0.0.0 --server.port=8501
+  #   command: python -m scripts.serve_ui
   #   ports:
-  #     - "8501:8501"
+  #     - "127.0.0.1:8501:8501"
   #   volumes:
   #     - serpent-data:/app/data
   #   restart: unless-stopped

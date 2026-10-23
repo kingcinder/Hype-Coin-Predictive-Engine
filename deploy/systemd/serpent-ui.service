@@ -9,7 +9,7 @@ WorkingDirectory=/opt/serpent
 EnvironmentFile=-/opt/serpent/.env
 User=serpent
 Group=serpent
-ExecStart=/opt/serpent/.venv/bin/streamlit run ui/app.py --server.address=0.0.0.0 --server.port=8501
+ExecStart=/opt/serpent/.venv/bin/python -m scripts.serve_ui
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true

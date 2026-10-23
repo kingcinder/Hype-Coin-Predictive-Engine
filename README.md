@@ -18,7 +18,7 @@ This is not an auto-trader, wallet, custody system, or guaranteed-profit bot.
 python -m engine
 ```
 
-This one process applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. With no database override, it connects to PostgreSQL at `localhost:5432`; set `ENV=local-single` and `DATABASE_URL=sqlite:///serpent.db` for a zero-container SQLite setup. Ctrl+C stops the worker, API, and GUI cleanly.
+This one process applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. With no database override, it connects to PostgreSQL at `localhost:5432`; set `ENV=local-single` and `DATABASE_URL=sqlite:///serpent.db` for a zero-container SQLite setup. API and GUI listeners default to loopback. Non-loopback binds require `ENGINE_ALLOW_LAN=1`, a configured API token, and auth bypass disabled. Ctrl+C stops the worker, API, and GUI cleanly.
 
 Equivalent Makefile target: `make engine`.
 

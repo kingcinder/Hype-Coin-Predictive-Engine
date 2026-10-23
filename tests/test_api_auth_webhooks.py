@@ -58,6 +58,19 @@ def test_api_rejects_missing_token() -> None:
     assert "Authorization" in response.json()["detail"]
 
 
+def test_auth_error_has_cors_only_for_allowed_origins() -> None:
+    client = TestClient(app)
+
+    allowed_origin = "http://localhost:8501"
+    allowed = client.get("/health", headers={"Origin": allowed_origin})
+    assert allowed.status_code == 401
+    assert allowed.headers["access-control-allow-origin"] == allowed_origin
+
+    disallowed = client.get("/health", headers={"Origin": "https://evil.example"})
+    assert disallowed.status_code == 401
+    assert "access-control-allow-origin" not in disallowed.headers
+
+
 def test_api_rejects_wrong_token() -> None:
     client = TestClient(app, headers={"Authorization": "Bearer wrong-token"})
     assert client.get("/health").status_code == 401

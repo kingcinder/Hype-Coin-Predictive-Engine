@@ -60,6 +60,14 @@ installed service to PostgreSQL, set `ENV=local` and
 in its environment. Docker Compose starts its PostgreSQL service and points the
 engine to it by default.
 
+The API and GUI bind to `127.0.0.1` by default. For an intentional LAN bind,
+set `ENGINE_ALLOW_LAN=1`, set `API_HOST` and/or `UI_HOST` to the chosen
+non-loopback address, provide a nonempty `ENGINE_API_TOKEN`, and keep
+`ENGINE_API_AUTH_BYPASS=0`. Startup rejects a non-loopback bind that does not
+meet all four conditions and logs a warning whenever either listener is
+non-loopback. Compose requires `ENGINE_API_TOKEN` and publishes its ports on
+host loopback by default.
+
 ### Split-services install (alternative)
 
 `deploy/install.sh` is a second installer for a split-services profile: it
