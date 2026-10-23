@@ -1,0 +1,19 @@
+title = "Hype Coin Predictive Engine secret scanning policy"
+minVersion = "v8.30.1"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented demo credentials in the checked-in environment template"
+condition = "AND"
+paths = ['''(^|/)\.env\.example$''']
+regexTarget = "secret"
+regexes = ['''^(serpent|minioadmin)$''']
+
+[[allowlists]]
+description = "Fixed fake webhook signing key used only by signature tests"
+condition = "AND"
+paths = ['''(^|/)tests/test_api_auth_webhooks\.py$''']
+regexTarget = "secret"
+regexes = ['''^s3cr3t-signing-key$''']

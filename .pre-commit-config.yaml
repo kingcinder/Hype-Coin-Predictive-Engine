@@ -17,6 +17,13 @@ repos:
   # PATH; the script is stdlib-only, so no additional_dependencies needed).
   - repo: local
     hooks:
+      - id: gitleaks
+        name: gitleaks staged secret scan
+        description: Scan staged changes for secrets and redact any findings
+        entry: gitleaks git --staged --redact --config .gitleaks.toml .
+        language: system
+        always_run: true
+        pass_filenames: false
       - id: check-broken-imports
         name: check broken imports
         description: Fail on imports that would break pytest collection

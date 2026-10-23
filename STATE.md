@@ -39,6 +39,10 @@ or `STATE.md` existed before 2026-09-09.
   SQLite; Docker Compose now selects its PostgreSQL service `[verified 2026-10-23]`.
 - Secrets hygiene: `.env`, `telegram.session`, `*.db` gitignored and untracked `[verified 2026-10-23]`.
   Repo is **public** — any key that ever touched git history should be rotated (not actioned).
+- Full-history Gitleaks baseline: this clone is not shallow (`git rev-parse --is-shallow-repository`
+  returned `false`), so no unshallow fetch was needed. The raw redacted scan examined 75
+  commits and found two generic-key matches in webhook test fixtures; the exact-value test
+  allowlist reduces the configured full-history scan to zero findings `[verified 2026-10-23]`.
 - Remaining `[briefing]`-sourced details: the exact two-value risk distribution (59.99/66.66 —
   from report text, DB not re-queried) and hand-set rule-engine point weights.
 
@@ -192,3 +196,26 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 763 tests, 0 failures, 10 skipped; Ruff passed; mypy
   passed (53 files); broken-import scan passed (233 files); declared-deps scan
   passed (28 roots, 233 files); Compose config passed with a test token.
+
+### 2026-10-23 — T2: Full-history secret scanning
+
+- Added a staged Gitleaks pre-commit hook and a full-depth CI scan using the
+  documented `.gitleaks.toml` allowlists. The allowlists are limited to exact
+  demo values at `.env.example` and one fixed webhook test fixture; neither path
+  is excluded wholesale.
+- Added `docs/secrets.md` with the full rotation checklist for credential fields
+  in `.env.example`, scan instructions, and the redacted baseline findings.
+- Baseline: raw full-history scan (75 commits, ~3.06 MB) found two generic-key
+  matches in historical test fixtures; configured scan found none. A current
+  directory scan also found two detections in generated `.venv` JavaScript maps,
+  which are untracked third-party artifacts and outside Git history.
+- Verification: Gitleaks staged scan and pre-commit hook passed; pytest 763
+  tests, 0 failures, 10 skipped; Ruff passed; mypy passed (53 files);
+  broken-import scan passed (233 files); declared-deps scan passed (28 roots,
+  233 files); pre-commit config validated; workflow YAML parsed with the
+  secrets job's checkout depth confirmed as 0.
+- Canary check on a disposable local branch: the staged hook rejected one
+  synthetic high-entropy API key with redacted output; after committing that
+  fixture only on the disposable branch, the full-history scan found one leak
+  and exited nonzero. The branch and commit were discarded; the task branch is
+  clean. GitHub-hosted CI itself was not run because no push was requested.
