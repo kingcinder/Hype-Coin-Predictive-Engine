@@ -8,43 +8,46 @@ or `STATE.md` existed before 2026-09-09.
 
 - **ID scheme:** `E#` enhancement to existing code · `N#` whole new module · `O#` omission/reduction.
 - **Statuses:** `done` · `in-progress` · `planned` · `deferred (reason)` · `blocked (on what)`.
-- Evidence tags: `[verified]` = checked directly against the working tree on **2026-09-09**;
+- Evidence tags: `[verified YYYY-MM-DD]` = checked directly against the working tree on that date;
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
-## Ground truth (2026-09-09)
+## Ground truth (re-audited 2026-10-23)
 
 - Field-report verdict `[report]`: RiskBand ordinal distance indistinguishable from
   always-GREEN (2.00 vs 2.00, n=286); BLACK collapse precision 9.09% = base rate (n=1,573);
   concordance 1.0 on risk_score / exit_risk / uncertainty flagged as degenerate-distribution
   artifacts; confidence calibration error 0.32 vs 0.10 trust ceiling; **0 Forecast rows and
   8 label rows** — forecast/hazard/ensemble layers have never been benchmarkable.
-- `assess_risk()` at `risk_engine/rules.py:136` `[verified]`.
-- `_BAND_CONFIDENCE` hardcoded lookup at `scoring/formulas.py:42` (used at `:148`) `[verified]`.
-- Calibrator module exists: `risk_engine/calibrator.py` `[verified — not yet read in depth]`.
+- `assess_risk()` at `risk_engine/rules.py:164` `[verified 2026-10-23]`.
+- `_BAND_CONFIDENCE` hardcoded lookup at `scoring/formulas.py:42` `[verified 2026-10-23]`.
+- `risk_engine/calibrator.py` exists and adapts risk thresholds; it does not replace `_BAND_CONFIDENCE` with a time-split confidence calibrator `[verified 2026-10-23]`.
 - LLM pinned to Ollama `qwen2.5:0.5b`: `llm/engine.py:28` (`OLLAMA_DEFAULT_MODEL`), `:100`
   (fallback), `common/config.py:452`; same pin in `docker-compose.yml`, `packaging/install.sh`,
-  `INSTALL.md` `[verified]`.
+  `INSTALL.md` `[verified 2026-10-23]`.
 - Explorer crawler is Etherscan-only (chain IDs 1 / 8453, `getcontractcreation` at
   `crawlers/sources/explorer.py:40-46`); zero matches in `crawlers/` for mint/freeze authority
   — Solana on-chain safety checks do not exist `[verified]`.
-- No API authentication: no match in `api/` for api_key / Authorization / HTTPBearer /
-  verify_token / require_auth / X-API headers; CORS middleware present, routes open
-  `[verified — absence-of-match search]`.
-- Forecast gate: `forecast_min_samples = 30` (`common/config.py:353`), enforced at
-  `forecast/engine.py:355,728` and `data_lake/labels.py:294` `[verified]`.
-- Secrets hygiene: `.env`, `telegram.session`, `*.db` gitignored and untracked `[verified]`.
+- API bearer-token authentication is implemented by `_check_bearer_token` and
+  `_RequireApiTokenMiddleware` in `api/main.py:97-166`, with coverage in
+  `tests/test_api_auth_webhooks.py` `[verified 2026-10-23]`.
+- Forecast gate: `forecast_min_samples = 30` (`common/config.py:377`), enforced at
+  `forecast/engine.py` and `data_lake/labels.py:320` `[verified 2026-10-23]`.
+- `engine/run.py` uses `get_settings()` and the shared `storage.database.engine`; it does
+  not force a backend. With no `.env` or DB environment override, settings resolve to
+  PostgreSQL at `localhost:5432`. The checked-in root `.env` selects `local-single` and
+  SQLite; Docker Compose now selects its PostgreSQL service `[verified 2026-10-23]`.
+- Secrets hygiene: `.env`, `telegram.session`, `*.db` gitignored and untracked `[verified 2026-10-23]`.
   Repo is **public** — any key that ever touched git history should be rotated (not actioned).
 - Remaining `[briefing]`-sourced details: the exact two-value risk distribution (59.99/66.66 —
   from report text, DB not re-queried) and hand-set rule-engine point weights.
 
-## Pre-existing working-tree changes (not ours — do not touch)
+## Working-tree snapshot (2026-10-23)
 
-6 uncommitted files forming one coherent in-flight feature (watchdog re-alert capping:
-`SKIP_ALERT_MAX_ALERTS` / `SKIP_ALERT_MAX_MINUTES`, `note_phase_skip` verdict model,
-`engine_stage_watchdog_skip_muted`): `common/config.py`, `docs/runbook.md`, `engine/run.py`,
-`ops/watchdog.py`, `tests/test_engine_phases.py`, `tests/test_retention.py`. 255 insertions.
-Owner unknown; left uncommitted and untouched.
+The canonical checkout was clean on `main` before this task began. The earlier
+September 2026 note about six uncommitted watchdog files described a different
+checkout state and is no longer current. Work for this task is on
+`codex/hype-coin-predictive-engine`.
 
 ## Change ledger
 
@@ -52,35 +55,35 @@ Owner unknown; left uncommitted and untouched.
 
 | ID | Item | Status | Notes / evidence |
 |----|------|--------|------------------|
-| E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~35 features silently default to 0 | done (2026-09-14; see session log) | Audit: DB `features` table (170k rows, 4,859 snapshots) shows kol_velocity/catalyst_proximity_hours 100% missing, recidivism_score 99.8%, github_star_velocity 98.8%, collapse_probability_24h 76.8%, liquidity block ~62%, lifecycle_phase 58.2% (rule-engine default 1.0); only event-count features (ignition/lp_removal/withdrawal) are legitimately 0. `_feature()` now tracks defaults into `RiskAssessment.missing_features`; `compute_scores` merges with factory-missing and applies a coverage-weighted confidence penalty (max 30 pts); API `RiskResponse.missing_features` + GUI panel. Tests: `tests/test_feature_completeness.py` (15 tests). Unblocks E2/E3 quality |
-| E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (needs E1 + more outcome data) | Hand-tuned 25/50/75 and 0.10/0.30/0.50/0.75 `[briefing]` |
-| E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | planned (proposed this session) | `scoring/formulas.py:42` `[verified]` |
-| E4 | Label/outcome pipeline: accelerated historical backfill, or honest "forecasting not live yet" acknowledgment | deferred (data-acquisition scope) | 8 labels vs min-30 gate `[report]` |
-| E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | ✅ done (2026-09-14) | `storage/write_queue.py`: single-writer thread + Future API (`submit`/`submit_sync`), dedicated writer session, drain-on-`stop()`; `storage/repository.py`: new `queued_write()` helper + `record_health()` routes through the queue when running (direct write otherwise); `engine/run.py`: queue starts after `_bootstrap()`, drains in `finally`; WAL pragma verified engaged at queue start. Evidence: `tests/test_write_queue.py` (10 tests) — 8 writers × 25 concurrent writes + 2 readers: zero "database is locked" errors, 200/200 rows, exec p99 2.6ms (criterion <100ms), shutdown drain verified, SystemHealth `write_queue` heartbeat persists queue depth + latency |
-| E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (proposed this session) | `llm/engine.py:28,100` `[verified]` |
-| E7 | API authentication (`Depends`-based; localhost-token default, LAN-capable) | planned (proposed this session) | No auth found in `api/` `[verified]` |
-| E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28) | 35 tests in `tests/test_history_divergence.py`; end-to-end verified against a scratch bare remote: FF passes, amend + `git push --force` blocked with remote tip unchanged, `ALLOW_HISTORY_REWRITE=1` force accepted, non-main branches ungraded, CI `--check` fails rewrites / passes marker |
+| E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~35 features silently default to 0 | done (2026-09-14; re-audited 2026-10-23) | `_feature()` tracks defaults into `RiskAssessment.missing_features`; confidence coverage penalty and API/UI missing-feature display remain in source. Evidence: `risk_engine/rules.py`, `scoring/formulas.py`, `api/schemas.py`, `ui/app.py`, `tests/test_feature_completeness.py` `[verified 2026-10-23]` |
+| E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (needs a time-ordered evaluation window) | Adaptive ML thresholds exist in `risk_engine/calibrator.py`; the requested training/validation-only retuning is not yet evidenced `[verified 2026-10-23]` |
+| E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | planned | `_BAND_CONFIDENCE` remains in `scoring/formulas.py:42`; no persisted confidence calibrator `[verified 2026-10-23]` |
+| E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | planned (T6) | Forecast gate remains 30 in `common/config.py:377`; `scripts/backfill_history.py` has provider history fetchers but no label replay path `[verified 2026-10-23]` |
+| E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | done (2026-09-14; re-audited 2026-10-23) | `storage/write_queue.py`, `storage/repository.py`, `engine/run.py`; behavior coverage in `tests/test_write_queue.py` `[verified 2026-10-23]` |
+| E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (T7) | `llm/engine.py` still calls the Ollama API; provider abstraction not present `[verified 2026-10-23]` |
+| E7 | API authentication (bearer-token middleware; fail-closed when unset, explicit bypass) | done (2026-10-23) | `_check_bearer_token` and `_RequireApiTokenMiddleware` in `api/main.py:97-166`; `tests/test_api_auth_webhooks.py` `[verified 2026-10-23]` |
+| E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
 
 ### N — Whole new modules
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| N1 | Solana on-chain safety: mint authority, freeze authority, LP-lock status | planned (candidate this session) | Biggest stated-purpose gap `[verified absent]` |
-| N2 | EVM bytecode/honeypot static analysis (hidden mint, blacklist/pausable, proxy backdoor, fee-on-transfer) | deferred | Own session; behind the E-batch |
-| N3 | Mempool/pending-tx sniper + MEV-bundle detection | deferred | |
-| N4 | Offline historical backfill/replay engine for synthesized labels | deferred | Unsticks the forecast layer; pairs with E4 |
-| N5 | Funding-source / CEX-deposit wallet-cluster graph tracing | deferred | Extends `fingerprint/engine.py` |
-| N6 | Secrets/credentials management (rotation, at-rest encryption, per-crawler scoping) | deferred | |
-| N7 | Portfolio/position paper-trading simulation ledger | deferred | Optional vs non-trading mission |
-| N8 | Point-in-time leakage guardrails: `validation/leakage_guard.py` (frozen `decision_ts` scope + `require_decision_ts` decorator + `check_rows_point_in_time` assertion); `features/factory.py` and `features/lake.py` enforce it; violations log to `SystemHealth` (component `leakage_guard`) | done | `tests/test_leakage.py` (13 tests): intentionally leaky pipeline raises `LeakageViolation`, clean pipeline passes; `docs/leakage-audit.md` enforcement section added |
+| N1 | Solana on-chain safety: mint authority, freeze authority, LP-lock status | planned (T3) | No `ingestion/solana_safety.py` or equivalent module is present `[verified 2026-10-23]` |
+| N2 | EVM bytecode/honeypot static analysis (hidden mint, blacklist/pausable, proxy backdoor, fee-on-transfer) | deferred | Dedicated static-analysis module is not present; `crawlers/sources/explorer.py` covers explorer lookups `[verified 2026-10-23]` |
+| N3 | Mempool/pending-tx sniper + MEV-bundle detection | deferred | `mempool/` contains burst monitoring, but no sniper/MEV-bundle detector `[verified 2026-10-23]` |
+| N4 | Offline historical backfill/replay engine for synthesized labels | planned (T6) | `scripts/backfill_history.py` fetches provider history; no point-in-time label replay is present `[verified 2026-10-23]` |
+| N5 | Funding-source / CEX-deposit wallet-cluster graph tracing | deferred | `fingerprint/engine.py` has wallet-cooccurrence analysis, not funding-source/CEX tracing `[verified 2026-10-23]` |
+| N6 | Secrets/credentials management (rotation, at-rest encryption, per-crawler scoping) | deferred | No dedicated secrets-management module; environment settings remain in `common/config.py` `[verified 2026-10-23]` |
+| N7 | Portfolio/position paper-trading simulation ledger | deferred | No paper-position ledger module is present `[verified 2026-10-23]` |
+| N8 | Point-in-time leakage guardrails: `validation/leakage_guard.py` and feature enforcement | done (re-audited 2026-10-23) | `require_decision_ts` and `check_rows_point_in_time` exist in `validation/leakage_guard.py`; tests and `docs/leakage-audit.md` remain `[verified 2026-10-23]` |
 
 ### O — Omissions / reductions
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| O1 | Sunset Nitter + X-trends crawlers | ❓ needs decision (D3) | Fragile / legally gray; sub-5%-actionability sources are already auto-deprioritized |
-| O2 | De-emphasize non-benchmarkable score family (hype/ethos/liquidity_access/manipulation/catalyst/research_priority) in the GUI | planned (later session) | Methodology §6: no ground truth exists `[report]` |
-| O3 | Suppress-or-flag any concordance ≥ 0.95 surfaced without the leakage cross-check | planned (proposed this session) | Report explicitly warns future runs `[report]` |
+| O1 | Disable Nitter + X-trends crawlers by policy | planned (T9; user-authorized) | Both `nightcrawler_nitter_enabled` and `nightcrawler_x_trends_enabled` default to `True` in `common/config.py` `[verified 2026-10-23]` |
+| O2 | De-emphasize non-benchmarkable score family in the GUI and API | planned (T8) | GUI still sorts by hype/research priority; score-family validation metadata and badges are not present `[verified 2026-10-23]` |
+| O3 | Suppress-or-flag concordance ≥ 0.95 surfaced without the leakage cross-check | planned (T4) | Harness has leakage checks, but API/GUI do not gate surfaced concordance on them `[verified 2026-10-23]` |
 
 ## Dependency order
 
@@ -89,9 +92,9 @@ O1 after D3 · E5 after D2.
 
 ## Decisions pending user sign-off
 
-- **D1 — session scope:** which items this session implements (asked 2026-09-09).
+- **D1 — session scope:** resolved 2026-10-23; this task authorizes T0–T10.
 - **D2 — E5 approach:** decided 2026-09-14 → WAL + write-queue now (implemented; Postgres migration deferred unless contention outgrows a single writer).
-- **D3 — O1 approach:** disable-by-default vs delete modules vs ledger-only.
+- **D3 — O1 approach:** resolved 2026-10-23; keep code and disable both crawlers by default under T9.
 
 ## Session log
 
@@ -156,3 +159,20 @@ in-flight work from other agents, still untouched.
   (6 files, uncommitted).
 - Created this ledger.
 - Deferred: implementation pending answers to D1–D3.
+
+### 2026-10-23 — T0: State and documentation reconciliation
+
+- Audited every E/N/O ledger row against the current source tree and updated stale
+  statuses/evidence dates. E7 was already implemented, so its stale `planned` status
+  is now `done`; O1 is now planned as disable-by-policy under the authorized T9.
+- Removed the obsolete uncommitted-watchdog snapshot; the checkout was clean before
+  this task. Resolved the prior session-scope and crawler-policy decisions.
+- Traced database selection: `engine/run.py` calls `get_settings()` and migrations
+  use the shared engine from `storage/database.py`. No-env settings use local
+  PostgreSQL; the repository's `.env` selects local-single SQLite. Updated README,
+  INSTALL, `.env.example`, and Compose to describe PostgreSQL as the general default,
+  SQLite as the explicit local-single profile, and Compose's PostgreSQL service.
+- Fixed the clone directory in README and INSTALL. `docker compose config --quiet`
+  and `git diff --check` passed. Post-task checks: pytest 752 tests, 0 failures,
+  8 skipped; Ruff passed; mypy passed (52 files); broken-import scan passed
+  (229 files); declared-deps scan passed (28 roots, 229 files).

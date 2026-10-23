@@ -18,7 +18,7 @@ This is not an auto-trader, wallet, custody system, or guaranteed-profit bot.
 python -m engine
 ```
 
-This one process bootstraps the SQLite database (idempotent), then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. Ctrl+C stops the worker, API, and GUI cleanly.
+This one process applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. With no database override, it connects to PostgreSQL at `localhost:5432`; set `ENV=local-single` and `DATABASE_URL=sqlite:///serpent.db` for a zero-container SQLite setup. Ctrl+C stops the worker, API, and GUI cleanly.
 
 Equivalent Makefile target: `make engine`.
 
@@ -277,7 +277,7 @@ One command installs Serpent Circle as a system service:
 
 ```bash
 git clone https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
-cd Hype-Coin-Predictive-Engine-main
+cd Hype-Coin-Predictive-Engine
 sudo bash packaging/install.sh
 ```
 

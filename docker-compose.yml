@@ -6,10 +6,8 @@ services:
       - path: .env
         required: false
     environment:
-      ENV: local-single
-      # SQLite must live in the persistent data volume, not the container
-      # rootfs, or the DB is lost on every container recreation.
-      DATABASE_URL: sqlite:////app/data/serpent.db
+      ENV: local
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/serpent
       # Trained forecast models also persist in the data volume.
       MODEL_ARTIFACT_DIR: /app/data/models
       # Ollama runs as its own container on the compose network.
@@ -21,6 +19,8 @@ services:
       - serpent-data:/app/data
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       ollama:
         condition: service_healthy
     healthcheck:

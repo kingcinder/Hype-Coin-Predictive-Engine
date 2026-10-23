@@ -33,7 +33,7 @@ One command installs Serpent Circle as a system service on Ubuntu.
 ```bash
 # Clone and install
 git clone https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
-cd Hype-Coin-Predictive-Engine-main
+cd Hype-Coin-Predictive-Engine
 sudo bash packaging/install.sh
 ```
 
@@ -50,6 +50,15 @@ The installer will:
 - Run database migrations automatically
 - Register and start a systemd service
 - Install the `serpent` CLI command
+
+Running `python -m engine` with no environment override uses PostgreSQL at
+`localhost:5432` (`serpent` database); the installer-generated
+`ENV=local-single` profile uses SQLite at `serpent.db` instead. The bundled
+installers create that SQLite profile for a zero-container setup. To switch an
+installed service to PostgreSQL, set `ENV=local` and
+`DATABASE_URL=postgresql+psycopg://serpent:<password>@localhost:5432/serpent`
+in its environment. Docker Compose starts its PostgreSQL service and points the
+engine to it by default.
 
 ### Split-services install (alternative)
 
