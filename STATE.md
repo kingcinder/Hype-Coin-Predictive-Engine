@@ -72,7 +72,7 @@ checkout state and is no longer current. Work for this task is on
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| N1 | Solana on-chain safety: mint authority, freeze authority, LP-lock status | planned (T3) | No `ingestion/solana_safety.py` or equivalent module is present `[verified 2026-10-23]` |
+| N1 | Solana on-chain safety: mint authority, freeze authority, LP-lock status | done (2026-10-23) | `ingestion/solana_safety.py`, migration `0022_solana_safety_snapshots`, point-in-time feature factory, named risk weights, `/tokens/{id}`, and GUI evidence table; unsupported LP layouts remain unknown `[verified 2026-10-23]` |
 | N2 | EVM bytecode/honeypot static analysis (hidden mint, blacklist/pausable, proxy backdoor, fee-on-transfer) | deferred | Dedicated static-analysis module is not present; `crawlers/sources/explorer.py` covers explorer lookups `[verified 2026-10-23]` |
 | N3 | Mempool/pending-tx sniper + MEV-bundle detection | deferred | `mempool/` contains burst monitoring, but no sniper/MEV-bundle detector `[verified 2026-10-23]` |
 | N4 | Offline historical backfill/replay engine for synthesized labels | planned (T6) | `scripts/backfill_history.py` fetches provider history; no point-in-time label replay is present `[verified 2026-10-23]` |
@@ -219,3 +219,30 @@ in-flight work from other agents, still untouched.
   fixture only on the disposable branch, the full-history scan found one leak
   and exited nonzero. The branch and commit were discarded; the task branch is
   clean. GitHub-hosted CI itself was not run because no push was requested.
+
+### 2026-10-23 — T3: Solana on-chain safety evidence
+
+- Added pooled `getAccountInfo` collection for the bounded Solana holder-scan
+  cohort and persisted timestamped mint/LP evidence in migration
+  `0022_solana_safety_snapshots`. Mint decoding records authority state, raw
+  supply, decimals, and Token-2022 transfer-fee, permanent-delegate,
+  non-transferable, and default-account-state extensions.
+- Unsupported LP account layouts remain `unknown`; parsed complete ownership
+  data can classify LP supply as unlocked, locked, or burned. The token detail
+  API and GUI show the latest raw snapshot, while scoring uses only snapshots
+  with `observed_at <= decision_ts`.
+- Added named heuristic rule weights (20 mint authority, 25 freeze authority,
+  12 transfer fee, 20 permanent delegate, 10 non-transferable, 12 default
+  frozen, 18 known-unlocked LP). RPC failures and unknown fields remain missing
+  and contribute no safety points. No tests make live RPC calls.
+- TDD evidence: decoder tests first failed because the safety module did not
+  exist; feature/leakage tests first failed because the factory boundary was
+  absent; token-detail test first failed because the API omitted the snapshot.
+  Each targeted suite passed after implementation.
+- Pre-task checks: pytest 763 tests, 0 failures, 10 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (233 files); declared-deps scan
+  passed (28 roots, 233 files).
+- Post-task checks: pytest 775 tests, 0 failures, 10 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (236 files); declared-deps scan
+  passed (28 roots, 236 files). Targeted safety, feature, leakage, ingestion,
+  API, and migration checks passed.

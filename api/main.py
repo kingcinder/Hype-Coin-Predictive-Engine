@@ -442,6 +442,12 @@ def token_detail(asset_id: int, session: DbSession) -> TokenDetail:
                 "missing_features": exp.missing_features,
                 "changed_features": exp.changed_features,
             }
+    safety_row = session.scalar(
+        select(models.SolanaSafetySnapshot)
+        .where(models.SolanaSafetySnapshot.asset_id == asset_id)
+        .order_by(desc(models.SolanaSafetySnapshot.observed_at))
+        .limit(1)
+    )
     return TokenDetail(
         asset_id=asset.id,
         chain=chain.slug if chain else "unknown",
@@ -454,6 +460,15 @@ def token_detail(asset_id: int, session: DbSession) -> TokenDetail:
         latest_score=_score_row(session, score) if score else None,
         features=features,
         explanation=explanation,
+        solana_safety=(
+            {
+                "observed_at": safety_row.observed_at,
+                "status": safety_row.status,
+                "evidence": safety_row.evidence,
+            }
+            if safety_row
+            else None
+        ),
     )
 
 

@@ -36,6 +36,15 @@ FEATURE_NAMES: tuple[str, ...] = (
     "rpc_pool_health",
     "collapse_probability_24h",
     "lifecycle_phase",
+    "solana_mint_authority_active",
+    "solana_freeze_authority_active",
+    "solana_supply",
+    "solana_decimals",
+    "solana_transfer_fee_enabled",
+    "solana_permanent_delegate_enabled",
+    "solana_non_transferable_enabled",
+    "solana_default_account_frozen",
+    "solana_lp_unlocked",
 )
 
 FEATURE_LABELS: dict[str, str] = {
@@ -74,4 +83,13 @@ FEATURE_LABELS: dict[str, str] = {
     "rpc_pool_health": "Chain RPC pool health",
     "collapse_probability_24h": "Modeled 24h collapse probability",
     "lifecycle_phase": "Hype-lifecycle phase (0=seeding..4=collapse)",
+    "solana_mint_authority_active": "Solana mint authority active",
+    "solana_freeze_authority_active": "Solana freeze authority active",
+    "solana_supply": "Solana raw mint supply",
+    "solana_decimals": "Solana mint decimals",
+    "solana_transfer_fee_enabled": "Token-2022 transfer fee enabled",
+    "solana_permanent_delegate_enabled": "Token-2022 permanent delegate enabled",
+    "solana_non_transferable_enabled": "Token-2022 non-transferable enabled",
+    "solana_default_account_frozen": "Token-2022 default account frozen",
+    "solana_lp_unlocked": "Solana LP tokens unlocked",
 }

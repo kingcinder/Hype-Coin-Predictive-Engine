@@ -434,6 +434,47 @@ def _render_llm_narrative(result: dict[str, Any]) -> None:
         st.caption(" · ".join(meta))
 
 
+def _render_solana_safety(safety: dict[str, Any] | None) -> None:
+    if not safety:
+        return
+    st.markdown("**Solana Safety Evidence**")
+    st.caption(
+        f"RPC status: {safety.get('status', 'unknown')} · "
+        f"observed: {safety.get('observed_at', 'unknown')}"
+    )
+    evidence = safety.get("evidence") or {}
+
+    def state(value: object, *, active_word: str = "Enabled") -> str:
+        if value is None:
+            return "Unknown"
+        return active_word if value is True else "Disabled"
+
+    rows = [
+        {
+            "Evidence": "Mint authority",
+            "Value": state(evidence.get("mint_authority_active"), active_word="Active"),
+        },
+        {
+            "Evidence": "Freeze authority",
+            "Value": state(evidence.get("freeze_authority_active"), active_word="Active"),
+        },
+        {"Evidence": "Supply (raw units)", "Value": evidence.get("supply", "Unknown")},
+        {"Evidence": "Decimals", "Value": evidence.get("decimals", "Unknown")},
+        {"Evidence": "Transfer fee", "Value": state(evidence.get("transfer_fee_enabled"))},
+        {
+            "Evidence": "Permanent delegate",
+            "Value": state(evidence.get("permanent_delegate_enabled")),
+        },
+        {"Evidence": "Non-transferable", "Value": state(evidence.get("non_transferable_enabled"))},
+        {
+            "Evidence": "Default account frozen",
+            "Value": state(evidence.get("default_account_frozen")),
+        },
+        {"Evidence": "LP status", "Value": evidence.get("lp_status", "unknown")},
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
 def render_token_detail(asset_id: int | None) -> None:
     if asset_id is None:
         st.info("Select a scored token to inspect details.")
@@ -444,6 +485,7 @@ def render_token_detail(asset_id: int | None) -> None:
     score = data.get("latest_score")
     st.subheader(f"{data['symbol']} on {data['chain']}")
     st.caption(data["address"])
+    _render_solana_safety(data.get("solana_safety"))
     if not score:
         st.info("This token exists in the universe but has not been scored yet.")
         return

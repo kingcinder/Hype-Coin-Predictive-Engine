@@ -107,6 +107,18 @@ _DEFAULT_PROB_ORANGE = 0.30
 _DEFAULT_PROB_RED = 0.50
 _DEFAULT_PROB_BLACK = 0.75
 
+# Explicit point weights for confirmed Solana controls. Unknown RPC evidence is
+# tracked as missing by _feature and contributes no points.
+_SOLANA_SAFETY_RULES: tuple[tuple[str, float, str], ...] = (
+    ("solana_mint_authority_active", 20.0, "Solana mint authority remains active"),
+    ("solana_freeze_authority_active", 25.0, "Solana freeze authority remains active"),
+    ("solana_transfer_fee_enabled", 12.0, "Token-2022 transfer fee is configured"),
+    ("solana_permanent_delegate_enabled", 20.0, "Token-2022 permanent delegate is configured"),
+    ("solana_non_transferable_enabled", 10.0, "Token-2022 mint is non-transferable"),
+    ("solana_default_account_frozen", 12.0, "Token-2022 accounts default to frozen"),
+    ("solana_lp_unlocked", 18.0, "Parsed pool evidence shows LP tokens are unlocked"),
+)
+
 
 def band_from_collapse_probability(
     probability: float,
@@ -201,6 +213,15 @@ def assess_risk(
     recidivism = _feature(features, "recidivism_score", defaulted=defaulted)
     collapse_probability = _feature(features, "collapse_probability_24h", defaulted=defaulted)
     lifecycle_phase = _feature(features, "lifecycle_phase", 1.0, defaulted=defaulted)
+
+    for feature_name, points, reason in _SOLANA_SAFETY_RULES:
+        # FeatureFactory owns applicability and missing tracking for these
+        # chain-specific inputs; an absent key here is neutral for callers
+        # that provide a non-Solana feature vector.
+        if _feature(features, feature_name) >= 1.0:
+            weighted_points = _apply_reason_weights(points, reason, reason_weights)
+            risk_points += weighted_points
+            reasons.append(f"{reason} (+{weighted_points:.1f} risk points)")
 
     if lifecycle_phase >= 4:
         pts = _apply_reason_weights(25.0, "Lifecycle collapse phase", reason_weights)

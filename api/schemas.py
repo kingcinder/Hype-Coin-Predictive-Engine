@@ -126,6 +126,7 @@ class TokenDetail(BaseModel):
     latest_score: TokenScoreRow | None
     features: list[FeatureRow]
     explanation: dict[str, Any] | None
+    solana_safety: dict[str, Any] | None = None
 
 
 class AlertRow(BaseModel):

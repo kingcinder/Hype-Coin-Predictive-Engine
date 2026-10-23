@@ -429,6 +429,17 @@ class Feature(Base):
     source_refs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class SolanaSafetySnapshot(Base):
+    __tablename__ = "solana_safety_snapshots"
+    __table_args__ = (Index("ix_solana_safety_asset_observed", "asset_id", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class Score(Base):
     __tablename__ = "scores"
     __table_args__ = (

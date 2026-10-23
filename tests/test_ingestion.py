@@ -358,6 +358,7 @@ def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(service, "_ingest_geckoterminal_new_pools", lambda session: 0)
     monkeypatch.setattr(service, "_ingest_birdeye_solana", lambda session: 0)
     monkeypatch.setattr(service, "_ingest_solana_holder_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_solana_safety_snapshots", lambda session: 0)
     monkeypatch.setattr(service, "_ingest_evm_holder_snapshots", lambda session: 0)
     monkeypatch.setattr(service, "_run_data_quality_check", lambda session, decision_ts: {})
     monkeypatch.setattr(service, "_run_contract_analysis", lambda session, decision_ts: {})

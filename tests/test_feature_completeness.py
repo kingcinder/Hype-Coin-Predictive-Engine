@@ -58,6 +58,15 @@ def _full_features() -> dict[str, float]:
         "rpc_pool_health": 1.0,
         "collapse_probability_24h": 0.02,
         "lifecycle_phase": 1.0,
+        "solana_mint_authority_active": 0.0,
+        "solana_freeze_authority_active": 0.0,
+        "solana_supply": 1_000_000.0,
+        "solana_decimals": 6.0,
+        "solana_transfer_fee_enabled": 0.0,
+        "solana_permanent_delegate_enabled": 0.0,
+        "solana_non_transferable_enabled": 0.0,
+        "solana_default_account_frozen": 0.0,
+        "solana_lp_unlocked": 0.0,
     }
     assert set(base) == set(FEATURE_NAMES)
     return base
@@ -195,7 +204,8 @@ def test_full_features_beat_empty_dict_on_confidence() -> None:
     full = compute_scores(_full_features(), [])
     empty = compute_scores({}, [])
     assert full.confidence > empty.confidence
-    # Empty dict: all 13 rule-engine inputs defaulted.
+    # Empty dict: the 13 shared rule inputs defaulted; chain-specific safety
+    # applicability and coverage come from FeatureFactory.
     assert len(empty.missing_features) == 13
     assert full.missing_features == []
 

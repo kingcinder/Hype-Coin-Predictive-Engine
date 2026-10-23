@@ -35,6 +35,80 @@ class FeatureValue:
     source_refs: dict[str, object] | None = None
 
 
+@require_decision_ts
+def compute_solana_safety_features(
+    session: Session, asset: models.Asset, decision_ts: datetime
+) -> list[FeatureValue]:
+    """Load only safety evidence known at the point-in-time decision."""
+    decision_ts = ensure_utc(decision_ts)
+    chain_slug = session.scalar(select(models.Chain.slug).where(models.Chain.id == asset.chain_id))
+    names = (
+        "solana_mint_authority_active",
+        "solana_freeze_authority_active",
+        "solana_supply",
+        "solana_decimals",
+        "solana_transfer_fee_enabled",
+        "solana_permanent_delegate_enabled",
+        "solana_non_transferable_enabled",
+        "solana_default_account_frozen",
+        "solana_lp_unlocked",
+    )
+    if chain_slug != "solana":
+        return [FeatureValue(name, 0.0, False, source_refs={"applicable": False}) for name in names]
+
+    rows = list(
+        session.scalars(
+            select(models.SolanaSafetySnapshot)
+            .where(
+                models.SolanaSafetySnapshot.asset_id == asset.id,
+                models.SolanaSafetySnapshot.observed_at <= decision_ts,
+            )
+            .order_by(models.SolanaSafetySnapshot.observed_at.desc())
+            .limit(1)
+        )
+    )
+    check_rows_point_in_time(rows, decision_ts, feature_name="solana_safety")
+    row = rows[0] if rows else None
+    evidence = row.evidence if row and row.status == "ok" else {}
+    refs: dict[str, object] = {
+        "observed_at": row.observed_at.isoformat() if row else None,
+        "status": row.status if row else "missing",
+    }
+    specs: tuple[tuple[str, str, bool], ...] = (
+        ("solana_mint_authority_active", "mint_authority_active", True),
+        ("solana_freeze_authority_active", "freeze_authority_active", True),
+        ("solana_supply", "supply", False),
+        ("solana_decimals", "decimals", False),
+        ("solana_transfer_fee_enabled", "transfer_fee_enabled", True),
+        ("solana_permanent_delegate_enabled", "permanent_delegate_enabled", True),
+        ("solana_non_transferable_enabled", "non_transferable_enabled", True),
+        ("solana_default_account_frozen", "default_account_frozen", True),
+    )
+    output: list[FeatureValue] = []
+    for feature_name, key, is_boolean in specs:
+        value = evidence.get(key)
+        if is_boolean and isinstance(value, bool):
+            output.append(FeatureValue(feature_name, float(value), False, 1, 1.0, refs))
+        elif not is_boolean and isinstance(value, (int, float)):
+            output.append(FeatureValue(feature_name, float(value), False, 1, 1.0, refs))
+        else:
+            output.append(FeatureValue(feature_name, 0.0, True, 0, 0.0, refs))
+
+    lp_status = evidence.get("lp_status")
+    lp_value = 1.0 if lp_status == "unlocked" else 0.0
+    output.append(
+        FeatureValue(
+            "solana_lp_unlocked",
+            lp_value,
+            lp_status not in {"unlocked", "burned", "locked"},
+            1 if lp_status in {"unlocked", "burned", "locked"} else 0,
+            1.0 if lp_status in {"unlocked", "burned", "locked"} else 0.0,
+            {**refs, "lp_status": lp_status or "unknown"},
+        )
+    )
+    return output
+
+
 @overload
 def _safe_float(value: Any, default: None) -> float | None: ...
 
@@ -431,6 +505,7 @@ class FeatureFactory:
                 1.0 if lifecycle_phase is not None else 0.0,
             ),
         ]
+        values.extend(compute_solana_safety_features(session, asset, decision_ts))
         assert {value.name for value in values} == set(FEATURE_NAMES)
         return values
 

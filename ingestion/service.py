@@ -29,6 +29,7 @@ from ingestion.rpc_pool import (
     persist_pool_snapshots,
     record_pool_health,
 )
+from ingestion.solana_safety import collect_asset_safety
 from ingestion.source_clients import (
     DexScreenerClient,
     EVMHolderClient,
@@ -194,6 +195,7 @@ class IngestionService:
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
+            result["safety_snapshots"] = self._ingest_solana_safety_snapshots(session)
             result["holder_snapshots"] += self._ingest_evm_holder_snapshots(session)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
             result["lp_removals"] = LiquidityRemovalWatcher().scan(session, decision_ts=decision_ts)
@@ -812,6 +814,29 @@ class IngestionService:
                 error_count=len(errors),
             )
         return count
+
+    def _ingest_solana_safety_snapshots(self, session: Session) -> int:
+        """Record mint controls for the same bounded Solana scan cohort."""
+        if "solana" not in self.settings.target_chains:
+            return 0
+        chain = self._chain(session, "solana")
+        if chain is None:
+            return 0
+        assets = self._holder_scan_assets(session, chain.id, self.settings.solana_holder_scan_limit)
+        observed_at = utc_now()
+        for asset in assets:
+            try:
+                collect_asset_safety(session, asset, observed_at=observed_at)
+            except Exception as exc:  # noqa: BLE001 - isolate malformed provider/account data.
+                log.warning("solana_safety_snapshot_failed", asset_id=asset.id, error=str(exc))
+            sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
+        record_health(
+            session,
+            component="source:solana_safety",
+            state="ok" if assets else "yellow",
+            message=f"Recorded safety evidence for {len(assets)} Solana assets",
+        )
+        return len(assets)
 
     def _holder_scan_assets(
         self, session: Session, chain_id: int, limit: int
