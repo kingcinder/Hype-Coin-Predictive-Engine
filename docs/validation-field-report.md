@@ -351,3 +351,27 @@ The calibration command persists each attempt, its version, time window, sample 
 and training-derived band thresholds when a model passes the holdout gate. Runtime scoring uses
 only an active persisted map with at least the configured sample floor. `/health` and
 `/risk/confidence-calibration` expose active/fallback status, window, ECE, and latest attempt.
+
+## 11. 2026-10-23 addendum — historical labels and forecast gate
+
+T6 adds an offline `--replay-labels` path to `scripts/backfill_history.py`. It creates labels only
+for feature decision times whose feature row and entry price were observed by that decision
+time. It uses raw prices inside the configured forward window for outcomes, excludes prices
+observed after the replay as-of cutoff, and stores each label's actual outcome-observation time.
+There is no interpolation across a decision or forward-window boundary. `--dry-run` leaves the
+database untouched. CoinGecko/DeFiLlama history backfills now set `observed_at` to retrieval
+time instead of falsely presenting historical market timestamps as historical knowledge.
+
+The current `serpent.db` was measured directly before and after replay: labels remained 522 and
+Forecast rows remained 375. The training gate is 35 usable feature-aligned label pairs out of
+30; `ForecastEngine._collect_samples` independently returned the same 35. The replay found 0
+eligible historical decision points because no feature row in this DB was observed by its
+historical decision time. It correctly added no labels. Forecast rows were already persisted
+before this replay; no claim is made that T6 created the first rows.
+The captured run is [`reports/label-replay-2026-10-23-t6.json`](../reports/label-replay-2026-10-23-t6.json).
+
+`GET /data/labels/progress` now reports the usable sample count and `Forecasting not live: X/30
+labels` until the gate is met; the Forecast and Data Lake GUI views render the same status. The
+densify endpoint accepts an as-of timestamp for deterministic evaluation. Regression coverage
+proves it ignores late-observed prices; separate replay tests prove late entry/target prices and
+out-of-window targets cannot influence synthetic labels.

@@ -62,7 +62,7 @@ checkout state and is no longer current. Work for this task is on
 | E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~35 features silently default to 0 | done (2026-09-14; re-audited 2026-10-23) | `_feature()` tracks defaults into `RiskAssessment.missing_features`; confidence coverage penalty and API/UI missing-feature display remain in source. Evidence: `risk_engine/rules.py`, `scoring/formulas.py`, `api/schemas.py`, `ui/app.py`, `tests/test_feature_completeness.py` `[verified 2026-10-23]` |
 | E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (no causally available training window) | Train-only isotonic threshold tuning is implemented; the live split has 0 causally available training rows, so thresholds remain at fallback values `[verified 2026-10-23]` |
 | E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | implemented; fallback active | Versioned isotonic persistence, runtime application, API/health status, and `RISK_CONFIDENCE_CALIBRATION_MIN_SAMPLES=100` are implemented; current 0-row train split prevents activation `[verified 2026-10-23]` |
-| E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | planned (T6) | Forecast gate remains 30 in `common/config.py:377`; `scripts/backfill_history.py` has provider history fetchers but no label replay path `[verified 2026-10-23]` |
+| E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | done (2026-10-23) | Offline replay is available; `/data/labels/progress` and Forecast/Data Lake UI show usable samples against the unchanged 30 gate. Live DB has 35 usable samples and 375 forecasts; this replay added 0 due no eligible historical feature/entry timestamps `[verified 2026-10-23]` |
 | E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | done (2026-09-14; re-audited 2026-10-23) | `storage/write_queue.py`, `storage/repository.py`, `engine/run.py`; behavior coverage in `tests/test_write_queue.py` `[verified 2026-10-23]` |
 | E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (T7) | `llm/engine.py` still calls the Ollama API; provider abstraction not present `[verified 2026-10-23]` |
 | E7 | API authentication and network exposure (loopback defaults; explicit authenticated LAN binds) | done (2026-10-23) | Bearer middleware in `api/main.py:97-166`; `common/network.py` validates API/UI bind settings; GUI API/SSE clients send the configured token; tests cover CORS, startup rejection, defaults, and SSE `[verified 2026-10-23]` |
@@ -75,7 +75,7 @@ checkout state and is no longer current. Work for this task is on
 | N1 | Solana on-chain safety: mint authority, freeze authority, LP-lock status | done (2026-10-23) | `ingestion/solana_safety.py`, migration `0022_solana_safety_snapshots`, point-in-time feature factory, named risk weights, `/tokens/{id}`, and GUI evidence table; unsupported LP layouts remain unknown `[verified 2026-10-23]` |
 | N2 | EVM bytecode/honeypot static analysis (hidden mint, blacklist/pausable, proxy backdoor, fee-on-transfer) | deferred | Dedicated static-analysis module is not present; `crawlers/sources/explorer.py` covers explorer lookups `[verified 2026-10-23]` |
 | N3 | Mempool/pending-tx sniper + MEV-bundle detection | deferred | `mempool/` contains burst monitoring, but no sniper/MEV-bundle detector `[verified 2026-10-23]` |
-| N4 | Offline historical backfill/replay engine for synthesized labels | planned (T6) | `scripts/backfill_history.py` fetches provider history; no point-in-time label replay is present `[verified 2026-10-23]` |
+| N4 | Offline historical backfill/replay engine for synthesized labels | done (2026-10-23) | `--replay-labels` runs locally from saved PIT features/prices with bounded forward outcomes and true label observation times; replay is covered by leakage tests `[verified 2026-10-23]` |
 | N5 | Funding-source / CEX-deposit wallet-cluster graph tracing | deferred | `fingerprint/engine.py` has wallet-cooccurrence analysis, not funding-source/CEX tracing `[verified 2026-10-23]` |
 | N6 | Secrets/credentials management (rotation, at-rest encryption, per-crawler scoping) | deferred | No dedicated secrets-management module; environment settings remain in `common/config.py` `[verified 2026-10-23]` |
 | N7 | Portfolio/position paper-trading simulation ledger | deferred | No paper-position ledger module is present `[verified 2026-10-23]` |
@@ -297,5 +297,31 @@ in-flight work from other agents, still untouched.
   passed (53 files); broken-import scan passed (240 files); declared-deps scan
   passed (28 roots, 240 files).
 - Post-task checks: pytest 795 tests, 0 failures, 11 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (244 files); declared-deps scan
+  passed (28 roots, 244 files).
+
+### 2026-10-23 — T6: Offline historical label replay (done; no eligible replay rows)
+
+- Added an offline `scripts/backfill_history.py --replay-labels` path and
+  `data_lake.labels.replay_historical_labels()`. Entries and feature rows must
+  have been observed by their decision time; target prices are bounded to the
+  forward horizon and replay as-of time. Label `observed_at` records when the
+  full outcome became known. Provider history backfills now record retrieval
+  time rather than backdating availability to the historical price timestamp.
+- The dense-label endpoint accepts `decision_ts` as an as-of cutoff; API and
+  GUI forecast status reports usable matched label pairs against the unchanged
+  30-sample gate. Leakage tests cover late entry/target prices and target
+  prices outside the forward window.
+- Live `serpent.db` before/after: labels 522 → 522; Forecast rows 375 → 375.
+  There are 35 usable forecast samples (`ForecastEngine._collect_samples`
+  independently returned 35), so the API/UI status is `Forecasting live:
+  35/30 labels`. Offline replay found 0 eligible decision points because no
+  feature rows were observed by their historical decision times; it added 0.
+  The first Forecast rows were already present before this task.
+- Versioned live run report: `reports/label-replay-2026-10-23-t6.json`.
+- Pre-task checks: pytest 795 tests, 0 failures, 11 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (244 files); declared-deps scan
+  passed (28 roots, 244 files).
+- Post-task checks: pytest 800 tests, 0 failures, 11 skipped; Ruff passed; mypy
   passed (53 files); broken-import scan passed (244 files); declared-deps scan
   passed (28 roots, 244 files).

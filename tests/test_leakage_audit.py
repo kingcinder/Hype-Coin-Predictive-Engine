@@ -22,7 +22,12 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
-from data_lake.labels import _interpolate_price, generate_dense_labels
+from data_lake.labels import (
+    _interpolate_price,
+    generate_dense_labels,
+    label_generation_progress,
+    replay_historical_labels,
+)
 from features.factory import FeatureFactory
 from forecast.engine import _LEAKAGE_FEATURES, FORECAST_FEATURE_NAMES
 from forecast.labels import LABEL_COLLAPSE, seed_labels_at_feature_timestamps
@@ -347,6 +352,124 @@ def test_dense_entry_interpolation_is_backward_only() -> None:
     assert _interpolate_price([snap0, snap1], aware0 - timedelta(hours=1)) is None
     # Empty series -> None.
     assert _interpolate_price([], midpoint) is None
+
+
+def test_dense_entry_rejects_prices_observed_after_the_decision() -> None:
+    decision = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    timely = SimpleNamespace(
+        ts=decision - timedelta(hours=2), observed_at=decision - timedelta(hours=2), price_usd=1.0
+    )
+    late = SimpleNamespace(
+        ts=decision - timedelta(hours=1), observed_at=decision + timedelta(hours=1), price_usd=5.0
+    )
+
+    assert _interpolate_price([timely, late], decision) == 1.0
+
+
+def test_historical_label_replay_uses_point_in_time_entry_and_bounded_targets(session) -> None:
+    asset = _seed_arc(session, symbol="REPLAY", prices=[1.0] * 48, feature_hours=[11])
+    feature = session.scalar(
+        select(models.Feature).where(
+            models.Feature.asset_id == asset.id,
+            models.Feature.decision_ts == T0 + timedelta(hours=11),
+        )
+    )
+    assert feature is not None
+    feature.observed_at = T0 + timedelta(hours=11)
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    as_of = T0 + timedelta(hours=48)
+
+    # The late entry would manufacture a collapse if replay used market time only.
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=T0 + timedelta(hours=10, minutes=30),
+        observed_at=as_of + timedelta(hours=1),
+        price_usd=5.0,
+        volume_usd=1_000,
+    )
+    # Neither a future beyond the 24h target window nor a late observed pump may count.
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=T0 + timedelta(hours=36),
+        observed_at=T0 + timedelta(hours=36),
+        price_usd=0.2,
+        volume_usd=1_000,
+    )
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=T0 + timedelta(hours=20),
+        observed_at=as_of + timedelta(hours=1),
+        price_usd=4.0,
+        volume_usd=1_000,
+    )
+
+    counts = replay_historical_labels(session, decision_ts=as_of)
+
+    ignition = session.scalar(
+        select(models.Label).where(
+            models.Label.asset_id == asset.id,
+            models.Label.ts == T0 + timedelta(hours=11),
+            models.Label.label_type == "ignition",
+        )
+    )
+    collapse = session.scalar(
+        select(models.Label).where(
+            models.Label.asset_id == asset.id,
+            models.Label.ts == T0 + timedelta(hours=11),
+            models.Label.label_type == "collapse",
+        )
+    )
+    assert counts["decision_points"] == 1
+    assert counts["labels_created"] == 2
+    assert ignition is not None and ignition.label_value == "0"
+    assert collapse is not None and collapse.label_value == "0"
+    assert ignition.label_source.startswith("historical-replay:")
+    assert ignition.observed_at <= as_of
+
+
+def test_forecast_status_uses_trainable_feature_aligned_label_pairs(session) -> None:
+    asset = _seed_arc(session, symbol="PROGRESS", prices=[1.0] * 48, feature_hours=[11])
+    feature_ts = T0 + timedelta(hours=11)
+    feature = session.scalar(
+        select(models.Feature).where(
+            models.Feature.asset_id == asset.id,
+            models.Feature.decision_ts == feature_ts,
+        )
+    )
+    assert feature is not None
+    session.add_all(
+        [
+            models.Label(
+                asset_id=asset.id,
+                ts=feature_ts,
+                observed_at=DECISION,
+                label_type="ignition",
+                label_value="0",
+                label_source="fixture",
+            ),
+            models.Label(
+                asset_id=asset.id,
+                ts=feature_ts,
+                observed_at=DECISION,
+                label_type="collapse",
+                label_value="0",
+                label_source="fixture",
+            ),
+        ]
+    )
+    session.flush()
+
+    progress = label_generation_progress(session)
+
+    assert progress["usable_forecast_samples"] == 1
+    assert progress["forecast_status"] == "Forecasting not live: 1/30 labels"
 
 
 # ── Finding 7: dense-label forward windows must respect observed_at ─────────

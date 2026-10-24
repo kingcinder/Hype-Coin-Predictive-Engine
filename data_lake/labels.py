@@ -215,6 +215,132 @@ def generate_dense_labels(
     return counts
 
 
+def replay_historical_labels(
+    session: Session,
+    *,
+    decision_ts: datetime | None = None,
+    forward_hours: int | None = None,
+    ignition_threshold: float | None = None,
+    collapse_threshold: float | None = None,
+    dry_run: bool = False,
+) -> dict[str, int | bool]:
+    """Replay completed historical targets without using post-decision entries.
+
+    Feature timestamps and entry prices must have been observed by the feature
+    decision time. Forward outcome prices are bounded to the configured target
+    horizon and must have been observed by the replay's as-of time. Labels are
+    marked observed when the latest price needed to determine the outcome was
+    actually observed.
+    """
+    settings = get_settings()
+    as_of = ensure_utc(decision_ts or utc_now())
+    sql_as_of = as_of.replace(tzinfo=None)
+    forward_hours = forward_hours or settings.forecast_forward_hours
+    ignition_threshold = (
+        settings.forecast_ignition_threshold if ignition_threshold is None else ignition_threshold
+    )
+    collapse_threshold = (
+        settings.forecast_collapse_threshold if collapse_threshold is None else collapse_threshold
+    )
+    window = timedelta(hours=forward_hours)
+    counts: dict[str, int | bool] = {
+        "decision_points": 0,
+        "ignition_created": 0,
+        "collapse_created": 0,
+        "labels_created": 0,
+        "missing_entry": 0,
+        "incomplete_forward_window": 0,
+        "dry_run": dry_run,
+    }
+    feature_points = session.execute(
+        select(models.Feature.asset_id, models.Feature.decision_ts)
+        .where(
+            models.Feature.observed_at <= models.Feature.decision_ts,
+            models.Feature.decision_ts <= sql_as_of,
+        )
+        .distinct()
+        .order_by(models.Feature.decision_ts)
+    ).all()
+    for asset_id_raw, raw_feature_ts in feature_points:
+        asset_id = int(asset_id_raw)
+        feature_ts = ensure_utc(raw_feature_ts).replace(tzinfo=None)
+        future_end = feature_ts + window
+        if future_end > sql_as_of:
+            continue
+        counts["decision_points"] = int(counts["decision_points"]) + 1
+        pair_ids = session.scalars(
+            select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
+        ).all()
+        if not pair_ids:
+            counts["missing_entry"] = int(counts["missing_entry"]) + 1
+            continue
+        entry = session.scalar(
+            select(models.MarketSnapshot)
+            .where(
+                models.MarketSnapshot.pair_id.in_(pair_ids),
+                models.MarketSnapshot.ts <= feature_ts,
+                models.MarketSnapshot.observed_at <= feature_ts,
+                models.MarketSnapshot.price_usd.is_not(None),
+                models.MarketSnapshot.price_usd > 0,
+            )
+            .order_by(models.MarketSnapshot.ts.desc())
+            .limit(1)
+        )
+        if entry is None or entry.price_usd is None:
+            counts["missing_entry"] = int(counts["missing_entry"]) + 1
+            continue
+        outcomes = session.scalars(
+            select(models.MarketSnapshot)
+            .where(
+                models.MarketSnapshot.pair_id.in_(pair_ids),
+                models.MarketSnapshot.ts > feature_ts,
+                models.MarketSnapshot.ts <= future_end,
+                models.MarketSnapshot.observed_at <= sql_as_of,
+                models.MarketSnapshot.price_usd.is_not(None),
+                models.MarketSnapshot.price_usd > 0,
+            )
+            .order_by(models.MarketSnapshot.ts)
+        ).all()
+        future_prices = [float(row.price_usd) for row in outcomes if row.price_usd is not None]
+        if not future_prices:
+            counts["incomplete_forward_window"] = int(counts["incomplete_forward_window"]) + 1
+            continue
+
+        entry_price = float(entry.price_usd)
+        ignition_value = (
+            "1" if max(future_prices) / entry_price - 1.0 >= ignition_threshold else "0"
+        )
+        collapse_value = (
+            "1" if min(future_prices) / entry_price - 1.0 <= collapse_threshold else "0"
+        )
+        label_observed_at = max(ensure_utc(row.observed_at) for row in [entry, *outcomes])
+        source = f"historical-replay:{settings.forecast_model_version}"
+        for label_type, value, count_key in (
+            (LABEL_IGNITION, ignition_value, "ignition_created"),
+            (LABEL_COLLAPSE, collapse_value, "collapse_created"),
+        ):
+            created = (
+                _upsert_label(
+                    session,
+                    asset_id=asset_id,
+                    ts=feature_ts,
+                    label_type=label_type,
+                    value=value,
+                    decision_ts=label_observed_at,
+                    source=source,
+                )
+                if not dry_run
+                else True
+            )
+            if created:
+                counts[count_key] = int(counts[count_key]) + 1
+                counts["labels_created"] = int(counts["labels_created"]) + 1
+
+    if not dry_run:
+        session.flush()
+    return counts
+
+
 def _upsert_label(
     session: Session,
     *,
@@ -243,9 +369,14 @@ def _upsert_label(
     )
     if row:
         existing_dense = str(row.label_source or "").startswith("dense-labels:")
+        existing_replay = str(row.label_source or "").startswith("historical-replay:")
         new_dense = source.startswith("dense-labels:")
-        if new_dense and not existing_dense:
-            # Interpolated label must not destroy a real observed label.
+        new_replay = source.startswith("historical-replay:")
+        if (new_dense or new_replay) and not (existing_dense or existing_replay):
+            # Synthetic labels must not overwrite observed outcome labels.
+            return False
+        if new_dense and existing_replay:
+            # The point-in-time replay supersedes the broader dense estimate.
             return False
         row.label_value = value
         row.observed_at = decision_ts
@@ -318,7 +449,35 @@ def label_generation_progress(session: Session) -> dict[str, Any]:
     )
 
     min_samples = settings.forecast_min_samples
-    progress_pct = min(100.0, (total_labels / max(1, min_samples)) * 100.0)
+    now = ensure_utc(utc_now()).replace(tzinfo=None)
+    label_rows = session.execute(
+        select(models.Label.asset_id, models.Label.ts, models.Label.label_type).where(
+            models.Label.observed_at <= now,
+            models.Label.ts <= now - timedelta(hours=settings.forecast_forward_hours),
+            models.Label.label_type.in_((LABEL_IGNITION, LABEL_COLLAPSE)),
+        )
+    ).all()
+    label_types_by_key: dict[tuple[int, datetime], set[str]] = {}
+    for asset_id, ts, label_type in label_rows:
+        label_types_by_key.setdefault((int(asset_id), ensure_utc(ts)), set()).add(label_type)
+    feature_keys = {
+        (int(asset_id), ensure_utc(ts))
+        for asset_id, ts in session.execute(
+            select(models.Feature.asset_id, models.Feature.decision_ts)
+            .where(
+                models.Feature.missing_flag.is_(False),
+                models.Feature.observed_at <= now,
+            )
+            .distinct()
+        ).all()
+    }
+    required_types = {LABEL_IGNITION, LABEL_COLLAPSE}
+    usable_samples = sum(
+        1
+        for key, label_types in label_types_by_key.items()
+        if required_types.issubset(label_types) and key in feature_keys
+    )
+    progress_pct = min(100.0, (usable_samples / max(1, min_samples)) * 100.0)
 
     # Count unique assets with labels
     unique_assets = session.scalar(select(func.count(func.distinct(models.Label.asset_id)))) or 0
@@ -336,8 +495,14 @@ def label_generation_progress(session: Session) -> dict[str, Any]:
         "collapse_negative": collapse_0,
         "min_samples_required": min_samples,
         "progress_pct": round(progress_pct, 1),
-        "ready_to_train": total_labels >= min_samples,
+        "ready_to_train": usable_samples >= min_samples,
+        "usable_forecast_samples": usable_samples,
+        "forecast_status": (
+            f"Forecasting live: {usable_samples}/{min_samples} labels"
+            if usable_samples >= min_samples
+            else f"Forecasting not live: {usable_samples}/{min_samples} labels"
+        ),
         "unique_assets_labeled": unique_assets,
         "assets_with_snapshots": assets_with_snapshots,
-        "shortfall": max(0, min_samples - total_labels),
+        "shortfall": max(0, min_samples - usable_samples),
     }

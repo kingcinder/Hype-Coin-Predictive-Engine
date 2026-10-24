@@ -1918,11 +1918,11 @@ def data_signal_score(session: DbSession) -> dict:
 
 
 @app.post("/data/densify-labels")
-def data_densify_labels(session: DbSession) -> dict:
+def data_densify_labels(session: DbSession, decision_ts: datetime | None = None) -> dict:
     """Densify forecast labels from existing market snapshots."""
     from data_lake.labels import generate_dense_labels
 
-    counts = generate_dense_labels(session)
+    counts = generate_dense_labels(session, decision_ts=decision_ts)
     return counts
 
 

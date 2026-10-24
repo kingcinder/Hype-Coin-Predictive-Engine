@@ -11,6 +11,7 @@ Usage::
 
     python scripts/backfill_history.py --days 90 --provider coingecko
     python scripts/backfill_history.py --days 90 --provider defillama --dry-run
+    python scripts/backfill_history.py --replay-labels --as-of 2026-10-01T00:00:00Z
 
 Hermetic runs (integration tests / dry migrations):
 
@@ -39,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from common.http import build_httpx_client
 from common.logging import get_logger
+from common.time import ensure_utc, utc_now
 from storage import models
 from storage.database import session_scope
 from storage.repository import get_or_create_source, insert_market_snapshot_once
@@ -190,6 +192,7 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
             log.warning("coingecko_history_failed", symbol=asset.symbol, error=str(exc))
             errors += 1
             continue
+        retrieved_at = utc_now()
         for ts, price in history:
             if not dry_run:
                 insert_market_snapshot_once(
@@ -197,7 +200,7 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
                     pair_id=pair.id,
                     source_id=source.id,
                     ts=ts,
-                    observed_at=ts,
+                    observed_at=retrieved_at,
                     price_usd=price,
                     # Price history carries no volume; NULL is the honest value.
                     volume_usd=None,
@@ -294,6 +297,7 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
         if platform and asset.address:
             ref_to_asset[f"{platform}:{asset.address.lower()}"] = (asset, pair)
     history, failed_days = _defillama_history(client, list(ref_to_asset.keys()), days)
+    retrieved_at = utc_now()
     inserted = 0
     covered = 0
     for ref, rows in history.items():
@@ -307,7 +311,7 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
                     pair_id=pair.id,
                     source_id=source.id,
                     ts=ts,
-                    observed_at=ts,
+                    observed_at=retrieved_at,
                     price_usd=price,
                     # Price history carries no volume; NULL is the honest value.
                     volume_usd=None,
@@ -338,7 +342,33 @@ def main(argv: list[str] | None = None) -> int:
         help="price history provider",
     )
     parser.add_argument("--dry-run", action="store_true", help="count inserts without writing")
+    parser.add_argument(
+        "--replay-labels",
+        action="store_true",
+        help="synthesize labels offline from saved point-in-time feature and price history",
+    )
+    parser.add_argument(
+        "--as-of",
+        help="replay cutoff as an ISO-8601 timestamp (defaults to current UTC)",
+    )
     args = parser.parse_args(argv)
+
+    if args.replay_labels:
+        from data_lake.labels import replay_historical_labels
+
+        replay_as_of = (
+            ensure_utc(datetime.fromisoformat(args.as_of.replace("Z", "+00:00")))
+            if args.as_of
+            else utc_now()
+        )
+        with session_scope() as session:
+            result = replay_historical_labels(
+                session, decision_ts=replay_as_of, dry_run=args.dry_run
+            )
+            if not args.dry_run:
+                session.commit()
+        print({"provider": "local-history", **result})
+        return 0
 
     # The CLI path deliberately passes NO session: the worker opens and owns
     # its own session_scope() cycle (the injectable seam stays unreachable

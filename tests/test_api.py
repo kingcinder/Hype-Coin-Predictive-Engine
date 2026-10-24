@@ -14,6 +14,7 @@ from radar.ignition import IgnitionRadar
 from scoring.engine import score_current_assets
 from storage import models
 from storage.database import get_session
+from storage.repository import insert_market_snapshot_once
 from tests.conftest import seed_market_asset
 
 # API auth contract (H4): every endpoint requires
@@ -194,6 +195,47 @@ def test_confidence_calibration_status_reports_active_fallback(session) -> None:
         )
         assert component["state"] == "yellow"
         assert "fallback active" in component["message"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_densify_labels_endpoint_ignores_future_observed_price(session) -> None:
+    asset = seed_market_asset(session, symbol="DENSEAPI")
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    decision_ts = datetime(2026, 5, 4, 12, 0, tzinfo=UTC)
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=datetime(2026, 5, 2, 8, 0),
+        observed_at=datetime(2026, 5, 5, 12, 0),
+        price_usd=3.0,
+        volume_usd=1_000,
+    )
+    session.commit()
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        response = TestClient(app, headers=_AUTH_HEADERS).post(
+            "/data/densify-labels",
+            params={"decision_ts": decision_ts.isoformat()},
+        )
+        assert response.status_code == 200
+        progress = TestClient(app, headers=_AUTH_HEADERS).get("/data/labels/progress")
+        assert progress.status_code == 200
+        assert progress.json()["forecast_status"] == "Forecasting not live: 0/30 labels"
+        ignition_labels = session.scalars(
+            select(models.Label).where(
+                models.Label.asset_id == asset.id,
+                models.Label.label_type == "ignition",
+            )
+        ).all()
+        assert ignition_labels
+        assert all(label.label_value == "0" for label in ignition_labels)
     finally:
         app.dependency_overrides.clear()
 

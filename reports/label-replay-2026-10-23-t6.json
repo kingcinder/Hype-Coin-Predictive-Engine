@@ -1,0 +1,25 @@
+{
+  "generated_at_utc": "2026-10-24T01:14:06.932885Z",
+  "database": "serpent.db",
+  "replay_mode": "offline",
+  "as_of": "2026-10-24T01:14:06Z",
+  "forecast_min_samples": 30,
+  "labels_before": 522,
+  "labels_after": 522,
+  "forecast_rows_before": 375,
+  "forecast_rows_after": 375,
+  "usable_forecast_samples": 35,
+  "forecast_engine_sample_count": 35,
+  "replay": {
+    "decision_points": 0,
+    "ignition_created": 0,
+    "collapse_created": 0,
+    "labels_created": 0,
+    "missing_entry": 0,
+    "incomplete_forward_window": 0,
+    "dry_run": false
+  },
+  "status": "no_eligible_point_in_time_feature_decisions",
+  "forecast_rows_already_persisted": true,
+  "note": "No feature row in the current database was observed by its historical decision time; the replay correctly added no labels."
+}

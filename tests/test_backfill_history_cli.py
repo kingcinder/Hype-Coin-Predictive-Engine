@@ -12,8 +12,8 @@ off the live /search endpoint.
 The test seeds a tradable pair + coingecko source + raw evidence carrying a
 ``coingecko_id``, drives the real ``__main__`` via a subprocess bound to the
 override DB + mock URL, and asserts the committed ``market_snapshots`` rows:
-exact count (the mock serves a fixed set of daily closes) and point-in-time
-correctness (``observed_at == ts`` for every row).
+exact count (the mock serves a fixed set of daily closes) and honest acquisition
+time (`observed_at` is the backfill retrieval time, not the historical price time).
 """
 
 from __future__ import annotations
@@ -190,13 +190,14 @@ def test_backfill_cli_commits_market_snapshots_via_real_main(
     SERPENT_DB_PATH DB — closing the backfill write path end-to-end.
 
     Sanity: the seeded fleet starts with zero snapshots, so any rows after the
-    run are provably the backfill's commit, and point-in-time correctness
-    (observed_at == ts) must hold for every one of them.
+    run are provably the backfill's commit. Historical price time and actual
+    retrieval time must remain separate; the latter cannot be backdated.
     """
     db_path = tmp_path / "backfill.db"
     pair_id, source_id, _ = _seed_file_db(db_path)
     assert _snapshot_rows(db_path, pair_id, source_id) == []  # clean slate
 
+    retrieved_before = datetime.now(UTC)
     result = _run_cli(db_path, mock_coingecko, "--days", str(MOCK_DAYS), "--provider", "coingecko")
 
     assert result.returncode == 0, result.stderr
@@ -215,4 +216,9 @@ def test_backfill_cli_commits_market_snapshots_via_real_main(
     rows = _snapshot_rows(db_path, pair_id, source_id)
     assert len(rows) == MOCK_DAYS  # exactly the mock's daily closes were committed
     for ts, observed_at in rows:
-        assert observed_at == ts, "backfilled snapshots must be point-in-time correct"
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        assert observed_at >= retrieved_before - timedelta(seconds=2)
+        assert observed_at > ts, "retrieval time must not be backdated to historical price time"

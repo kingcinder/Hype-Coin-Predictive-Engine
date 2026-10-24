@@ -196,6 +196,34 @@ def test_backfill_main_cli_path_uses_own_cycle(
     assert "'dry_run': True" in out, out
 
 
+def test_backfill_main_replay_mode_is_offline_and_uses_as_of(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Replay mode bypasses providers and uses the caller-owned as-of cutoff."""
+    import scripts.backfill_history as bh
+
+    target, _engine = _mem_session()
+    scope = TrackingScope(target)
+    monkeypatch.setattr("scripts.backfill_history.session_scope", lambda: scope)
+    seen = {}
+
+    def fake_replay(session, *, decision_ts, dry_run):
+        seen.update(session=session, decision_ts=decision_ts, dry_run=dry_run)
+        return {"labels_created": 4, "dry_run": dry_run}
+
+    monkeypatch.setattr("data_lake.labels.replay_historical_labels", fake_replay)
+
+    rc = bh.main(["--replay-labels", "--as-of", "2026-05-04T00:00:00Z", "--dry-run"])
+
+    assert rc == 0
+    assert scope.entered == 1
+    assert scope.closed is True
+    assert seen["session"] is target
+    assert seen["decision_ts"] == datetime(2026, 5, 4, tzinfo=UTC)
+    assert seen["dry_run"] is True
+    assert "local-history" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # seed_fixtures.py
 # ---------------------------------------------------------------------------

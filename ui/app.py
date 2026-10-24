@@ -1000,6 +1000,14 @@ def catalyst_timetable() -> None:
 
 def forecast_view() -> None:
     st.header("Forecast")
+    progress = api_get("/data/labels/progress")
+    if progress:
+        status = progress.get("forecast_status")
+        if status:
+            if progress.get("ready_to_train"):
+                st.success(status)
+            else:
+                st.warning(status)
     data = api_get("/forecasts", params={"limit": 200})
     if not data:
         st.info(
@@ -1870,6 +1878,8 @@ def data_lake_dashboard() -> None:
                 f"{progress.get('min_samples_required', 30)} labels"
             ),
         )
+        if progress.get("forecast_status"):
+            st.warning(progress["forecast_status"])
 
         if st.button("⚡ Densify Labels Now", width="content"):
             with st.spinner("Densifying labels from market snapshots..."):
