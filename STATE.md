@@ -22,9 +22,9 @@ or `STATE.md` existed before 2026-09-09.
 - `assess_risk()` at `risk_engine/rules.py:164` `[verified 2026-10-23]`.
 - `_BAND_CONFIDENCE` hardcoded lookup at `scoring/formulas.py:42` `[verified 2026-10-23]`.
 - `risk_engine/calibrator.py` exists and adapts risk thresholds; it does not replace `_BAND_CONFIDENCE` with a time-split confidence calibrator `[verified 2026-10-23]`.
-- LLM pinned to Ollama `qwen2.5:0.5b`: `llm/engine.py:28` (`OLLAMA_DEFAULT_MODEL`), `:100`
-  (fallback), `common/config.py:452`; same pin in `docker-compose.yml`, `packaging/install.sh`,
-  `INSTALL.md` `[verified 2026-10-23]`.
+- LLM provider is configurable between Ollama and OpenAI-compatible APIs; the
+  `LLM_OLLAMA_URL` compatibility alias remains, and the model default is no
+  longer pinned to a 0.5B model `[verified 2026-10-23]`.
 - Explorer crawler is Etherscan-only (chain IDs 1 / 8453, `getcontractcreation` at
   `crawlers/sources/explorer.py:40-46`); zero matches in `crawlers/` for mint/freeze authority
   — Solana on-chain safety checks do not exist `[verified]`.
@@ -64,7 +64,7 @@ checkout state and is no longer current. Work for this task is on
 | E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | implemented; fallback active | Versioned isotonic persistence, runtime application, API/health status, and `RISK_CONFIDENCE_CALIBRATION_MIN_SAMPLES=100` are implemented; current 0-row train split prevents activation `[verified 2026-10-23]` |
 | E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | done (2026-10-23) | Offline replay is available; `/data/labels/progress` and Forecast/Data Lake UI show usable samples against the unchanged 30 gate. Live DB has 35 usable samples and 375 forecasts; this replay added 0 due no eligible historical feature/entry timestamps `[verified 2026-10-23]` |
 | E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | done (2026-09-14; re-audited 2026-10-23) | `storage/write_queue.py`, `storage/repository.py`, `engine/run.py`; behavior coverage in `tests/test_write_queue.py` `[verified 2026-10-23]` |
-| E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (T7) | `llm/engine.py` still calls the Ollama API; provider abstraction not present `[verified 2026-10-23]` |
+| E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | done (2026-10-23) | `llm/engine.py` supports Ollama and OpenAI-compatible chat completions, timeout/retries/circuit breaker, and validated JSON; `tests/test_llm.py` uses respx fixtures `[verified 2026-10-23]` |
 | E7 | API authentication and network exposure (loopback defaults; explicit authenticated LAN binds) | done (2026-10-23) | Bearer middleware in `api/main.py:97-166`; `common/network.py` validates API/UI bind settings; GUI API/SSE clients send the configured token; tests cover CORS, startup rejection, defaults, and SSE `[verified 2026-10-23]` |
 | E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
 
@@ -325,3 +325,25 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 800 tests, 0 failures, 11 skipped; Ruff passed; mypy
   passed (53 files); broken-import scan passed (244 files); declared-deps scan
   passed (28 roots, 244 files).
+
+### 2026-10-23 — T7: LLM provider abstraction (done)
+
+- Added `LLM_PROVIDER`, `LLM_BASE_URL`, optional `LLM_API_KEY`, `LLM_MODEL`, and
+  `LLM_TIMEOUT_SECONDS`, plus bounded retry/circuit-breaker settings. The
+  deprecated `LLM_OLLAMA_URL` alias remains effective when the base URL is not
+  set. `openai_compat` uses `/v1/chat/completions`, probes `/v1/models`, and
+  falls back to `/health` when the models route is unsupported.
+- Structured output uses a Pydantic schema; fenced JSON and trailing prose are
+  accepted. Invalid output returns empty narrative/risk and zero deltas, which
+  the scoring layer skips. Provider request timeouts and tenacity retries bound
+  each call; the existing watchdog now bounds the complete optional LLM batch
+  so scanning proceeds without its results on timeout.
+- Removed the implicit 0.5B model pin from runtime defaults, Compose, installer,
+  and install docs. Added `docs/llm-providers.md` with llama-server/OpenAI
+  compatible settings and Vulkan/RADV guidance.
+- Pre-task checks: full pytest suite passed (800 tests, 11 skipped); Ruff passed;
+  mypy passed (53 files); broken-import scan passed (244 files); declared-deps
+  scan passed (28 roots, 244 files).
+- Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
+  (53 files); broken-import scan passed (244 files); declared-deps scan passed
+  (28 roots, 244 files).

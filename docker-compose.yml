@@ -15,8 +15,12 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/serpent
       # Trained forecast models also persist in the data volume.
       MODEL_ARTIFACT_DIR: /app/data/models
-      # Ollama runs as its own container on the compose network.
-      LLM_OLLAMA_URL: http://ollama:11434
+      # Provider settings can point to a llama-server reachable by this container.
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-180}
     ports:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:8501:8501"
@@ -48,15 +52,13 @@ services:
       timeout: 10s
       start_period: 20s
       retries: 5
-    # Pull the default model on first boot so the engine finds it ready.
-    # (Downloads qwen2.5:0.5b once into the volume; override with
-    # OLLAMA_MODEL / MODEL env on the compose command if desired.)
+    # Pull the configured model on first boot so the engine finds it ready.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         ollama serve &
         sleep 3
-        ollama pull $${OLLAMA_MODEL:-qwen2.5:0.5b} || true
+        ollama pull $${LLM_MODEL:-qwen2.5:7b} || true
         wait
 
   # ── CI smoke-test dependencies (postgres/redis/minio for archive-parity) ──

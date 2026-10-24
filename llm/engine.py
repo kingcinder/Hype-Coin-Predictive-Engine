@@ -1,9 +1,7 @@
 """Local LLM engine for hype-coin prediction enhancement.
 
-Connects to a local Ollama instance to provide LLM-enhanced analysis of
-crypto tokens: narrative analysis, risk assessment, and prediction confidence
-boosting. Degrades gracefully when Ollama is unavailable — the engine never
-blocks on LLM availability.
+Supports Ollama and OpenAI-compatible local servers. Provider failures return
+neutral predictions so the LLM cannot disrupt rule-based scoring.
 """
 
 from __future__ import annotations
@@ -14,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from common.config import get_settings
 from common.http import build_httpx_client
@@ -26,9 +26,8 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 OLLAMA_DEFAULT_URL = "http://localhost:11434"
-OLLAMA_DEFAULT_MODEL = "qwen2.5:0.5b"
-REQUEST_TIMEOUT_SECONDS = 30.0
-MAX_RETRIES = 2
+OPENAI_COMPAT_DEFAULT_URL = "http://localhost:8080"
+DEFAULT_MODEL = "qwen2.5:7b"
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -63,6 +62,19 @@ class LLMHealth:
     error: str = ""
 
 
+class LLMResponse(BaseModel):
+    """Validated structured output accepted by the scoring layer."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    narrative: str = ""
+    risk_assessment: str = ""
+    confidence_delta: float = Field(default=0.0, allow_inf_nan=False)
+    hype_delta: float = Field(default=0.0, allow_inf_nan=False)
+    risk_delta: float = Field(default=0.0, allow_inf_nan=False)
+    key_factors: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -71,20 +83,30 @@ class LLMHealth:
 class LLMPredictionEngine:
     """Local LLM engine for hype-coin analysis.
 
-    Connects to Ollama and provides structured predictions for tokens.
-    All methods degrade gracefully — if Ollama is down or the model
+    Connects to the configured local provider and predicts for tokens.
+    All methods degrade gracefully — if the provider is down or the model
     fails to respond, the engine returns neutral/empty predictions
     without raising exceptions.
     """
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        # Wire through Settings so a containerized deployment can point the
-        # engine at an Ollama service (LLM_OLLAMA_URL) instead of localhost.
+        self._provider = self.settings.llm_provider
+        default_url = (
+            OPENAI_COMPAT_DEFAULT_URL if self._provider == "openai_compat" else OLLAMA_DEFAULT_URL
+        )
         self._base_url = (
-            getattr(self.settings, "llm_ollama_url", None) or OLLAMA_DEFAULT_URL
+            self.settings.llm_base_url
+            or (self.settings.llm_ollama_url if self._provider == "ollama" else default_url)
         ).rstrip("/")
-        self._model = getattr(self.settings, "llm_model", None) or OLLAMA_DEFAULT_MODEL
+        self._model = self.settings.llm_model or DEFAULT_MODEL
+        self._api_key = self.settings.llm_api_key
+        self._timeout_seconds = self.settings.llm_timeout_seconds
+        self._max_retries = self.settings.llm_max_retries
+        self._breaker_failures = self.settings.llm_circuit_breaker_failures
+        self._breaker_seconds = self.settings.llm_circuit_breaker_seconds
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
         self._health = LLMHealth()
         self._client: httpx.Client | None = None
         self._last_prompt_cache: dict[str, str] = {}
@@ -99,7 +121,8 @@ class LLMPredictionEngine:
             # (H26): a hostile proxy environment must never crash this.
             self._client = build_httpx_client(
                 base_url=self._base_url,
-                timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
+                timeout=httpx.Timeout(self._timeout_seconds),
+                headers={"Authorization": f"Bearer {self._api_key}"} if self._api_key else None,
             )
         return self._client
 
@@ -110,15 +133,28 @@ class LLMPredictionEngine:
         self._client = None
 
     def check_health(self) -> LLMHealth:
-        """Probe Ollama availability and model readiness."""
+        """Probe the configured provider and check model availability when listed."""
         try:
             client = self._get_client()
-            resp = client.get("/api/tags")
-            resp.raise_for_status()
-            models = resp.json().get("models", [])
-            available_names = {m.get("name", "") for m in models}
+            if self._provider == "ollama":
+                resp = self._retry_request(client.get, "/api/tags")
+                models = resp.json().get("models", [])
+                available_names = {m.get("name", "") for m in models if isinstance(m, dict)}
+            else:
+                resp = self._retry_request(client.get, "/v1/models")
+                if resp.status_code in {404, 405}:
+                    resp = self._retry_request(client.get, "/health")
+                if resp.is_error:
+                    resp.raise_for_status()
+                payload = resp.json() if resp.content else {}
+                models = payload.get("data", []) if isinstance(payload, dict) else []
+                available_names = {item.get("id", "") for item in models if isinstance(item, dict)}
+                if not available_names and resp.status_code < 400:
+                    available_names = {self._model}
+            if resp.is_error:
+                resp.raise_for_status()
             model_ready = any(
-                self._model in name or name.startswith(self._model.split(":")[0])
+                self._model == name or name.startswith(self._model.split(":")[0])
                 for name in available_names
             )
             self._health = LLMHealth(
@@ -172,7 +208,7 @@ class LLMPredictionEngine:
                 rule_confidence=rule_confidence,
                 context=context,
             )
-            raw = self._call_ollama(prompt)
+            raw = self._call_provider(prompt)
             result = self._parse_response(asset_id, symbol, raw)
             result.latency_ms = (time.monotonic() - t0) * 1000
             result.llm_model = self._model
@@ -246,24 +282,13 @@ class LLMPredictionEngine:
                 f'{{"narrative": "2-3 sentences", '
                 f'"risk_assessment": "2-3 sentences"}}'
             )
-            raw = self._call_ollama(prompt, max_tokens=300)
-            try:
-                text = raw.strip()
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                data = json.loads(text)
-                narrative = data.get("narrative", "")
-                risk = data.get("risk_assessment", "")
-                # Filter out garbage LLM output (too short or looks like an error)
-                if len(narrative) < 20:
-                    narrative = ""
-                if len(risk) < 20:
-                    risk = ""
-                return narrative, risk
-            except (json.JSONDecodeError, IndexError):
+            raw = self._call_provider(prompt, max_tokens=300)
+            data = _parse_structured_output(raw)
+            if data is None:
                 return "", ""
+            narrative = data.narrative
+            risk = data.risk_assessment
+            return (narrative if len(narrative) >= 20 else "", risk if len(risk) >= 20 else "")
         except Exception:  # noqa: BLE001
             return "", ""
 
@@ -324,56 +349,102 @@ class LLMPredictionEngine:
         )
 
     def _call_ollama(self, prompt: str, max_tokens: int = 512) -> str:
-        """Call Ollama API and return the response text."""
+        """Compatibility wrapper retained for callers of the former method."""
+        return self._call_provider(prompt, max_tokens)
+
+    def _call_provider(self, prompt: str, max_tokens: int = 512) -> str:
+        """Call the selected provider and return its assistant response."""
+        if time.monotonic() < self._circuit_open_until:
+            raise RuntimeError("LLM circuit breaker is open")
         health = self._health
         if not health.connected and (time.time() - health.last_check) < 30:
-            return ""
+            self._record_failure()
+            raise httpx.ConnectError("LLM provider is unavailable")
         if not health.connected:
             self.check_health()
             if not self._health.connected:
-                return ""
+                self._record_failure()
+                raise httpx.ConnectError("LLM provider is unavailable")
 
         client = self._get_client()
-        payload = {
-            "model": self._model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "num_predict": max_tokens,
-                "temperature": 0.3,
-                "top_p": 0.9,
-            },
-        }
-        resp = client.post("/api/generate", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("response", "")
+        try:
+            if self._provider == "ollama":
+                payload = {
+                    "model": self._model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "num_predict": max_tokens,
+                        "temperature": 0.3,
+                        "top_p": 0.9,
+                    },
+                }
+                resp = self._retry_request(client.post, "/api/generate", json=payload)
+                resp.raise_for_status()
+                answer = resp.json().get("response", "")
+            else:
+                payload = {
+                    "model": self._model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                }
+                resp = self._retry_request(client.post, "/v1/chat/completions", json=payload)
+                resp.raise_for_status()
+                message = resp.json()["choices"][0]["message"]["content"]
+                if isinstance(message, list):
+                    answer = "".join(
+                        part.get("text", "") for part in message if isinstance(part, dict)
+                    )
+                else:
+                    answer = message
+            if not isinstance(answer, str):
+                raise ValueError("LLM response content is not text")
+            self._failure_count = 0
+            self._circuit_open_until = 0.0
+            return answer
+        except Exception:
+            self._record_failure()
+            raise
+
+    def _retry_request(self, method: Any, path: str, **kwargs: Any) -> httpx.Response:
+        retryer = Retrying(
+            retry=retry_if_exception(_is_retryable),
+            wait=wait_exponential_jitter(initial=0.1, max=0.5),
+            stop=stop_after_attempt(self._max_retries + 1),
+            reraise=True,
+        )
+
+        def request() -> httpx.Response:
+            response = method(path, **kwargs)
+            if response.status_code >= 500:
+                response.raise_for_status()
+            return response
+
+        return retryer(request)
+
+    def _record_failure(self) -> None:
+        self._failure_count += 1
+        if self._failure_count >= self._breaker_failures:
+            self._circuit_open_until = time.monotonic() + self._breaker_seconds
 
     def _parse_response(self, asset_id: int, symbol: str, raw: str) -> LLMPrediction:
         """Parse the LLM response into a structured prediction."""
-        # Try to extract JSON from the response
-        text = raw.strip()
-        # Handle markdown code blocks
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-
-        try:
-            data = json.loads(text)
-        except (json.JSONDecodeError, IndexError):
-            # Fallback: try to extract individual values
-            return self._fallback_parse(asset_id, symbol, text)
+        data = _parse_structured_output(raw)
+        if data is None:
+            return self._fallback_parse(asset_id, symbol, raw)
 
         return LLMPrediction(
             asset_id=asset_id,
             symbol=symbol,
-            narrative_summary=data.get("narrative", ""),
-            risk_assessment=data.get("risk_assessment", ""),
-            confidence_delta=_clamp_delta(data.get("confidence_delta", 0.0)),
-            hype_delta=_clamp_delta(data.get("hype_delta", 0.0)),
-            risk_delta=_clamp_delta(data.get("risk_delta", 0.0)),
-            key_factors=data.get("key_factors", []),
+            narrative_summary=data.narrative,
+            risk_assessment=data.risk_assessment,
+            confidence_delta=_clamp_delta(data.confidence_delta),
+            hype_delta=_clamp_delta(data.hype_delta),
+            risk_delta=_clamp_delta(data.risk_delta),
+            key_factors=data.key_factors,
         )
 
     def _fallback_parse(self, asset_id: int, symbol: str, text: str) -> LLMPrediction:
@@ -405,6 +476,28 @@ def _clamp_delta(value: float, low: float = -5.0, high: float = 5.0) -> float:
         return max(low, min(high, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _parse_structured_output(raw: str) -> LLMResponse | None:
+    """Find and validate the first JSON object, allowing fences and trailing prose."""
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(raw):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(raw[index:])
+            if not isinstance(parsed, dict):
+                continue
+            return LLMResponse.model_validate(parsed)
+        except (json.JSONDecodeError, ValidationError):
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------

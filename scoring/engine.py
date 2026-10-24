@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace as _replace
 from datetime import datetime
+from typing import cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -170,12 +171,13 @@ class ScoringEngine:
             )
             result_by_asset[asset_id] = result
             scores.append(score)
-        # ── LLM batch layer: single Ollama call for all scored assets ──────
-        # Collects all tokens needing LLM prediction, calls batch_predict()
-        # once, then applies deltas in a second pass over scores.
+        # ── Optional LLM batch layer, isolated by the phase watchdog ───────
+        # Slow local generation must not hold the scan loop; timed-out daemon
+        # work has bounded HTTP requests and is skipped until it unwinds.
         if self.settings.llm_enabled and scores:
             try:
-                from llm.engine import llm_engine
+                from llm.engine import LLMPrediction, llm_engine
+                from ops.watchdog import run_stage_with_timeout
 
                 llm_tokens = []
                 score_by_asset: dict[int, models.Score] = {s.asset_id: s for s in scores}
@@ -199,10 +201,32 @@ class ScoringEngine:
                             "rule_confidence": s.confidence if s else 50.0,
                         }
                     )
-                llm_results = llm_engine.batch_predict(
-                    llm_tokens,
-                    max_tokens=self.settings.llm_batch_size,
+
+                def _predict_llm_batch() -> dict[str, object]:
+                    return {
+                        "predictions": llm_engine.batch_predict(
+                            llm_tokens,
+                            max_tokens=self.settings.llm_batch_size,
+                        )
+                    }
+
+                llm_stage = run_stage_with_timeout(
+                    _predict_llm_batch,
+                    timeout_seconds=self.settings.llm_timeout_seconds,
+                    stage="llm_inference",
                 )
+                if llm_stage.timed_out or llm_stage.skipped:
+                    log.warning(
+                        "llm_phase_unavailable",
+                        timed_out=llm_stage.timed_out,
+                        skipped=llm_stage.skipped,
+                    )
+                    llm_results: list[LLMPrediction] = []
+                else:
+                    llm_results = cast(
+                        list[LLMPrediction],
+                        (llm_stage.result or {}).get("predictions", []),
+                    )
                 for llm_pred in llm_results:
                     s = score_by_asset.get(llm_pred.asset_id)
                     if s is None or not (llm_pred.narrative_summary or llm_pred.risk_assessment):

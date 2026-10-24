@@ -178,9 +178,10 @@ forecast_train_frequency_hours=24
 risk_outcome_window_hours=48
 risk_calibration_frequency_hours=24
 
-# LLM integration (set llm_enabled=false if Ollama not installed)
+# LLM integration (set llm_enabled=true and configure a provider to enable)
 llm_enabled=false
-llm_model=qwen2.5:0.5b
+llm_provider=ollama
+llm_model=qwen2.5:7b
 
 # Push notifications (ntfy.sh — free, no account needed)
 # ntfy_enabled=true

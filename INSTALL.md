@@ -125,8 +125,11 @@ sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 - **GUI:** http://localhost:8501 · **API health:** http://localhost:8000/health
-- **Ollama:** pulls `qwen2.5:0.5b` on first boot (override with `OLLAMA_MODEL`);
-  models persist in the `ollama-models` volume.
+- **Local LLM:** Compose defaults to Ollama and pulls `qwen2.5:7b` on first boot;
+  models persist in the `ollama-models` volume. Set `LLM_PROVIDER=openai_compat`,
+  `LLM_BASE_URL=http://<llama-server-host>:8080`, and `LLM_MODEL` to the alias
+  configured with llama-server `--alias` to use llama.cpp instead. When Compose
+  runs in a container, the llama-server URL must be reachable from that container.
 - **Backups:** the sidecar snapshots SQLite + the Parquet archive daily into the
   `serpent-backups` volume with 7-day retention. Restore with
   `docker compose run --rm backup python -c "import shutil; shutil.copy('/app/backups/<snapshot>/serpent.db', '/app/data/serpent.db')"`
@@ -146,7 +149,19 @@ Key settings:
 - `env=local-single` — zero-container mode (SQLite, no Docker)
 - `scan_interval_seconds=300` — how often the engine scans
 - `nightcrawler_enabled=true` — enable data crawlers
-- `llm_enabled=false` — set to `true` if Ollama is running locally
+- `llm_enabled=false` — disable the optional LLM ensemble layer; configure a provider to enable it
+
+For `llama-server`, configure `LLM_PROVIDER=openai_compat`, `LLM_BASE_URL` to
+the server origin (without `/v1`), `LLM_MODEL` to its `--alias`, and optionally
+`LLM_API_KEY` if the server requires a bearer token. The defaults allow up to
+180 seconds per request and for the full LLM scoring batch; the batch watchdog
+continues scoring without LLM results when that deadline expires. The client
+allows two retries for timeouts/transport/5xx errors and opens a circuit breaker
+after three consecutive failed requests. Responses must contain
+a valid JSON object; invalid output contributes no LLM score. For an RX 5700 XT
+using Vulkan/RADV, start llama-server with the Vulkan backend and a quantized
+7B or 8B instruct model that fits available VRAM; verify the model alias and
+server health locally before enabling the ensemble layer.
 
 ### Zero-container SQLite: single writer, enforced at boot
 

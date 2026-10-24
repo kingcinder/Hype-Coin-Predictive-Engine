@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -473,14 +474,21 @@ class Settings(BaseSettings):
     risk_calibration_min_samples: int = 10
     risk_confidence_calibration_min_samples: int = Field(default=100, ge=30)
 
-    # local LLM integration (Ollama)
+    # Local LLM integration. ``llm_ollama_url`` remains as a deprecated
+    # compatibility alias when ``LLM_BASE_URL`` is unset.
     llm_enabled: bool = True
+    llm_provider: Literal["ollama", "openai_compat"] = "ollama"
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
     llm_ollama_url: str = "http://localhost:11434"
-    llm_model: str = "qwen2.5:0.5b"
+    llm_model: str = "qwen2.5:7b"
     llm_weight: float = 0.10  # ensemble weight for LLM layer
     llm_max_tokens_per_call: int = 512
     llm_batch_size: int = 10  # max tokens per batch predict call
-    llm_timeout_seconds: float = 30.0
+    llm_timeout_seconds: float = Field(default=180.0, gt=0, le=900)
+    llm_max_retries: int = Field(default=2, ge=0, le=5)
+    llm_circuit_breaker_failures: int = Field(default=3, ge=1, le=20)
+    llm_circuit_breaker_seconds: float = Field(default=60.0, gt=0, le=3600)
     llm_predict_cache_ttl_seconds: float = 3600.0  # in-process TTL for on-demand /llm/predict
 
     # Adaptive LLM weight calibration: adjusts llm_weight dynamically based
