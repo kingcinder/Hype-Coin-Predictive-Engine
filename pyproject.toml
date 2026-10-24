@@ -87,8 +87,8 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-# Keep the bar honest: a PR that drops overall coverage below 65% fails CI.
-fail_under = 65
+# Measured full-suite coverage is 77.71%; keep the floor two points below it.
+fail_under = 75.7
 skip_covered = false
 # Exclude one-liner exception shims from coverage the same way ruff is told
 # about them.

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import select
 
 from scoring.llm_calibration import CalibrationSnapshot, LLMCalibrator
@@ -174,7 +177,7 @@ class TestLLMCalibrationRegression:
     def test_prune_actually_deletes_stale_records(self, session) -> None:
         """M35: pruning must execute a DELETE — stale calibration records are
         removed from the table, not merely selected."""
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
 
         from sqlalchemy import func
 
@@ -225,3 +228,207 @@ class TestLLMCalibrationRegression:
         remaining = session.scalars(select(models.LLMCalibrationRecord)).all()
         assert len(remaining) == 1
         assert remaining[0].id == fresh.id
+
+
+def test_calibration_evaluates_prediction_and_records_outcome(session, monkeypatch) -> None:
+    from datetime import timedelta
+
+    from common.time import utc_now
+
+    asset = seed_market_asset(session)
+    prediction = models.LLMCalibrationRecord(
+        asset_id=asset.id,
+        prediction_ts=utc_now() - timedelta(hours=2),
+        model_name="test",
+        hype_delta=1.0,
+        risk_delta=5.0,
+        confidence_delta=0.0,
+        llm_weight_at_time=0.1,
+        base_hype=40.0,
+        base_risk=20.0,
+        base_confidence=70.0,
+        final_hype=41.0,
+        final_risk=90.0,
+        final_confidence=70.0,
+    )
+    session.add(prediction)
+    session.flush()
+    monkeypatch.setattr(
+        "scoring.llm_calibration.get_settings",
+        lambda: SimpleNamespace(llm_calibration_enabled=True, llm_calibration_eval_hours=1),
+    )
+    monkeypatch.setattr(
+        LLMCalibrator,
+        "_find_outcome",
+        lambda _self, _session, _record: SimpleNamespace(
+            collapsed=True, price_change_pct=-85.0, risk_band="BLACK"
+        ),
+    )
+
+    evaluated = LLMCalibrator().evaluate_predictions(session)
+
+    assert evaluated == 1
+    assert prediction.evaluated_at is not None
+    assert prediction.actual_risk_band == "BLACK"
+    assert prediction.price_change_pct == -85.0
+    assert prediction.collapsed is True
+    assert prediction.llm_improved is True
+    assert prediction.evaluation_details["actual_collapsed"] is True
+
+
+@pytest.mark.parametrize(
+    ("score", "expected"),
+    [(0.0, "GREEN"), (20.0, "YELLOW"), (40.0, "ORANGE"), (60.0, "RED"), (80.0, "BLACK")],
+)
+def test_risk_band_boundaries_match_scoring_contract(score: float, expected: str) -> None:
+    assert LLMCalibrator._score_to_band(score) == expected
+
+
+def test_calibration_caps_weight_and_persists_improvement_summary(session, monkeypatch) -> None:
+    from common.time import utc_now
+
+    asset = seed_market_asset(session)
+    settings = SimpleNamespace(
+        llm_calibration_enabled=True,
+        llm_calibration_eval_hours=24,
+        llm_calibration_window_hours=24,
+        llm_calibration_min_samples=2,
+        llm_calibration_ceiling=0.5,
+        llm_calibration_floor=0.05,
+        llm_calibration_step=0.1,
+        llm_weight=0.1,
+    )
+    monkeypatch.setattr("scoring.llm_calibration.get_settings", lambda: settings)
+    state = models.LLMCalibrationState(current_weight=0.45, previous_weight=0.4)
+    session.add(state)
+    session.add_all(
+        [
+            models.LLMCalibrationRecord(
+                asset_id=asset.id,
+                prediction_ts=utc_now(),
+                model_name="test",
+                hype_delta=0.0,
+                risk_delta=0.0,
+                confidence_delta=0.0,
+                llm_weight_at_time=0.4,
+                base_hype=50.0,
+                base_risk=50.0,
+                base_confidence=50.0,
+                final_hype=50.0,
+                final_risk=50.0,
+                final_confidence=50.0,
+                evaluated_at=utc_now(),
+                llm_improved=True,
+            )
+            for _ in range(2)
+        ]
+    )
+    session.flush()
+
+    weight = LLMCalibrator().calibrate(session)
+
+    assert weight == 0.5
+    assert state.previous_weight == 0.45
+    assert state.total_predictions == 2
+    assert state.total_improved == 2
+    assert state.total_degraded == 0
+    assert state.weight_history[-1]["direction"] == "increased"
+    assert state.weight_history[-1]["new_weight"] == 0.5
+
+
+def test_calibration_decreases_to_floor_and_leaves_ties_unchanged(session, monkeypatch) -> None:
+    from common.time import utc_now
+
+    asset = seed_market_asset(session)
+    settings = SimpleNamespace(
+        llm_calibration_enabled=True,
+        llm_calibration_eval_hours=24,
+        llm_calibration_window_hours=24,
+        llm_calibration_min_samples=2,
+        llm_calibration_ceiling=0.5,
+        llm_calibration_floor=0.05,
+        llm_calibration_step=0.1,
+        llm_weight=0.1,
+    )
+    monkeypatch.setattr("scoring.llm_calibration.get_settings", lambda: settings)
+    state = models.LLMCalibrationState(current_weight=0.05, previous_weight=0.1)
+    session.add(state)
+    session.add_all(
+        [
+            models.LLMCalibrationRecord(
+                asset_id=asset.id,
+                prediction_ts=utc_now(),
+                model_name="test",
+                hype_delta=0.0,
+                risk_delta=0.0,
+                confidence_delta=0.0,
+                llm_weight_at_time=0.05,
+                base_hype=50.0,
+                base_risk=50.0,
+                base_confidence=50.0,
+                final_hype=50.0,
+                final_risk=50.0,
+                final_confidence=50.0,
+                evaluated_at=utc_now(),
+                llm_improved=False,
+            )
+            for _ in range(2)
+        ]
+    )
+    session.flush()
+
+    session.commit()
+    session.expunge_all()
+    assert LLMCalibrator().calibrate(session) == 0.05
+    refreshed = session.scalar(select(models.LLMCalibrationState).limit(1))
+    assert refreshed is not None
+    assert refreshed.weight_history[-1]["direction"] == "decreased"
+
+
+def test_balanced_improvement_rate_leaves_calibrated_weight_unchanged(session, monkeypatch) -> None:
+    from common.time import utc_now
+
+    asset = seed_market_asset(session)
+    settings = SimpleNamespace(
+        llm_calibration_enabled=True,
+        llm_calibration_eval_hours=24,
+        llm_calibration_window_hours=24,
+        llm_calibration_min_samples=2,
+        llm_calibration_ceiling=0.5,
+        llm_calibration_floor=0.05,
+        llm_calibration_step=0.1,
+        llm_weight=0.1,
+    )
+    monkeypatch.setattr("scoring.llm_calibration.get_settings", lambda: settings)
+    state = models.LLMCalibrationState(current_weight=0.2, previous_weight=0.2)
+    session.add(state)
+    session.add_all(
+        [
+            models.LLMCalibrationRecord(
+                asset_id=asset.id,
+                prediction_ts=utc_now(),
+                model_name="test",
+                hype_delta=0.0,
+                risk_delta=0.0,
+                confidence_delta=0.0,
+                llm_weight_at_time=0.2,
+                base_hype=50.0,
+                base_risk=50.0,
+                base_confidence=50.0,
+                final_hype=50.0,
+                final_risk=50.0,
+                final_confidence=50.0,
+                evaluated_at=utc_now(),
+                llm_improved=improved,
+            )
+            for improved in (True, False)
+        ]
+    )
+    session.flush()
+    session.commit()
+    session.expunge_all()
+
+    assert LLMCalibrator().calibrate(session) == 0.2
+    refreshed = session.scalar(select(models.LLMCalibrationState).limit(1))
+    assert refreshed is not None
+    assert refreshed.weight_history[-1]["direction"] == "unchanged"

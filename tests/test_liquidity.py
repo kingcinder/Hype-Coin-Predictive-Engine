@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from sqlalchemy import select
 
@@ -113,3 +114,96 @@ def test_transfer_mint_is_not_mistaken_for_lp_burn(session) -> None:
     )
     assert parsed is None
     assert asset.id == pool.base_asset_id
+
+
+def test_watcher_disabled_by_setting_returns_zero_counts(session, monkeypatch) -> None:
+    import radar.liquidity as liquidity_module
+
+    monkeypatch.setattr(
+        liquidity_module,
+        "get_settings",
+        lambda: SimpleNamespace(liquidity_removal_watcher_enabled=False),
+    )
+
+    counts = LiquidityRemovalWatcher().scan(session, decision_ts=NOW)
+
+    assert counts == {"events": 0, "lp_burns": 0, "withdrawals": 0, "errors": 0}
+    assert session.scalars(select(models.LiquidityRemovalEvent)).all() == []
+
+
+def test_watcher_reports_rpc_failure_without_aborting_scan(session, monkeypatch) -> None:
+    from storage.models import SystemHealth
+
+    _asset, _pool, _source = _seed_base_pool(session)
+    watcher = LiquidityRemovalWatcher()
+
+    def rpc_failure(_chain: str, _addresses: list[str]) -> list[dict]:
+        raise TimeoutError("RPC deadline exceeded")
+
+    monkeypatch.setattr(watcher, "_logs_for_pools", rpc_failure)
+
+    counts = watcher.scan(session, decision_ts=NOW)
+
+    assert counts == {"events": 0, "lp_burns": 0, "withdrawals": 0, "errors": 1}
+    health = {row.component: row for row in session.scalars(select(SystemHealth)).all()}
+    assert health["source:lp_removal:base"].state == "red"
+    assert "RPC deadline exceeded" in health["source:lp_removal:base"].message
+    assert health["lp_removal_watcher"].state == "yellow"
+    assert health["lp_removal_watcher"].error_count == 1
+
+
+def test_watcher_with_no_source_or_pools_is_a_successful_empty_scan(session) -> None:
+    watcher = LiquidityRemovalWatcher()
+
+    assert watcher.scan(session, decision_ts=NOW)["events"] == 0
+
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    get_or_create_source(
+        session,
+        name="evm_rpc",
+        source_type="chain_rpc",
+        tier="chain",
+        base_url="https://base.example.com",
+    )
+    session.flush()
+
+    counts = watcher.scan(session, decision_ts=NOW)
+
+    assert counts == {"events": 0, "lp_burns": 0, "withdrawals": 0, "errors": 0}
+    assert chain.slug == "base"
+
+
+def test_parser_rejects_malformed_or_unrelated_logs(session) -> None:
+    _asset, pool, _source = _seed_base_pool(session)
+    pools = {pool.address.lower(): pool}
+    malformed_logs = [
+        {"address": pool.address, "topics": [BURN_TOPIC]},
+        {
+            "address": pool.address,
+            "transactionHash": "0xmissing-block",
+            "blockNumber": "not-hex",
+            "logIndex": "0x1",
+            "topics": [BURN_TOPIC],
+        },
+        {
+            "address": pool.address,
+            "transactionHash": "0xunknown-topic",
+            "blockNumber": "0x1",
+            "logIndex": "0x1",
+            "topics": ["0xdeadbeef"],
+        },
+        {
+            "address": "0xunknown",
+            "transactionHash": "0xunknown-pool",
+            "blockNumber": "0x1",
+            "logIndex": "0x1",
+            "topics": [BURN_TOPIC],
+        },
+    ]
+
+    assert [LiquidityRemovalWatcher._parse_log(item, pools) for item in malformed_logs] == [
+        None,
+        None,
+        None,
+        None,
+    ]

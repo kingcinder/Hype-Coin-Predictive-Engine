@@ -67,6 +67,7 @@ checkout state and is no longer current. Work for this task is on
 | E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | done (2026-10-23) | `llm/engine.py` supports Ollama and OpenAI-compatible chat completions, timeout/retries/circuit breaker, and validated JSON; `tests/test_llm.py` uses respx fixtures `[verified 2026-10-23]` |
 | E7 | API authentication and network exposure (loopback defaults; explicit authenticated LAN binds) | done (2026-10-23) | Bearer middleware in `api/main.py:97-166`; `common/network.py` validates API/UI bind settings; GUI API/SSE clients send the configured token; tests cover CORS, startup rejection, defaults, and SSE `[verified 2026-10-23]` |
 | E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
+| E9 | Close operational test-coverage gaps | done (2026-10-23) | Behavior tests bring watchdog to 93%, LLM calibration to 96%, liquidity watcher to 81%, validation CLI to 92%, reference seeding to 89%, and `validation.__main__` to 100%; full suite measures 77.71%, with `fail_under=75.7` `[verified 2026-10-23]` |
 
 ### N — Whole new modules
 
@@ -347,6 +348,28 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
   (53 files); broken-import scan passed (244 files); declared-deps scan passed
   (28 roots, 244 files).
+
+### 2026-10-23 — T10: Operational coverage gaps (done)
+
+- Added behavior coverage for watchdog timeout-hook isolation, recovery, alert
+  caps, disk states, scan counters, and persisted health; LLM calibration
+  evaluation, band boundaries, balanced rates, and weight limits; liquidity
+  watcher short circuits, malformed events, RPC failure accounting, and
+  idempotency; validation CLI argument/exit paths and entry point; and
+  reference seed idempotency.
+- Focused coverage: `ops/watchdog.py` 93%, `scoring/llm_calibration.py` 96%,
+  `radar/liquidity.py` 81%, `validation/cli.py` 92%, `storage/seed.py` 89%,
+  `validation/__main__.py` 100%. All exceed the 80% target.
+- Full-suite coverage: **77.71%**, up from 74.96% in the task brief; raised
+  `fail_under` from 65 to 75.7 (two percentage points below measured coverage).
+- Pre-task checks (T9 post-check baseline): pytest 811 passed, 11 skipped;
+  Ruff passed; mypy passed (53 files); broken-import scan passed (244 files);
+  declared-deps scan passed (28 roots, 244 files).
+- Post-task checks: pytest with `--cov=.` 839 passed, 11 skipped, 1
+  deprecation warning; total coverage 77.71%, above the 75.7 gate; Ruff and
+  formatting passed; mypy passed (53 files); broken-import scan passed
+  (246 files); declared-deps scan passed (28 roots, 246 files). Focused tests
+  passed (45).
 
 ### 2026-10-23 — T9: Social crawler policy gates (done)
 
