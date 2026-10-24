@@ -23,6 +23,7 @@ def test_required_tables_are_registered() -> None:
         "alerts",
         "labels",
         "system_health",
+        "risk_confidence_calibrations",
         "sources",
         "raw_evidence_items",
         "wallet_cluster_members",
@@ -111,7 +112,13 @@ def test_migration_chain_builds_cleanly_on_fresh_database(tmp_path, monkeypatch)
 
     with sqlite3.connect(db_path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
-    for expected in ("scan_results", "parity_mismatches", "risk_outcomes", "ensemble_state"):
+    for expected in (
+        "scan_results",
+        "parity_mismatches",
+        "risk_outcomes",
+        "risk_confidence_calibrations",
+        "ensemble_state",
+    ):
         assert expected in tables, f"{expected} missing after clean upgrade"
 
 

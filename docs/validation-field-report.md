@@ -328,3 +328,26 @@ warning. The live endpoint returned both 0.9687 concordance values as `flagged_s
 Regression tests require more than 30 distinct risk scores from 100 varied fixtures and keep
 seeded pure-noise concordance within the harness's ±0.10 band. Resolution improved; benchmark
 quality did not become evidence of predictive value.
+
+## 10. 2026-10-23 addendum — held-out confidence calibration
+
+T5 adds a versioned isotonic calibration path over completed, unambiguous `RiskOutcome`
+rows joined to their original `Score.confidence` values. Training rows must have been both
+scored before the split and evaluated by the validation start; validation rows must be scored
+at or after the split. Risk-band threshold candidates are derived only from the training rows.
+`RISK_CONFIDENCE_CALIBRATION_MIN_SAMPLES` defaults to 100, and activation also requires at
+least 30 held-out rows with ECE at or below 0.10. The current fallback table remains active
+otherwise.
+
+The live database contains 2,014 evaluated outcomes, of which 397 have an unambiguous collapse
+or survival label. The 80/20 score-time split starts at 2026-08-24 06:00 UTC. None of the earlier
+unambiguous labels had been evaluated by that boundary, so the causally available training set
+is 0; 82 later-scored rows form the candidate validation window. There is no fitted map or valid
+held-out ECE to report, and risk-band thresholds were not retuned. The fallback remains active.
+This is insufficient evidence for calibration, not a failed calibration measurement. The
+versioned command result is [`reports/calibration-2026-10-23-t5.json`](../reports/calibration-2026-10-23-t5.json).
+
+The calibration command persists each attempt, its version, time window, sample counts, ECE,
+and training-derived band thresholds when a model passes the holdout gate. Runtime scoring uses
+only an active persisted map with at least the configured sample floor. `/health` and
+`/risk/confidence-calibration` expose active/fallback status, window, ECE, and latest attempt.

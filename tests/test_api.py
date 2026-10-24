@@ -178,6 +178,26 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_confidence_calibration_status_reports_active_fallback(session) -> None:
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        response = TestClient(app, headers=_AUTH_HEADERS).get("/risk/confidence-calibration")
+        assert response.status_code == 200
+        assert response.json()["fallback_active"] is True
+        assert response.json()["status"] == "fallback_no_calibration"
+        health = TestClient(app, headers=_AUTH_HEADERS).get("/health").json()
+        component = next(
+            row for row in health["components"] if row["component"] == "risk_confidence_calibration"
+        )
+        assert component["state"] == "yellow"
+        assert "fallback active" in component["message"]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_lifecycle_alerts_api_includes_terminal_evidence(session) -> None:
     asset = seed_market_asset(session)
     transition_ts = datetime(2026, 5, 1, 15, 0, tzinfo=UTC)

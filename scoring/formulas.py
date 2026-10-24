@@ -179,6 +179,17 @@ def compute_scores(
         - flag_penalty * 0.10
         - data_layer_uncertainty
     )
+    if session is not None:
+        from common.config import get_settings
+        from risk_engine.calibrator import get_active_confidence_calibration
+        from risk_engine.confidence_calibration import apply_isotonic_map
+
+        calibration = get_active_confidence_calibration(session)
+        if (
+            calibration is not None
+            and calibration.sample_size >= get_settings().risk_confidence_calibration_min_samples
+        ):
+            confidence = apply_isotonic_map(confidence, calibration.x_points, calibration.y_points)
     # Uncertainty keeps the original factory-missing semantics: the union
     # above already erodes confidence via the coverage penalty, and adding
     # the union count here as well would double-count and clamp degenerate

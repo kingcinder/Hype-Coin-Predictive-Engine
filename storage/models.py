@@ -929,6 +929,31 @@ class RiskCalibration(Base):
     )
 
 
+class RiskConfidenceCalibration(Base):
+    """Versioned isotonic confidence map and its chronological evaluation."""
+
+    __tablename__ = "risk_confidence_calibrations"
+    __table_args__ = (Index("ix_risk_confidence_calibrations_active", "active", "trained_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(48), nullable=False)
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    training_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    training_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    validation_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    validation_sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_ece: Mapped[float | None] = mapped_column(Float)
+    calibrated_ece: Mapped[float | None] = mapped_column(Float)
+    x_points: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    y_points: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    yellow_threshold: Mapped[float | None] = mapped_column(Float)
+    orange_threshold: Mapped[float | None] = mapped_column(Float)
+    red_threshold: Mapped[float | None] = mapped_column(Float)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
 class LLMCalibrationRecord(Base):
     """Tracks individual LLM prediction outcomes for adaptive weight calibration.
 

@@ -471,6 +471,7 @@ class Settings(BaseSettings):
     risk_outcome_price_gain_threshold: float = 0.2  # 20% gain
     risk_calibration_frequency_hours: float = 24.0
     risk_calibration_min_samples: int = 10
+    risk_confidence_calibration_min_samples: int = Field(default=100, ge=30)
 
     # local LLM integration (Ollama)
     llm_enabled: bool = True

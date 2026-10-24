@@ -53,6 +53,7 @@ from api.schemas import (
     RetentionGrowthRow,
     RetentionRunRow,
     RiskCalibrationRow,
+    RiskConfidenceCalibrationStatus,
     RiskResponse,
     RpcPoolChainRow,
     RpcPoolEndpointRow,
@@ -245,6 +246,42 @@ def health(session: DbSession) -> HealthResponse:
         )
         for row in latest_health(session)
     ]
+    from risk_engine.calibrator import get_active_confidence_calibration
+
+    confidence_calibration = session.scalar(
+        select(models.RiskConfidenceCalibration)
+        .order_by(models.RiskConfidenceCalibration.trained_at.desc())
+        .limit(1)
+    )
+    active_confidence = get_active_confidence_calibration(session)
+    latest_attempt = confidence_calibration.status if confidence_calibration else "none"
+    components = [
+        component
+        for component in components
+        if component.component != "risk_confidence_calibration"
+    ]
+    components.append(
+        HealthComponent(
+            component="risk_confidence_calibration",
+            state="ok" if active_confidence else "yellow",
+            error_count=0,
+            ts=(
+                active_confidence.trained_at
+                if active_confidence
+                else confidence_calibration.trained_at
+                if confidence_calibration
+                else utc_now()
+            ),
+            message=(
+                f"status={active_confidence.status}; version={active_confidence.version}; "
+                f"train_n={active_confidence.sample_size}; "
+                f"validation_ece={active_confidence.calibrated_ece}"
+                if active_confidence
+                else "fallback active: no held-out-validated confidence map; "
+                f"latest_attempt={latest_attempt}"
+            ),
+        )
+    )
     status = (
         "ok"
         if database == "ok" and all(c.state in {"ok", "yellow"} for c in components)
@@ -706,6 +743,38 @@ def risk_calibration(session: DbSession) -> RiskCalibrationRow:
         ml_red_threshold=cal.ml_red_threshold,
         band_precisions=cal.band_precisions,
         ml_band_precisions=cal.ml_band_precisions,
+    )
+
+
+@app.get("/risk/confidence-calibration", response_model=RiskConfidenceCalibrationStatus)
+def risk_confidence_calibration_status(session: DbSession) -> RiskConfidenceCalibrationStatus:
+    """Expose whether learned confidence replaces the fallback band table."""
+    from risk_engine.calibrator import get_active_confidence_calibration
+
+    latest = session.scalar(
+        select(models.RiskConfidenceCalibration)
+        .order_by(models.RiskConfidenceCalibration.trained_at.desc())
+        .limit(1)
+    )
+    active = get_active_confidence_calibration(session)
+    effective = active or latest
+    return RiskConfidenceCalibrationStatus(
+        status=(
+            active.status if active else latest.status if latest else "fallback_no_calibration"
+        ),
+        fallback_active=active is None,
+        version=effective.version if effective else None,
+        sample_size=effective.sample_size if effective else 0,
+        validation_sample_size=effective.validation_sample_size if effective else 0,
+        training_started_at=effective.training_started_at if effective else None,
+        training_ended_at=effective.training_ended_at if effective else None,
+        validation_started_at=effective.validation_started_at if effective else None,
+        baseline_ece=effective.baseline_ece if effective else None,
+        calibrated_ece=effective.calibrated_ece if effective else None,
+        yellow_threshold=effective.yellow_threshold if effective else None,
+        orange_threshold=effective.orange_threshold if effective else None,
+        red_threshold=effective.red_threshold if effective else None,
+        last_attempt_status=latest.status if latest else None,
     )
 
 

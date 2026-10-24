@@ -53,6 +53,8 @@ _LATER_OWNED_TABLES: frozenset[str] = frozenset(
         # 0016_risk_outcomes
         "risk_outcomes",
         "risk_calibrations",
+        # 0023_risk_confidence_calibration
+        "risk_confidence_calibrations",
         # 0018_ensemble_state_and_cross_source
         "ensemble_state",
         "cross_source_signals",

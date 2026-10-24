@@ -1,0 +1,15 @@
+{
+  "baseline_ece": null,
+  "calibrated_ece": null,
+  "ece_trust_ceiling": 0.1,
+  "fallback_active": true,
+  "generated_at_utc": "2026-10-24T01:02:09.557194+00:00",
+  "sample_size": 0,
+  "status": "fallback_insufficient_time_split",
+  "training_ended_at": "2026-08-24T06:00:00+00:00",
+  "training_started_at": null,
+  "training_thresholds": null,
+  "validation_sample_size": 82,
+  "validation_started_at": "2026-08-24T06:00:00+00:00",
+  "version": "isotonic-confidence-2026-10-23"
+}

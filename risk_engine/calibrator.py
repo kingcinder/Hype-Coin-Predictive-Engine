@@ -11,14 +11,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.enums import RiskBand
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from risk_engine.confidence_calibration import (
+    MIN_VALIDATION_SAMPLES,
+    CalibrationSample,
+    apply_isotonic_map,
+    chronological_split,
+    fit_isotonic_map,
+    retune_risk_thresholds,
+)
 from risk_engine.outcomes import BandOutcome, RiskOutcomeReport, evaluate_outcomes
 from storage import models
+from validation.metrics import expected_calibration_error
 
 log = get_logger(__name__)
 
@@ -51,6 +61,203 @@ MAX_ML_RED_THRESHOLD = 0.70
 
 # Learning rate: how much to move toward the ideal per cycle
 LEARNING_RATE = 0.3
+
+
+@dataclass(frozen=True)
+class ConfidenceCalibrationResult:
+    version: str
+    status: str
+    sample_size: int
+    validation_sample_size: int
+    baseline_ece: float | None
+    calibrated_ece: float | None
+    training_started_at: datetime | None
+    training_ended_at: datetime | None
+    validation_started_at: datetime | None
+    thresholds: tuple[float, float, float] | None
+
+
+def _confidence_calibration_samples(session: Session) -> list[CalibrationSample]:
+    """Read only completed, unambiguous labels joined to their scored values."""
+    rows = session.execute(
+        select(
+            models.RiskOutcome.scored_at,
+            models.RiskOutcome.evaluated_at,
+            models.RiskOutcome.collapsed,
+            models.RiskOutcome.survived,
+            models.Score.confidence,
+            models.Score.risk,
+        )
+        .join(models.Score, models.Score.id == models.RiskOutcome.score_id)
+        .where(
+            models.RiskOutcome.evaluated_at.is_not(None),
+            models.RiskOutcome.collapsed != models.RiskOutcome.survived,
+            models.RiskOutcome.scored_at <= models.RiskOutcome.evaluated_at,
+        )
+        .order_by(models.RiskOutcome.scored_at.asc())
+    ).all()
+    return [
+        CalibrationSample(
+            scored_at=row.scored_at,
+            evaluated_at=row.evaluated_at,
+            confidence=float(row.confidence),
+            survived=bool(row.survived),
+            collapsed=bool(row.collapsed),
+            risk_score=float(row.risk),
+        )
+        for row in rows
+        if row.evaluated_at is not None
+    ]
+
+
+def run_confidence_calibration(
+    session: Session,
+    *,
+    version: str,
+    samples: list[CalibrationSample] | None = None,
+    min_samples: int | None = None,
+    trained_at: datetime | None = None,
+) -> ConfidenceCalibrationResult:
+    """Fit and persist a chronological confidence map; keep fallback on weak evidence."""
+    from common.config import get_settings
+
+    sample_floor = min_samples or get_settings().risk_confidence_calibration_min_samples
+    fit_rows = samples if samples is not None else _confidence_calibration_samples(session)
+    train, validation, split_at = chronological_split(fit_rows)
+    trained_at = ensure_utc(trained_at or utc_now())
+    x_points: list[float] = []
+    y_points: list[float] = []
+    baseline_ece: float | None = None
+    calibrated_ece: float | None = None
+    thresholds: tuple[float, float, float] | None = None
+    status = "fallback_insufficient_time_split"
+
+    if len(train) >= sample_floor and len(validation) >= MIN_VALIDATION_SAMPLES:
+        mapping = fit_isotonic_map(
+            [row.confidence for row in train],
+            [row.survived for row in train],
+            min_samples=sample_floor,
+        )
+        if mapping is not None:
+            x_points, y_points = mapping
+            probabilities = np.asarray([row.confidence / 100.0 for row in validation])
+            labels = np.asarray([row.survived for row in validation], dtype=float)
+            calibrated = np.asarray(
+                [
+                    apply_isotonic_map(row.confidence, x_points, y_points) / 100.0
+                    for row in validation
+                ]
+            )
+            baseline_ece = expected_calibration_error(probabilities, labels)
+            calibrated_ece = expected_calibration_error(calibrated, labels)
+            status = "active" if calibrated_ece <= 0.10 else "fallback_above_ece_ceiling"
+            thresholds = retune_risk_thresholds(train)
+        else:
+            status = "fallback_fit_unavailable"
+
+    active = status == "active"
+    if active:
+        previous = session.scalars(
+            select(models.RiskConfidenceCalibration).where(
+                models.RiskConfidenceCalibration.active.is_(True)
+            )
+        ).all()
+        for row in previous:
+            row.active = False
+
+    model_row = models.RiskConfidenceCalibration(
+        version=version,
+        status=status,
+        trained_at=trained_at,
+        training_started_at=min((ensure_utc(row.scored_at) for row in train), default=None),
+        training_ended_at=split_at,
+        validation_started_at=split_at,
+        sample_size=len(train),
+        validation_sample_size=len(validation),
+        baseline_ece=baseline_ece,
+        calibrated_ece=calibrated_ece,
+        x_points=x_points,
+        y_points=y_points,
+        yellow_threshold=thresholds[0] if active and thresholds else None,
+        orange_threshold=thresholds[1] if active and thresholds else None,
+        red_threshold=thresholds[2] if active and thresholds else None,
+        active=active,
+    )
+    session.add(model_row)
+
+    if active and thresholds:
+        previous_thresholds = _get_active_calibration(session)
+        if previous_thresholds:
+            previous_thresholds.active = False
+        band_precisions = previous_thresholds.band_precisions if previous_thresholds else {}
+        ml_yellow = (
+            previous_thresholds.ml_yellow_threshold if previous_thresholds else DEFAULT_ML_YELLOW
+        )
+        ml_orange = (
+            previous_thresholds.ml_orange_threshold if previous_thresholds else DEFAULT_ML_ORANGE
+        )
+        ml_red = previous_thresholds.ml_red_threshold if previous_thresholds else DEFAULT_ML_RED
+        ml_band_precisions = previous_thresholds.ml_band_precisions if previous_thresholds else {}
+        session.add(
+            models.RiskCalibration(
+                version=version,
+                calibrated_at=trained_at,
+                sample_size=len(train),
+                yellow_threshold=thresholds[0],
+                orange_threshold=thresholds[1],
+                red_threshold=thresholds[2],
+                reason_weights=previous_thresholds.reason_weights if previous_thresholds else {},
+                band_precisions=band_precisions,
+                ml_yellow_threshold=ml_yellow,
+                ml_orange_threshold=ml_orange,
+                ml_red_threshold=ml_red,
+                ml_band_precisions=ml_band_precisions,
+                active=True,
+            )
+        )
+
+    from storage.repository import record_health
+
+    record_health(
+        session,
+        component="risk_confidence_calibration",
+        state="ok" if active else "yellow",
+        message=(
+            f"status={status}; train={len(train)}; validation={len(validation)}; "
+            f"baseline_ece={baseline_ece}; calibrated_ece={calibrated_ece}"
+        ),
+    )
+    session.flush()
+    session.info.pop("risk_active_confidence_calibration", None)
+    return ConfidenceCalibrationResult(
+        version=version,
+        status=status,
+        sample_size=len(train),
+        validation_sample_size=len(validation),
+        baseline_ece=baseline_ece,
+        calibrated_ece=calibrated_ece,
+        training_started_at=model_row.training_started_at,
+        training_ended_at=split_at,
+        validation_started_at=split_at,
+        thresholds=thresholds if active else None,
+    )
+
+
+def get_active_confidence_calibration(
+    session: Session,
+) -> models.RiskConfidenceCalibration | None:
+    """Return the currently applied model, if the held-out ECE gate passed."""
+    cache_key = "risk_active_confidence_calibration"
+    if cache_key in session.info:
+        return session.info[cache_key]
+    active = session.scalar(
+        select(models.RiskConfidenceCalibration)
+        .where(models.RiskConfidenceCalibration.active.is_(True))
+        .order_by(models.RiskConfidenceCalibration.trained_at.desc())
+        .limit(1)
+    )
+    session.info[cache_key] = active
+    return active
 
 
 @dataclass

@@ -250,6 +250,23 @@ class RiskCalibrationRow(BaseModel):
     ml_band_precisions: dict[str, float] = {}
 
 
+class RiskConfidenceCalibrationStatus(BaseModel):
+    status: str
+    fallback_active: bool
+    version: str | None = None
+    sample_size: int = 0
+    validation_sample_size: int = 0
+    training_started_at: datetime | None = None
+    training_ended_at: datetime | None = None
+    validation_started_at: datetime | None = None
+    baseline_ece: float | None = None
+    calibrated_ece: float | None = None
+    yellow_threshold: float | None = None
+    orange_threshold: float | None = None
+    red_threshold: float | None = None
+    last_attempt_status: str | None = None
+
+
 class BacktestResultRow(BaseModel):
     run_id: int
     status: str

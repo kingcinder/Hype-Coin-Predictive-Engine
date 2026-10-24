@@ -60,8 +60,8 @@ checkout state and is no longer current. Work for this task is on
 | ID | Item | Status | Notes / evidence |
 |----|------|--------|------------------|
 | E1 | Feature-completeness audit of `assess_risk()` inputs — find which of ~35 features silently default to 0 | done (2026-09-14; re-audited 2026-10-23) | `_feature()` tracks defaults into `RiskAssessment.missing_features`; confidence coverage penalty and API/UI missing-feature display remain in source. Evidence: `risk_engine/rules.py`, `scoring/formulas.py`, `api/schemas.py`, `ui/app.py`, `tests/test_feature_completeness.py` `[verified 2026-10-23]` |
-| E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (needs a time-ordered evaluation window) | Adaptive ML thresholds exist in `risk_engine/calibrator.py`; the requested training/validation-only retuning is not yet evidenced `[verified 2026-10-23]` |
-| E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | planned | `_BAND_CONFIDENCE` remains in `scoring/formulas.py:42`; no persisted confidence calibrator `[verified 2026-10-23]` |
+| E2 | Calibrate RiskBand + ML probability thresholds via `risk_engine/calibrator.py` against real outcomes | deferred (no causally available training window) | Train-only isotonic threshold tuning is implemented; the live split has 0 causally available training rows, so thresholds remain at fallback values `[verified 2026-10-23]` |
+| E3 | Replace `_BAND_CONFIDENCE` hardcoded table with isotonic/Platt refit vs `RiskOutcome` rows; keep current table as fallback below a sample floor | implemented; fallback active | Versioned isotonic persistence, runtime application, API/health status, and `RISK_CONFIDENCE_CALIBRATION_MIN_SAMPLES=100` are implemented; current 0-row train split prevents activation `[verified 2026-10-23]` |
 | E4 | Label/outcome pipeline: historical backfill and honest forecast-status acknowledgment | planned (T6) | Forecast gate remains 30 in `common/config.py:377`; `scripts/backfill_history.py` has provider history fetchers but no label replay path `[verified 2026-10-23]` |
 | E5 | Single-writer SQLite wedge → WAL mode + write-serialization queue | done (2026-09-14; re-audited 2026-10-23) | `storage/write_queue.py`, `storage/repository.py`, `engine/run.py`; behavior coverage in `tests/test_write_queue.py` `[verified 2026-10-23]` |
 | E6 | LLM: configurable OpenAI-compatible endpoint instead of hardwired Ollama; unpin the 0.5B default | planned (T7) | `llm/engine.py` still calls the Ollama API; provider abstraction not present `[verified 2026-10-23]` |
@@ -275,3 +275,27 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 784 tests, 0 failures, 11 skipped; Ruff passed; mypy
   passed (53 files); broken-import scan passed (240 files); declared-deps scan
   passed (28 roots, 240 files).
+
+### 2026-10-23 — T5: Time-ordered confidence calibration (done; fallback retained)
+
+- Added a persisted isotonic confidence map trained only from completed,
+  unambiguous `RiskOutcome` rows joined to their original `Score.confidence`.
+  Training labels must be evaluated by the score-time split; the held-out
+  window starts at or after that split. The configurable training floor is 100
+  and activation requires held-out ECE ≤ 0.10 with at least 30 validation rows.
+- Retuned risk score thresholds derive from training rows only and are persisted
+  with a calibration that passes the held-out gate. Thresholds were not changed
+  for the current DB because the causal training set is empty.
+- Live `serpent.db`: 2,014 evaluated outcomes; 397 unambiguous. The score-time
+  cutoff is 2026-08-24 06:00 UTC, with 0 training rows whose label was known by
+  the cutoff and 82 later-scored validation rows. ECE is unavailable; no held-out
+  performance claim is made and `_BAND_CONFIDENCE` remains active.
+- Persisted attempt version `isotonic-confidence-2026-10-23` and report
+  `reports/calibration-2026-10-23-t5.json`. API and `/health` smoke checks
+  returned `fallback_insufficient_time_split` with fallback active.
+- Pre-task checks: pytest 784 tests, 0 failures, 11 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (240 files); declared-deps scan
+  passed (28 roots, 240 files).
+- Post-task checks: pytest 795 tests, 0 failures, 11 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (244 files); declared-deps scan
+  passed (28 roots, 244 files).
