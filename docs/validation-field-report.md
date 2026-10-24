@@ -286,3 +286,45 @@ better than its naive baseline, and the apparent winners are artifacts.
 including a deliberately injected leakage pattern). The methodology is documented in
 `docs/validation-methodology.md`; the harness design and pre-committed self-test expectations in
 `docs/validation-harness-design.md`; the raw versioned data in `reports/`.*
+
+---
+
+## 9. 2026-10-23 addendum — score resolution and publication gate
+
+The August 25, 2026 report above is preserved as a historical result. Its two-value score
+collapse was traced to fixed rule-point increments and a 90-point hard-reject floor. Commit
+`1661a34` replaced the affected rule contributions with proportional ramps and lowered the
+hard-reject score floor to 40; `scoring/formulas.py` retains four-decimal precision. Missing rule
+inputs are tracked through `RiskAssessment.missing_features` and `ScoreResult.missing_features`.
+This correction predates this addendum, so T4 adds regression evidence rather than a duplicate
+formula rewrite.
+
+The new read-only diagnostic ran against the live `serpent.db` (4,859 score rows across 10
+decision days). Across all rows, `risk_score` has 479 distinct values, `exit_risk` 682, and
+`uncertainty` 21. The daily distributions show when rescored outputs acquired more resolution:
+
+| Decision day | Rows | `risk_score` distinct | `exit_risk` distinct | `uncertainty` distinct |
+| --- | ---: | ---: | ---: | ---: |
+| 2026-05-01 | 2 | 2 | 2 | 2 |
+| 2026-08-18 through 2026-08-23, each day | 288 | 4 | 4 | 2 |
+| 2026-08-24 | 453 | 7 | 7 | 2 |
+| 2026-08-25 | 1,016 | 219 | 247 | 16 |
+| 2026-08-26 | 1,660 | 387 | 443 | 19 |
+
+The 2026-10-23 versioned validation report is
+[`reports/validation-2026-10-23-t4.json`](../reports/validation-2026-10-23-t4.json). Its
+self-tests pass. On the current DB, risk and exit-risk concordance are both 0.9687 (n=396,
+95% CI 0.9473–0.9870), and the report records five suspicious results. The point-in-time audit
+also flags three features across 2,013 evaluated rows: `pair_age_minutes`, `volume_acceleration`,
+and `liquidity_depth`. These remain suspicious pending source-level provenance; the high
+concordance is not evidence of predictive skill. RiskBand ordinal distance is 2.2020 versus
+1.7980 for the baseline, and BLACK precision is 0.0884, equal to its base rate. Current confidence
+calibration error is 0.0798 against a 0.10 baseline, but this is not a held-out calibration result.
+
+The `/validation/latest` API and Validation Integrity GUI now expose concordance only with a
+non-empty point-in-time cross-check. A near-perfect value without that cross-check is suppressed;
+when the report cross-check marks the metric suspicious, the value is shown with an explicit
+warning. The live endpoint returned both 0.9687 concordance values as `flagged_suspicious`.
+Regression tests require more than 30 distinct risk scores from 100 varied fixtures and keep
+seeded pure-noise concordance within the harness's ±0.10 band. Resolution improved; benchmark
+quality did not become evidence of predictive value.

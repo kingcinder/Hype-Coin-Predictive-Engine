@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -65,6 +66,7 @@ from api.schemas import (
     TokenDetail,
     TokenScoreRow,
     TriggerResponse,
+    ValidationReportResponse,
     VelocityFeatureRow,
 )
 from common.config import get_settings
@@ -87,6 +89,7 @@ from storage.repository import (
     latest_scores,
     latest_watchdog_timeouts,
 )
+from validation.presentation import guard_validation_cells
 
 log = get_logger(__name__)
 
@@ -103,6 +106,7 @@ app = FastAPI(
     description="Research-only crypto intelligence API with separated hype and risk scores.",
     lifespan=_lifespan,
 )
+VALIDATION_REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
 
 
 def _check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
@@ -247,6 +251,31 @@ def health(session: DbSession) -> HealthResponse:
         else "degraded"
     )
     return HealthResponse(status=status, database=database, components=components)
+
+
+@app.get("/validation/latest", response_model=ValidationReportResponse)
+def latest_validation_report() -> ValidationReportResponse | JSONResponse:
+    """Read the newest validation report and gate suspicious concordance."""
+    reports = sorted(VALIDATION_REPORTS_DIR.glob("validation-*.json"))
+    if not reports:
+        return JSONResponse(status_code=404, content={"detail": "no validation report yet"})
+    try:
+        report = json.loads(reports[-1].read_text(encoding="utf-8"))
+        guarded = guard_validation_cells(report)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        log.warning("validation_report_read_failed", error=type(exc).__name__)
+        return JSONResponse(
+            status_code=503, content={"detail": "latest validation report unreadable"}
+        )
+    return ValidationReportResponse(
+        generated_at_utc=str(report.get("generated_at_utc") or "unknown"),
+        git_sha=str(report.get("git_sha") or ""),
+        model_version=str(report.get("model_version") or ""),
+        leakage_crosscheck_ran=guarded["leakage_crosscheck_ran"],
+        cells=guarded["cells"],
+        suspicious_results=report.get("suspicious_results") or [],
+        notes=report.get("notes") or [],
+    )
 
 
 @app.get("/watchdog/alarms", response_model=list[HealthComponent])

@@ -90,6 +90,7 @@ NAV_SECTIONS: list[tuple[str, list[str]]] = [
             "RPC Pool Status",
             "Archive & Retention",
             "Backtest & Drift",
+            "Validation Integrity",
             "Feed Health",
             "Live Ops Console",
             "Alerts",
@@ -123,6 +124,7 @@ VIEW_ICONS: dict[str, str] = {
     "RPC Pool Status": "🌐",
     "Archive & Retention": "📦",
     "Backtest & Drift": "🧪",
+    "Validation Integrity": "🛡️",
     "Feed Health": "❤️",
     "Live Ops Console": "🖥️",
     "Alerts": "🔔",
@@ -1259,6 +1261,40 @@ def backtest_results() -> None:
             st.info("This run has no metrics yet.")
 
 
+def validation_integrity_view() -> None:
+    st.header("Validation Integrity")
+    report = api_get("/validation/latest")
+    if not report:
+        st.info("No validation report is available yet. Run `python -m validation --db <db>`. ")
+        return
+    st.caption(
+        f"Generated {report.get('generated_at_utc', 'unknown')} · "
+        f"model {report.get('model_version', 'unknown')} · "
+        f"commit {report.get('git_sha', '')[:12]}"
+    )
+    if not report.get("leakage_crosscheck_ran"):
+        st.warning(
+            "The point-in-time leakage cross-check is absent. Near-perfect concordance "
+            "values are suppressed by the API."
+        )
+    cells = report.get("cells") or []
+    for cell in cells:
+        if cell.get("status") == "suppressed_missing_crosscheck":
+            st.warning(cell.get("guard_note") or "Concordance suppressed without leakage audit.")
+        elif cell.get("status") == "flagged_suspicious":
+            st.warning(cell.get("guard_note") or "Concordance is flagged as suspicious.")
+    if cells:
+        st.dataframe(
+            pd.DataFrame(cells)[["output", "metric", "regime", "n", "value", "status"]],
+            width="stretch",
+            hide_index=True,
+        )
+    suspicious = report.get("suspicious_results") or []
+    if suspicious:
+        st.subheader("Cross-check findings")
+        st.dataframe(pd.DataFrame(suspicious), width="stretch", hide_index=True)
+
+
 def _lake_growth_frame(runs: list[dict[str, Any]], growth: dict[str, Any]) -> pd.DataFrame:
     """DataFrame for the lake-growth trendline: observed points, the linear
     extrapolation to the projected full timestamp, and the capacity cap line."""
@@ -2348,6 +2384,8 @@ def render_active_view(view: str) -> None:
         archive_retention()
     elif view == "Backtest & Drift":
         backtest_results()
+    elif view == "Validation Integrity":
+        validation_integrity_view()
     elif view == "Feed Health":
         feed_health()
     elif view == "Live Ops Console":

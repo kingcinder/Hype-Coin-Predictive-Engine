@@ -73,6 +73,27 @@ class ScoreDriftRunRow(BaseModel):
     message: str | None
 
 
+class ValidationMetricCell(BaseModel):
+    output: str
+    metric: str
+    regime: str = "unclassified"
+    n: int
+    value: float | None
+    verdict: str
+    status: str
+    guard_note: str | None = None
+
+
+class ValidationReportResponse(BaseModel):
+    generated_at_utc: str
+    git_sha: str
+    model_version: str
+    leakage_crosscheck_ran: bool
+    cells: list[ValidationMetricCell]
+    suspicious_results: list[dict[str, Any]]
+    notes: list[str]
+
+
 class ParityMismatchRow(BaseModel):
     run_ts: datetime
     decision_ts: datetime

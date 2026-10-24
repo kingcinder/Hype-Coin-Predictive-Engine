@@ -87,7 +87,7 @@ checkout state and is no longer current. Work for this task is on
 |----|------|--------|-------|
 | O1 | Disable Nitter + X-trends crawlers by policy | planned (T9; user-authorized) | Both `nightcrawler_nitter_enabled` and `nightcrawler_x_trends_enabled` default to `True` in `common/config.py` `[verified 2026-10-23]` |
 | O2 | De-emphasize non-benchmarkable score family in the GUI and API | planned (T8) | GUI still sorts by hype/research priority; score-family validation metadata and badges are not present `[verified 2026-10-23]` |
-| O3 | Suppress-or-flag concordance ≥ 0.95 surfaced without the leakage cross-check | planned (T4) | Harness has leakage checks, but API/GUI do not gate surfaced concordance on them `[verified 2026-10-23]` |
+| O3 | Suppress-or-flag concordance ≥ 0.95 surfaced without the leakage cross-check | done (2026-10-23) | `validation/presentation.py` suppresses values without a non-empty audit and marks audit findings; `/validation/latest` and the Validation Integrity GUI show the status `[verified 2026-10-23]` |
 
 ## Dependency order
 
@@ -246,3 +246,32 @@ in-flight work from other agents, still untouched.
   passed (53 files); broken-import scan passed (236 files); declared-deps scan
   passed (28 roots, 236 files). Targeted safety, feature, leakage, ingestion,
   API, and migration checks passed.
+
+### 2026-10-23 — T4: Score distribution and validation integrity (done)
+
+- Live read-only score diagnostic: 4,859 rows across 10 decision days; distinct
+  values across all rows were 479 for risk, 682 for exit risk, and 21 for
+  uncertainty. The latest stored days had 387/443/19 distinct values. Earlier
+  days retain their old 2–7 value scores.
+- Root cause verified in history: commit `1661a34` replaced fixed rule-point
+  jumps and the 90-point hard-reject floor with proportional risk ramps and a
+  40-point floor; four-decimal output resolution and tracked missing defaults
+  are already present. T4 adds regression coverage rather than duplicating the
+  existing formula correction.
+- Added tests requiring >30 distinct risk scores from 100 varied fixtures and
+  pure-noise concordance within the harness ±0.10 tolerance. Added a
+  publication guard, read-only `/validation/latest` API, and Validation
+  Integrity GUI. Missing leakage audit suppresses near-perfect concordance;
+  suspicious cross-check results display with a warning.
+- Generated `reports/validation-2026-10-23-t4.json`. Self-tests pass; live DB
+  validation still reports risk/exit concordance 0.9687 (n=396) and 3
+  point-in-time feature findings among 2,013 rows. API smoke result: both
+  concordance values returned with `flagged_suspicious` status.
+- Updated `docs/validation-field-report.md` with the historical score counts,
+  current diagnostic, validation results, and unresolved leakage findings.
+- Pre-task checks: pytest 775 tests, 0 failures, 10 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (236 files); declared-deps scan
+  passed (28 roots, 236 files).
+- Post-task checks: pytest 784 tests, 0 failures, 11 skipped; Ruff passed; mypy
+  passed (53 files); broken-import scan passed (240 files); declared-deps scan
+  passed (28 roots, 240 files).
