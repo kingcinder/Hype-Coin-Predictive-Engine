@@ -40,6 +40,21 @@ from storage.repository import get_or_create_source, record_health, store_raw_ev
 
 log = get_logger(__name__)
 
+_POLICY_WARNED_CRAWLERS: set[str] = set()
+_POLICY_WARNING_LOCK = threading.Lock()
+
+
+def _warn_policy_override_once(crawler: str, environment_variable: str) -> None:
+    with _POLICY_WARNING_LOCK:
+        if crawler in _POLICY_WARNED_CRAWLERS:
+            return
+        _POLICY_WARNED_CRAWLERS.add(crawler)
+    log.warning(
+        "nightcrawler_policy_override_enabled",
+        crawler=crawler,
+        environment_variable=environment_variable,
+    )
+
 
 class NightCrawlerOrchestrator:
     """Manages the army of Night Crawlers.
@@ -72,7 +87,9 @@ class NightCrawlerOrchestrator:
         self._crawlers["explorer"] = ExplorerCrawler(
             etherscan_api_key=self.settings.etherscan_api_key
         )
-        self._crawlers["nitter"] = NitterCrawler()
+        if self.settings.nightcrawler_nitter_enabled:
+            _warn_policy_override_once("nitter", "NIGHTCRAWLER_ENABLE_NITTER")
+            self._crawlers["nitter"] = NitterCrawler()
         self._crawlers["presale"] = PresaleCrawler()
         if self.settings.nightcrawler_gas_tracker_enabled:
             self._crawlers["gas_tracker"] = GasTrackerCrawler(
@@ -88,6 +105,7 @@ class NightCrawlerOrchestrator:
                 token=self.settings.github_token,
             )
         if self.settings.nightcrawler_x_trends_enabled:
+            _warn_policy_override_once("x_trends", "NIGHTCRAWLER_ENABLE_X_TRENDS")
             self._crawlers["x_trends"] = XTrendsCrawler(
                 keywords=self.settings.x_trends_crypto_keywords_csv.split(",")
             )
@@ -283,7 +301,7 @@ class NightCrawlerOrchestrator:
         """Get status of all crawlers."""
         with self._lock:
             last_run_snapshot = dict(self._last_run)
-        return {
+        status = {
             name: {
                 "enabled": crawler.health.enabled,
                 "reliability": round(crawler.health.reliability_score, 3),
@@ -297,6 +315,22 @@ class NightCrawlerOrchestrator:
             }
             for name, crawler in self._crawlers.items()
         }
+        for name, enabled in (
+            ("nitter", self.settings.nightcrawler_nitter_enabled),
+            ("x_trends", self.settings.nightcrawler_x_trends_enabled),
+        ):
+            if not enabled:
+                status[name] = {
+                    "enabled": False,
+                    "status": "disabled_by_policy",
+                    "reliability": 0.0,
+                    "total_runs": 0,
+                    "total_items": 0,
+                    "error_rate": 0.0,
+                    "last_run": "never",
+                    "frequency_multiplier": 0.0,
+                }
+        return status
 
 
 # Module-level singleton with lock

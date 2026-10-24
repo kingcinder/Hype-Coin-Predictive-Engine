@@ -58,7 +58,9 @@ Equivalent Makefile target: `make engine`.
 
 ## Night Crawlers — Army of Data Spiders
 
-Sixteen crawlers continuously feed the engine with expanding data:
+The crawler fleet includes market, on-chain, and social sources. Nitter and
+X Trends are disabled by policy by default; enable either explicitly only when
+you accept their unofficial social-source limitations:
 
 | Crawler | Source | Data Collected |
 |---------|--------|---------------|
@@ -72,12 +74,12 @@ Sixteen crawlers continuously feed the engine with expanding data:
 | **Gas Tracker** | Etherscan + public RPCs | Fee-market pressure + pending-tx congestion proxy |
 | **GitHub Trending** | github.com | Dev-activity signals, trending repos |
 | **Google Trends** | trends.google.com | Realtime crypto search momentum |
-| **Nitter** | nitter.net | Crypto Twitter sentiment |
+| **Nitter** | nitter.net | Crypto Twitter sentiment — disabled by policy; set `NIGHTCRAWLER_ENABLE_NITTER=1` to opt in |
 | **Presale** | PinkSale/CryptoRank | Launchpad and presale intelligence |
 | **Pump.fun** | pump.fun | New Solana token launches |
 | **PumpPortal** | pumpportal.fun | Live pump.fun launches (HTTP + WebSocket tap) |
 | **Whale Tracker** | Etherscan/Solana RPC | Large on-chain movements, wallet intelligence |
-| **X Trends** | X (unofficial trends feed) | Which crypto topics are heating up |
+| **X Trends** | X (unofficial trends feed) | Which crypto topics are heating up — disabled by policy; set `NIGHTCRAWLER_ENABLE_X_TRENDS=1` to opt in |
 
 ### Self-Adjusting Heuristics
 
@@ -397,6 +399,8 @@ Key environment variables (set in `.env`):
 |----------|---------|-------------|
 | `SCAN_INTERVAL_SECONDS` | 300 | Time between scan iterations |
 | `NIGHTCRAWLER_ENABLED` | True | Enable Night Crawler pipeline |
+| `NIGHTCRAWLER_ENABLE_NITTER` | False | Explicitly opt in to the Nitter crawler (policy-gated) |
+| `NIGHTCRAWLER_ENABLE_X_TRENDS` | False | Explicitly opt in to X Trends (policy-gated) |
 | `NIGHTCRAWLER_INTERVAL_MINUTES` | 30 | Minutes between crawler runs |
 | `DATA_LAKE_ENABLED` | True | Enable Data Lake management |
 | `WEBHOOK_ENABLED` | True | Enable webhook dispatch |

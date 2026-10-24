@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Database URL override sources, highest precedence first. ``SERPENT_DB_PATH``
@@ -334,7 +334,15 @@ class Settings(BaseSettings):
     nightcrawler_defillama_enabled: bool = True
     nightcrawler_whale_enabled: bool = True
     nightcrawler_explorer_enabled: bool = True
-    nightcrawler_nitter_enabled: bool = True
+    # Social scraping stays off unless an operator explicitly opts in.
+    nightcrawler_nitter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "NIGHTCRAWLER_ENABLE_NITTER",
+            "NIGHTCRAWLER_NITTER_ENABLED",
+            "nightcrawler_nitter_enabled",
+        ),
+    )
     nightcrawler_presale_enabled: bool = True
     nightcrawler_cmc_enabled: bool = True
     cmc_api_key: str | None = None
@@ -348,7 +356,14 @@ class Settings(BaseSettings):
     github_trending_search_query: str = "crypto token memecoin created:>30d"
     # Optional GitHub token raises the search API rate limit from 10 to 5000 req/h.
     github_token: str | None = None
-    nightcrawler_x_trends_enabled: bool = True
+    nightcrawler_x_trends_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "NIGHTCRAWLER_ENABLE_X_TRENDS",
+            "NIGHTCRAWLER_X_TRENDS_ENABLED",
+            "nightcrawler_x_trends_enabled",
+        ),
+    )
     x_trends_crypto_keywords_csv: str = (
         "BTC,crypto,bitcoin,ethereum,solana,token,memecoin,airdrop,presale,nft,defi,altcoin"
     )

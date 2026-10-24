@@ -85,7 +85,7 @@ checkout state and is no longer current. Work for this task is on
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| O1 | Disable Nitter + X-trends crawlers by policy | planned (T9; user-authorized) | Both `nightcrawler_nitter_enabled` and `nightcrawler_x_trends_enabled` default to `True` in `common/config.py` `[verified 2026-10-23]` |
+| O1 | Disable Nitter + X-trends crawlers by policy | done (2026-10-23) | Both settings default to `False`; `NIGHTCRAWLER_ENABLE_NITTER` and `NIGHTCRAWLER_ENABLE_X_TRENDS` opt in, with legacy `*_ENABLED` aliases; disabled crawlers appear as `disabled_by_policy` in API/fleet status `[verified 2026-10-23]` |
 | O2 | De-emphasize non-benchmarkable score family in the GUI and API | done (2026-10-23) | Six score families carry `score_validation[family].validated=false`; GUI badges link the field report; top pages default to confidence order and offer explicit unvalidated sort options `[verified 2026-10-23]` |
 | O3 | Suppress-or-flag concordance ≥ 0.95 surfaced without the leakage cross-check | done (2026-10-23) | `validation/presentation.py` suppresses values without a non-empty audit and marks audit findings; `/validation/latest` and the Validation Integrity GUI show the status `[verified 2026-10-23]` |
 
@@ -347,6 +347,24 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
   (53 files); broken-import scan passed (244 files); declared-deps scan passed
   (28 roots, 244 files).
+
+### 2026-10-23 — T9: Social crawler policy gates (done)
+
+- Nitter and X Trends now default off. `NIGHTCRAWLER_ENABLE_NITTER=1` and
+  `NIGHTCRAWLER_ENABLE_X_TRENDS=1` opt in; prior `*_ENABLED` environment names
+  remain supported. Each enabled source logs one policy override warning per
+  process.
+- Disabled sources remain in orchestrator status with `disabled_by_policy`;
+  the GUI fleet table shows “Disabled by policy” and uses dashes for activity
+  metrics. Updated source policy, README, install guidance, and `.env.example`.
+- Regression tests cover defaults, status visibility, both env-name forms, and
+  one-time warnings without network access.
+- Pre-task checks (T8 post-check baseline): pytest 808 passed, 11 skipped;
+  Ruff passed; mypy passed (53 files); broken-import scan passed (244 files);
+  declared-deps scan passed (28 roots, 244 files).
+- Post-task checks: pytest 811 passed, 11 skipped, 1 deprecation warning;
+  Ruff passed and 260 files formatted; mypy passed (53 files); broken-import
+  scan passed (244 files); declared-deps scan passed (28 roots, 244 files).
 
 ### 2026-10-23 — T8: Unvalidated score presentation (done)
 

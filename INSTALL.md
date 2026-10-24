@@ -149,6 +149,8 @@ Key settings:
 - `env=local-single` — zero-container mode (SQLite, no Docker)
 - `scan_interval_seconds=300` — how often the engine scans
 - `nightcrawler_enabled=true` — enable data crawlers
+- `NIGHTCRAWLER_ENABLE_NITTER=1` and `NIGHTCRAWLER_ENABLE_X_TRENDS=1` —
+  explicitly opt in to the policy-gated Nitter and unofficial X Trends crawlers
 - `llm_enabled=false` — disable the optional LLM ensemble layer; configure a provider to enable it
 
 For `llama-server`, configure `LLM_PROVIDER=openai_compat`, `LLM_BASE_URL` to

@@ -662,7 +662,10 @@ def nightcrawler_view() -> None:
         rows = []
         for name, info in status.items():
             reliability = info.get("reliability", 0)
-            if reliability >= 0.9:
+            policy_disabled = info.get("status") == "disabled_by_policy"
+            if policy_disabled:
+                status_icon = "⚪"
+            elif reliability >= 0.9:
                 status_icon = "\U0001f7e2"
             elif reliability >= 0.7:
                 status_icon = "\U0001f7e1"
@@ -672,12 +675,15 @@ def nightcrawler_view() -> None:
                 {
                     "Status": status_icon,
                     "Crawler": _render_source_badge(name),
-                    "Reliability": f"{reliability:.1%}",
-                    "Total Runs": info.get("total_runs", 0),
-                    "Total Items": info.get("total_items", 0),
-                    "Error Rate": f"{info.get('error_rate', 0):.1%}",
-                    "Last Run": str(info.get("last_run", "never"))[:19],
-                    "Freq Multiplier": (f"{info.get('frequency_multiplier', 1.0):.2f}x"),
+                    "Fleet state": "Disabled by policy" if policy_disabled else "Active",
+                    "Reliability": "—" if policy_disabled else f"{reliability:.1%}",
+                    "Total Runs": "—" if policy_disabled else info.get("total_runs", 0),
+                    "Total Items": "—" if policy_disabled else info.get("total_items", 0),
+                    "Error Rate": "—" if policy_disabled else f"{info.get('error_rate', 0):.1%}",
+                    "Last Run": "—" if policy_disabled else str(info.get("last_run", "never"))[:19],
+                    "Freq Multiplier": (
+                        "—" if policy_disabled else f"{info.get('frequency_multiplier', 1.0):.2f}x"
+                    ),
                 }
             )
         if rows:

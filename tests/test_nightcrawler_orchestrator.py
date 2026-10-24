@@ -16,6 +16,7 @@ import threading
 
 import pytest
 
+from common.config import Settings, get_settings
 from crawlers.base import BaseCrawler
 from crawlers.orchestrator import NightCrawlerOrchestrator
 
@@ -85,3 +86,54 @@ def test_repeated_empty_runs_degrade_health_without_tripping_gate(session) -> No
     crawler.fetch_items = lambda: [{"title": "x"}]  # type: ignore[method-assign]
     assert crawler.fetch() != []
     assert crawler.health.consecutive_empty_runs == 0
+
+
+def test_nitter_and_x_trends_are_disabled_by_default_and_visible(monkeypatch) -> None:
+    defaults = Settings(_env_file=None)
+    assert defaults.nightcrawler_nitter_enabled is False
+    assert defaults.nightcrawler_x_trends_enabled is False
+    monkeypatch.setenv("NIGHTCRAWLER_NITTER_ENABLED", "0")
+    monkeypatch.setenv("NIGHTCRAWLER_X_TRENDS_ENABLED", "0")
+    get_settings.cache_clear()
+    try:
+        orch = NightCrawlerOrchestrator()
+        assert "nitter" not in orch._crawlers
+        assert "x_trends" not in orch._crawlers
+        status = orch.get_status()
+        assert status["nitter"]["status"] == "disabled_by_policy"
+        assert status["x_trends"]["status"] == "disabled_by_policy"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_legacy_social_crawler_env_names_remain_supported(monkeypatch) -> None:
+    monkeypatch.setenv("NIGHTCRAWLER_NITTER_ENABLED", "1")
+    monkeypatch.setenv("NIGHTCRAWLER_X_TRENDS_ENABLED", "1")
+    settings = Settings(_env_file=None)
+    assert settings.nightcrawler_nitter_enabled is True
+    assert settings.nightcrawler_x_trends_enabled is True
+
+
+def test_social_crawler_opt_in_warns_once_per_process(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import crawlers.orchestrator as orchestrator_module
+
+    monkeypatch.setenv("NIGHTCRAWLER_ENABLE_NITTER", "1")
+    monkeypatch.setenv("NIGHTCRAWLER_ENABLE_X_TRENDS", "1")
+    get_settings.cache_clear()
+    warnings: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(orchestrator_module, "_POLICY_WARNED_CRAWLERS", set())
+    monkeypatch.setattr(
+        orchestrator_module,
+        "log",
+        SimpleNamespace(warning=lambda event, **fields: warnings.append((event, fields))),
+    )
+    try:
+        first = NightCrawlerOrchestrator()
+        second = NightCrawlerOrchestrator()
+        assert "nitter" in first._crawlers and "x_trends" in first._crawlers
+        assert "nitter" in second._crawlers and "x_trends" in second._crawlers
+        assert [fields["crawler"] for _, fields in warnings] == ["nitter", "x_trends"]
+    finally:
+        get_settings.cache_clear()

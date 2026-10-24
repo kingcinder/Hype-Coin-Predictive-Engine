@@ -21,6 +21,16 @@ The MVP uses a low-cost, public-first source hierarchy.
 - Static public project websites
 - Public GitHub repository metadata
 
+## Policy-Gated Social Sources
+
+The Nitter and X Trends crawlers remain in the codebase but are disabled by
+default. Set `NIGHTCRAWLER_ENABLE_NITTER=1` or
+`NIGHTCRAWLER_ENABLE_X_TRENDS=1` to explicitly opt in; startup emits a
+one-time warning for each enabled source, and the crawler fleet labels disabled
+sources as **Disabled by policy**. These unofficial feeds are fragile and do
+not constitute ground truth. X Trends also reads Nitter RSS, so enabling it
+does not make the feed an official X source.
+
 ## Excluded Until Explicitly Reopened
 
 - Auto-trading and exchange execution
@@ -33,4 +43,3 @@ The MVP uses a low-cost, public-first source hierarchy.
 ## Missing Data
 
 Missing or stale values must increase `UncertaintyScore` and reduce `ConfidenceScore`. They must not be treated as proof that a risk is absent.
-
