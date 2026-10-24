@@ -375,3 +375,13 @@ labels` until the gate is met; the Forecast and Data Lake GUI views render the s
 densify endpoint accepts an as-of timestamp for deterministic evaluation. Regression coverage
 proves it ignores late-observed prices; separate replay tests prove late entry/target prices and
 out-of-window targets cannot influence synthetic labels.
+
+## 12. 2026-10-23 addendum — unvalidated score presentation
+
+The GUI now labels `hype`, `ethos`, `liquidity_access`, `manipulation`, `catalyst`, and
+`research_priority` as unvalidated and links each warning to this report. Top Hype Tokens and
+Top Research Candidates default to confidence ordering; operators can select hype or research
+priority explicitly. API score rows expose `score_validation[family].validated` for each of the
+six families. The Confidence Dashboard reads the latest validation report and displays its cell
+verdict and guard status. These changes clarify presentation and ranking behavior; they do not
+add ground truth or claim that any of the six families is validated.

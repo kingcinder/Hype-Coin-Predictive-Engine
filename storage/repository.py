@@ -710,10 +710,15 @@ def latest_scores(
     stmt = select(models.Score).where(models.Score.decision_ts == latest_ts)
     if not include_black:
         stmt = stmt.where(models.Score.risk_band != "BLACK")
-    if order_by == "hype":
-        stmt = stmt.order_by(desc(models.Score.hype))
-    else:
-        stmt = stmt.order_by(desc(models.Score.research_priority))
+    order_columns = {
+        "hype": models.Score.hype,
+        "research_priority": models.Score.research_priority,
+        "confidence": models.Score.confidence,
+        "risk": models.Score.risk,
+        "exit_risk": models.Score.exit_risk,
+        "uncertainty": models.Score.uncertainty,
+    }
+    stmt = stmt.order_by(desc(order_columns.get(order_by, models.Score.research_priority)))
     return list(session.scalars(stmt.limit(limit)))
 
 

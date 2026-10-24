@@ -29,6 +29,11 @@ try:
 except ValueError:
     UI_REFRESH_SECONDS = 30
 
+VALIDATION_FIELD_REPORT_URL = (
+    "https://github.com/kingcinder/Hype-Coin-Predictive-Engine/blob/main/"
+    "docs/validation-field-report.md"
+)
+
 
 def _app_version() -> str:
     """Read the package version from pyproject.toml (single source of truth)."""
@@ -329,8 +334,17 @@ def render_system_strip() -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
-def score_frame(path: str, *, include_black: bool = False, limit: int = 25) -> pd.DataFrame:
-    data = api_get(path, params={"include_black": include_black, "limit": limit})
+def score_frame(
+    path: str,
+    *,
+    include_black: bool = False,
+    limit: int = 25,
+    order_by: str | None = None,
+) -> pd.DataFrame:
+    params: dict[str, object] = {"include_black": include_black, "limit": limit}
+    if order_by:
+        params["order_by"] = order_by
+    data = api_get(path, params=params)
     if not data:
         return pd.DataFrame()
     return pd.DataFrame(data)
@@ -355,7 +369,38 @@ def score_table(df: pd.DataFrame) -> None:
     display = df[columns].copy()
     if "risk_band" in display.columns:
         display["risk_band"] = display["risk_band"].map(_band_cell)
-    st.dataframe(display, width="stretch", hide_index=True)
+    unvalidated_help = (
+        "This score family has no ground truth in the current evaluation. "
+        f"[Read the validation field report]({VALIDATION_FIELD_REPORT_URL})."
+    )
+    column_config = {
+        "hype": st.column_config.NumberColumn("Hype · unvalidated", help=unvalidated_help),
+        "liquidity_access": st.column_config.NumberColumn(
+            "Liquidity · unvalidated", help=unvalidated_help
+        ),
+        "research_priority": st.column_config.NumberColumn(
+            "Priority · unvalidated", help=unvalidated_help
+        ),
+    }
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+    )
+
+
+def render_unvalidated_score_badge() -> None:
+    """Show an accessible badge with a report link and hover explanation."""
+    st.markdown(
+        f'<a href="{VALIDATION_FIELD_REPORT_URL}" target="_blank" '
+        'title="These six score families have no ground truth in the current evaluation. '
+        'Open docs/validation-field-report.md for methodology." '
+        'style="display:inline-block;padding:3px 8px;border:1px solid #e1a900;'
+        "border-radius:999px;color:#ffd166;font-size:0.75rem;font-weight:700;"
+        'text-decoration:none;">⚠ UNVALIDATED SCORE FAMILIES</a>',
+        unsafe_allow_html=True,
+    )
 
 
 def heat_graph(df: pd.DataFrame) -> None:
@@ -578,7 +623,20 @@ def render_token_detail(asset_id: int | None) -> None:
 
 def top_hype() -> pd.DataFrame:
     st.header("Top Hype Tokens")
-    df = score_frame("/tokens/hot", include_black=True)
+    render_unvalidated_score_badge()
+    order_label = st.selectbox(
+        "Rank by",
+        ["Confidence", "Risk", "Exit risk", "Uncertainty", "Hype (unvalidated)"],
+        key="top_hype_rank_by",
+    )
+    order_by = {
+        "Confidence": "confidence",
+        "Risk": "risk",
+        "Exit risk": "exit_risk",
+        "Uncertainty": "uncertainty",
+        "Hype (unvalidated)": "hype",
+    }[order_label]
+    df = score_frame("/tokens/hot", include_black=True, order_by=order_by)
     heat_graph(df)
     score_table(df)
     return df
@@ -586,7 +644,26 @@ def top_hype() -> pd.DataFrame:
 
 def top_research() -> pd.DataFrame:
     st.header("Top Research Candidates")
-    df = score_frame("/scores/top", include_black=False)
+    render_unvalidated_score_badge()
+    order_label = st.selectbox(
+        "Rank by",
+        [
+            "Confidence",
+            "Risk",
+            "Exit risk",
+            "Uncertainty",
+            "Research priority (unvalidated)",
+        ],
+        key="top_research_rank_by",
+    )
+    order_by = {
+        "Confidence": "confidence",
+        "Risk": "risk",
+        "Exit risk": "exit_risk",
+        "Uncertainty": "uncertainty",
+        "Research priority (unvalidated)": "research_priority",
+    }[order_label]
+    df = score_frame("/scores/top", include_black=False, order_by=order_by)
     score_table(df)
     if not df.empty and (df["risk_band"] == "BLACK").any():
         st.error("Invariant failure: BLACK tokens appeared in research candidates.")
@@ -1301,6 +1378,38 @@ def validation_integrity_view() -> None:
     if suspicious:
         st.subheader("Cross-check findings")
         st.dataframe(pd.DataFrame(suspicious), width="stretch", hide_index=True)
+
+
+def render_latest_validation_verdict() -> None:
+    """Show the current report's cell verdicts and leakage-guard status."""
+    st.subheader("Latest Score Validation Verdict")
+    report = api_get("/validation/latest")
+    if not report:
+        st.warning("No latest validation report is available.")
+        return
+
+    cells = report.get("cells") or []
+    statuses = {cell.get("status") for cell in cells}
+    if "flagged_suspicious" in statuses:
+        st.warning("Latest report flags suspicious validation results; inspect the cell statuses.")
+    elif "suppressed_missing_crosscheck" in statuses or not report.get("leakage_crosscheck_ran"):
+        st.warning("Latest report has no completed point-in-time leakage cross-check.")
+    elif cells:
+        st.success("Latest validation report is available with its leakage cross-check.")
+    else:
+        st.info("Latest validation report contains no metric verdicts.")
+
+    st.caption(
+        f"Generated {report.get('generated_at_utc', 'unknown')} · "
+        f"model {report.get('model_version', 'unknown')} · "
+        f"leakage cross-check: {'ran' if report.get('leakage_crosscheck_ran') else 'missing'}"
+    )
+    if cells:
+        st.dataframe(
+            pd.DataFrame(cells)[["output", "metric", "regime", "n", "value", "verdict", "status"]],
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def _lake_growth_frame(runs: list[dict[str, Any]], growth: dict[str, Any]) -> pd.DataFrame:
@@ -2047,6 +2156,8 @@ def confidence_dashboard() -> None:
         "Understand WHY tokens are ranked the way they are. Scoring formula breakdown, "
         "feature importance for top-ranked tokens, and scan history over time."
     )
+    render_unvalidated_score_badge()
+    render_latest_validation_verdict()
 
     data = api_get("/data/confidence")
     if not data:
@@ -2145,12 +2256,12 @@ def confidence_dashboard() -> None:
             row = {
                 "Symbol": item.get("symbol"),
                 "Chain": item.get("chain"),
-                "Hype": item.get("hype"),
-                "Ethos": item.get("ethos"),
+                "Hype · unvalidated": item.get("hype"),
+                "Ethos · unvalidated": item.get("ethos"),
                 "Risk": item.get("risk"),
-                "Liquidity": item.get("liquidity_access"),
+                "Liquidity · unvalidated": item.get("liquidity_access"),
                 "Confidence": item.get("confidence"),
-                "Priority": item.get("research_priority"),
+                "Priority · unvalidated": item.get("research_priority"),
                 "Band": item.get("risk_band"),
             }
             # Add top feature values
@@ -2263,6 +2374,7 @@ def command_center() -> None:
     status_cols[3].metric("Forecasts", len(forecasts))
     status_cols[4].metric("RPC pool", pool_state)
 
+    render_unvalidated_score_badge()
     left, right = st.columns(2)
     with left:
         st.markdown("**Top Hype**")

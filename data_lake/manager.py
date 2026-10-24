@@ -196,7 +196,7 @@ def get_confidence_dashboard_data(
     # Get top-scored tokens with feature breakdown
     from storage.repository import latest_scores
 
-    top_scores = latest_scores(session, limit=10, include_black=False, order_by="hype")
+    top_scores = latest_scores(session, limit=10, include_black=False, order_by="confidence")
 
     scoring_breakdown = []
     for score in top_scores:
@@ -239,6 +239,17 @@ def get_confidence_dashboard_data(
                 "liquidity_access": round(score.liquidity_access, 2),
                 "confidence": round(score.confidence, 2),
                 "research_priority": round(score.research_priority, 2),
+                "score_validation": {
+                    family: {"validated": False}
+                    for family in (
+                        "hype",
+                        "ethos",
+                        "liquidity_access",
+                        "manipulation",
+                        "catalyst",
+                        "research_priority",
+                    )
+                },
                 "risk_band": score.risk_band,
                 "feature_importance": feature_importance,
             }

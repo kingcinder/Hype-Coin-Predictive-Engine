@@ -107,6 +107,24 @@ class ParityMismatchRow(BaseModel):
     state: str
 
 
+class ScoreFamilyValidation(BaseModel):
+    validated: bool
+
+
+UNVALIDATED_SCORE_FAMILIES = (
+    "hype",
+    "ethos",
+    "liquidity_access",
+    "manipulation",
+    "catalyst",
+    "research_priority",
+)
+
+
+def score_family_validation() -> dict[str, ScoreFamilyValidation]:
+    return {family: ScoreFamilyValidation(validated=False) for family in UNVALIDATED_SCORE_FAMILIES}
+
+
 class TokenScoreRow(BaseModel):
     asset_id: int
     chain: str
@@ -125,6 +143,7 @@ class TokenScoreRow(BaseModel):
     exit_risk: float
     research_priority: float
     risk_band: str
+    score_validation: dict[str, ScoreFamilyValidation]
 
 
 class FeatureRow(BaseModel):
@@ -290,6 +309,7 @@ class SimilarSetupRow(BaseModel):
     hype: float | None
     risk_band: str | None
     research_priority: float | None
+    score_validation: dict[str, ScoreFamilyValidation]
 
 
 class IgnitionEventRow(BaseModel):

@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,6 +69,7 @@ from api.schemas import (
     TriggerResponse,
     ValidationReportResponse,
     VelocityFeatureRow,
+    score_family_validation,
 )
 from common.config import get_settings
 from common.enums import AlertState
@@ -223,6 +224,7 @@ def _score_row(session: Session, score: models.Score) -> TokenScoreRow:
         exit_risk=score.exit_risk,
         research_priority=score.research_priority,
         risk_band=score.risk_band,
+        score_validation=score_family_validation(),
     )
 
 
@@ -449,8 +451,11 @@ def tokens_hot(
     session: DbSession,
     limit: Annotated[int, Query(ge=1, le=200)] = 25,
     include_black: bool = False,
+    order_by: Literal[
+        "confidence", "risk", "exit_risk", "uncertainty", "hype", "research_priority"
+    ] = "confidence",
 ) -> list[TokenScoreRow]:
-    rows = latest_scores(session, limit=limit, include_black=include_black, order_by="hype")
+    rows = latest_scores(session, limit=limit, include_black=include_black, order_by=order_by)
     return [_score_row(session, row) for row in rows]
 
 
@@ -459,10 +464,11 @@ def scores_top(
     session: DbSession,
     limit: Annotated[int, Query(ge=1, le=200)] = 25,
     include_black: bool = False,
+    order_by: Literal[
+        "confidence", "risk", "exit_risk", "uncertainty", "hype", "research_priority"
+    ] = "confidence",
 ) -> list[TokenScoreRow]:
-    rows = latest_scores(
-        session, limit=limit, include_black=include_black, order_by="research_priority"
-    )
+    rows = latest_scores(session, limit=limit, include_black=include_black, order_by=order_by)
     return [_score_row(session, row) for row in rows]
 
 
@@ -937,6 +943,7 @@ def token_similar_setups(
                 hype=row.score.hype if row.score else None,
                 risk_band=row.score.risk_band if row.score else None,
                 research_priority=row.score.research_priority if row.score else None,
+                score_validation=score_family_validation(),
             )
         )
     return out

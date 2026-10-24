@@ -34,7 +34,10 @@ def _api_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
-def test_api_endpoints_return_fixture_data(session) -> None:
+def test_api_endpoints_return_fixture_data(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep this fixture scan offline: only test the score/API behavior here.
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    get_settings.cache_clear()
     asset = seed_market_asset(session)
     similar_asset = seed_market_asset(
         session,
@@ -44,6 +47,22 @@ def test_api_endpoints_return_fixture_data(session) -> None:
     )
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
     score_current_assets(session, decision_ts=decision_ts, asset_ids=[asset.id, similar_asset.id])
+    asset_score = session.scalar(
+        select(models.Score).where(
+            models.Score.asset_id == asset.id,
+            models.Score.decision_ts == decision_ts,
+        )
+    )
+    similar_score = session.scalar(
+        select(models.Score).where(
+            models.Score.asset_id == similar_asset.id,
+            models.Score.decision_ts == decision_ts,
+        )
+    )
+    assert asset_score is not None and similar_score is not None
+    asset_score.hype, asset_score.research_priority, asset_score.confidence = 99.0, 90.0, 10.0
+    similar_score.hype, similar_score.research_priority, similar_score.confidence = 10.0, 1.0, 90.0
+    session.flush()
     IgnitionRadar().scan(session, decision_ts=decision_ts)
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     session.add(
@@ -108,12 +127,33 @@ def test_api_endpoints_return_fixture_data(session) -> None:
         assert client.get("/health").status_code == 200
         top = client.get("/scores/top").json()
         assert isinstance(top, list)
+        assert top[0]["symbol"] == "SIM"  # default order uses confidence
+        assert top[0]["score_validation"]["hype"]["validated"] is False
+        assert top[0]["score_validation"]["ethos"]["validated"] is False
+        assert top[0]["score_validation"]["liquidity_access"]["validated"] is False
+        assert top[0]["score_validation"]["manipulation"]["validated"] is False
+        assert top[0]["score_validation"]["catalyst"]["validated"] is False
+        assert top[0]["score_validation"]["research_priority"]["validated"] is False
+        opted_in = client.get("/scores/top", params={"order_by": "research_priority"}).json()
+        assert opted_in[0]["symbol"] == "HYPE"
+        confidence_data = client.get("/data/confidence").json()
+        assert (
+            confidence_data["scoring_breakdown"][0]["score_validation"]["hype"]["validated"]
+            is False
+        )
         hot = client.get("/tokens/hot", params={"include_black": True}).json()
+        assert hot[0]["symbol"] == "SIM"  # unvalidated hype is opt-in
+        by_hype = client.get(
+            "/tokens/hot", params={"include_black": True, "order_by": "hype"}
+        ).json()
+        assert by_hype[0]["symbol"] == "HYPE"
+        assert client.get("/scores/top", params={"order_by": "not-a-score"}).status_code == 422
         hot_symbols = {item["symbol"] for item in hot}
         assert "HYPE" in hot_symbols
         assert "SIM" in hot_symbols
         detail = client.get(f"/tokens/{asset.id}").json()
         assert detail["latest_score"]["asset_id"] == asset.id
+        assert detail["latest_score"]["score_validation"]["catalyst"]["validated"] is False
         risk = client.get(f"/risk/{asset.id}").json()
         assert risk["risk_band"] in {"GREEN", "YELLOW", "ORANGE", "RED", "BLACK"}
         alerts = client.get("/alerts").json()

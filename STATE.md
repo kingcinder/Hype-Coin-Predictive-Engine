@@ -86,7 +86,7 @@ checkout state and is no longer current. Work for this task is on
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
 | O1 | Disable Nitter + X-trends crawlers by policy | planned (T9; user-authorized) | Both `nightcrawler_nitter_enabled` and `nightcrawler_x_trends_enabled` default to `True` in `common/config.py` `[verified 2026-10-23]` |
-| O2 | De-emphasize non-benchmarkable score family in the GUI and API | planned (T8) | GUI still sorts by hype/research priority; score-family validation metadata and badges are not present `[verified 2026-10-23]` |
+| O2 | De-emphasize non-benchmarkable score family in the GUI and API | done (2026-10-23) | Six score families carry `score_validation[family].validated=false`; GUI badges link the field report; top pages default to confidence order and offer explicit unvalidated sort options `[verified 2026-10-23]` |
 | O3 | Suppress-or-flag concordance ≥ 0.95 surfaced without the leakage cross-check | done (2026-10-23) | `validation/presentation.py` suppresses values without a non-empty audit and marks audit findings; `/validation/latest` and the Validation Integrity GUI show the status `[verified 2026-10-23]` |
 
 ## Dependency order
@@ -344,6 +344,29 @@ in-flight work from other agents, still untouched.
 - Pre-task checks: full pytest suite passed (800 tests, 11 skipped); Ruff passed;
   mypy passed (53 files); broken-import scan passed (244 files); declared-deps
   scan passed (28 roots, 244 files).
+- Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
+  (53 files); broken-import scan passed (244 files); declared-deps scan passed
+  (28 roots, 244 files).
+
+### 2026-10-23 — T8: Unvalidated score presentation (done)
+
+- Added `score_validation[family].validated` metadata to API score rows and the
+  Confidence Dashboard breakdown for `hype`, `ethos`, `liquidity_access`,
+  `manipulation`, `catalyst`, and `research_priority`; all remain `false` until
+  they have ground truth.
+- Added visible warning badges, linked report tooltips, and per-column
+  unvalidated labels in the GUI. The Confidence Dashboard displays the latest
+  report's verdict/status cells and leakage cross-check state.
+- `/tokens/hot` and `/scores/top` now default to confidence ordering. The Top
+  Hype and Top Research pages retain explicit selectors for their unvalidated
+  sort keys and offer risk, exit risk, and uncertainty ordering. The score API
+  still permits those unvalidated sorts when explicitly requested.
+- Regression coverage verifies the six API validation flags, default and
+  selected ordering, rejection of unsupported sort keys, and the same metadata
+  in token detail and Confidence Dashboard API responses.
+- Pre-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
+  (53 files); broken-import scan passed (244 files); declared-deps scan passed
+  (28 roots, 244 files).
 - Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
   (53 files); broken-import scan passed (244 files); declared-deps scan passed
   (28 roots, 244 files).
