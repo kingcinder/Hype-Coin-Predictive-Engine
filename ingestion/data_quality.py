@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from common.logging import get_logger
-from common.time import utc_now
+from common.time import ensure_utc, utc_now
 
 log = get_logger(__name__)
 
@@ -96,7 +96,7 @@ def check_market_snapshots(
         # ── Stale price ─────────────────────────────────────────────
         ts = snap.get("ts")
         if ts is not None:
-            age = decision_ts - ts if isinstance(ts, datetime) else None
+            age = ensure_utc(decision_ts) - ensure_utc(ts) if isinstance(ts, datetime) else None
             if age and age > timedelta(minutes=STALE_PRICE_MINUTES):
                 report.stale_count += 1
                 report.issues.append(

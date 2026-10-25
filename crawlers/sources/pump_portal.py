@@ -16,7 +16,7 @@ import json
 from typing import Any
 
 from common.logging import get_logger
-from common.time import utc_now
+from common.time import ensure_utc, utc_now
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -149,6 +149,6 @@ class PumpPortalCrawler(BaseCrawler):
                 created = datetime.fromtimestamp(ts, tz=UTC)
             else:
                 created = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-            return round((utc_now() - created).total_seconds() / 60.0, 1)
+            return round((utc_now() - ensure_utc(created)).total_seconds() / 60.0, 1)
         except Exception:  # noqa: BLE001
             return None

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from data_lake.manager import run_data_lake_pass
 from data_lake.signal import _temporal_score
+from ingestion.data_quality import check_market_snapshots
 from scripts.seed_fixtures import seed_fixture_data
 
 DECISION_TS = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
@@ -31,6 +32,18 @@ def test_temporal_score_matches_aware_and_naive_inputs() -> None:
     aware = _temporal_score(DECISION_TS - timedelta(hours=10), DECISION_TS)
     naive = _temporal_score((DECISION_TS - timedelta(hours=10)).replace(tzinfo=None), DECISION_TS)
     assert aware == naive
+
+
+def test_check_market_snapshots_accepts_naive_ts() -> None:
+    """A naive ts from a DB row must not crash the stale-price check."""
+    snap = {
+        "ts": (DECISION_TS - timedelta(hours=2)).replace(tzinfo=None),
+        "pair_id": 1,
+        "price_usd": 1.0,
+    }
+    report = check_market_snapshots([snap], decision_ts=DECISION_TS)
+
+    assert report.stale_count == 1
 
 
 def test_data_lake_pass_succeeds_on_seeded_sqlite(session: Session) -> None:

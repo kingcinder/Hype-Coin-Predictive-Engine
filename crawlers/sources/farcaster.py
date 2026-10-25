@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from common.logging import get_logger
-from common.time import utc_now
+from common.time import ensure_utc, utc_now
 from crawlers.base import BaseCrawler
 from crawlers.sources.utils import extract_token_mentions
 
@@ -296,7 +296,7 @@ def _age_minutes(published: datetime | None) -> float:
     """Return the age of a cast in minutes since publication."""
     if published is None:
         return 60.0  # assume 1 hour if timestamp missing
-    delta = utc_now() - published
+    delta = utc_now() - ensure_utc(published)
     return max(delta.total_seconds() / 60.0, 0.1)
 
 
