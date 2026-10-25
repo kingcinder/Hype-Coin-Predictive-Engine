@@ -430,3 +430,48 @@ concordance 0.9687 (n=396), and confidence calibration error 0.0798 vs 0.10
 insufficient-data forecast, hazard, and ensemble cells. The exact run output
 was written outside the repository to `/tmp/hype-validation-2026-10-25.json`;
 no metrics were changed or hidden to produce this addendum.
+
+## 14. 2026-10-25 addendum — source-level replay audit and remaining limits
+
+The preliminary statement above that the three availability findings were a
+measurement artifact is withdrawn. The harness now ignores `Feature` rows with
+`missing_flag=true` and treats `Feature.observed_at` as materialization time
+only. For market- and contract-derived features, it rebuilds the value from
+source rows gated by record creation, source observation, and event time; the
+stored value receives source availability credit only when this replay matches
+it. Unmatched values remain unverified and retain the conservative late-time
+check. Pair age now excludes pairs recorded after the decision. Market and
+liquidity blocks reject event timestamps after the decision. Contract features
+exclude later-created contracts and future-dated flags; no eligible contract
+evidence produces missing values.
+
+The audit ran `python -m validation --db` on a consistent read-only backup of
+the root `serpent.db` (2,013 outcome samples). Source replay verified 0 of the
+non-missing rows for each target: `pair_age_minutes` 996 unverified,
+`volume_acceleration` 168, `liquidity_depth` 168,
+`suspicious_contract_flags` 2,013, and `deployer_history_available` 2,013.
+The source tables explain why this history cannot certify availability:
+608/884 market snapshots and 610/891 liquidity snapshots have a parent pair
+recorded after the snapshot's `observed_at`; 395/483 contract records were
+created after their `observed_at`. Those rows do not prove what the engine
+knew at the historical decisions. The original three flags are therefore not
+cleared as harmless; the report now says when source replay cannot verify a
+persisted value. No change was made to the root DB.
+
+The refreshed validation run still reports 2 suspicious high-concordance
+features (`suspicious_contract_flags` and `deployer_history_available`, each
+0.9719 concordance and 0.0000 availability in the evaluated slice). The five
+source-replay counts above are also included in the leakage cell's note. These
+are unresolved historical-data provenance findings, not a claim that newly
+built features still use future records; regression tests cover the new
+creation-time, observation-time, and event-time guards.
+
+The measured output is committed as
+[`reports/validation-2026-10-25-source-availability.json`](../reports/validation-2026-10-25-source-availability.json).
+
+Predictive utility remains unresolved: RiskBand is worse than always-GREEN,
+BLACK precision equals the base rate, and no forecast/hazard/ensemble result
+has enough data. The source audit did not change metrics, thresholds, or
+calibration. The historical values cannot be repaired into trustworthy
+point-in-time rows without acquisition-time evidence that is absent from this
+DB; future ingests and replays now retain conservative availability.

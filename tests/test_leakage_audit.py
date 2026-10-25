@@ -28,7 +28,7 @@ from data_lake.labels import (
     label_generation_progress,
     replay_historical_labels,
 )
-from features.factory import FeatureFactory
+from features.factory import FeatureFactory, compute_market_block
 from forecast.engine import _LEAKAGE_FEATURES, FORECAST_FEATURE_NAMES
 from forecast.labels import LABEL_COLLAPSE, seed_labels_at_feature_timestamps
 from storage import models
@@ -40,6 +40,7 @@ from storage.repository import (
     upsert_pool_and_pair,
 )
 from tests.conftest import seed_market_asset, seed_reference
+from validation.harness import audit_feature_leakage
 from validation.leakage_guard import check_rows_point_in_time
 
 T0 = datetime(2026, 5, 1, 0, 0)  # naive for SQLite compatibility
@@ -78,6 +79,8 @@ def _seed_arc(
         quote_asset_id=quote.id,
         created_at_source=T0,
     )
+    pool.created_at = T0
+    pair.created_at = T0
     for hour, price in enumerate(prices):
         ts = T0 + timedelta(hours=hour)
         insert_market_snapshot_once(
@@ -135,6 +138,61 @@ def test_deployer_history_ignores_contracts_observed_after_decision(session) -> 
         value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
     }
     assert values["deployer_history_available"].value == 0.0
+    assert values["deployer_history_available"].missing is True
+
+
+def test_deployer_history_ignores_contract_records_created_after_decision(session) -> None:
+    asset = seed_market_asset(session)
+    contract = models.Contract(
+        chain_id=asset.chain_id,
+        asset_id=asset.id,
+        address="0xLateRecord1111111111111111111111111111111",
+        deployer_wallet="0xDeployer111111111111111111111111111111",
+        observed_at=DECISION - timedelta(hours=1),
+        created_at=DECISION + timedelta(hours=1),
+    )
+    session.add(contract)
+    session.flush()
+
+    assert FeatureFactory()._deployer_history(session, asset.id, DECISION) is None
+
+
+def test_contract_features_are_missing_without_prior_contract_evidence(session) -> None:
+    asset = seed_market_asset(session)
+    values = {
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+    }
+
+    for name in ("suspicious_contract_flags", "deployer_history_available"):
+        assert values[name].missing is True
+        assert values[name].source_count == 0
+
+
+def test_contract_flags_reject_future_event_times_even_when_observed_early(session) -> None:
+    asset = seed_market_asset(session)
+    chain, source = seed_reference(session)
+    contract = models.Contract(
+        chain_id=chain.id,
+        asset_id=asset.id,
+        address="0xFlagged11111111111111111111111111111111",
+        observed_at=DECISION - timedelta(hours=1),
+        created_at=DECISION - timedelta(hours=1),
+    )
+    session.add(contract)
+    session.flush()
+    session.add(
+        models.ContractFlag(
+            contract_id=contract.id,
+            source_id=source.id,
+            ts=DECISION + timedelta(hours=1),
+            observed_at=DECISION,
+            flag_type="future_event",
+            severity="critical",
+        )
+    )
+    session.flush()
+
+    assert FeatureFactory()._contract_flag_count(session, asset.id, DECISION) == 0.0
 
 
 def test_deployer_history_counts_contracts_observed_at_decision(session) -> None:
@@ -148,6 +206,7 @@ def test_deployer_history_counts_contracts_observed_at_decision(session) -> None
             address="0xAt1111111111111111111111111111111111111111",
             deployer_wallet="0xDeployer111111111111111111111111111111",
             observed_at=DECISION,
+            created_at=DECISION,
         )
     )
     session.commit()
@@ -184,6 +243,128 @@ def test_historical_feature_materialization_is_not_source_availability(session) 
     assert check_rows_point_in_time(sources, decision, feature_name="market_block") == 12
     values = {v.name: v for v in FeatureFactory().build_for_asset(session, asset, decision)}
     assert values["liquidity_depth"].value == 200_000.0
+
+
+def test_leakage_audit_ignores_missing_zero_placeholders(session) -> None:
+    """A zero placeholder marked missing must not count as a late observation."""
+    asset = seed_market_asset(session)
+    outcomes = []
+    for index in range(12):
+        decision = DECISION + timedelta(minutes=index)
+        missing = index >= 10
+        collapsed = 6 <= index < 10
+        upsert_feature(
+            session,
+            asset_id=asset.id,
+            decision_ts=decision,
+            feature_name="hype",
+            feature_value=float(collapsed) if not missing else 0.0,
+            source_count=0 if missing else 1,
+            freshness_score=0.0 if missing else 1.0,
+            missing_flag=missing,
+        )
+        feature = session.scalar(
+            select(models.Feature).where(
+                models.Feature.asset_id == asset.id,
+                models.Feature.decision_ts == decision,
+                models.Feature.feature_name == "hype",
+            )
+        )
+        if missing:
+            feature.observed_at = decision + timedelta(hours=1)
+        else:
+            feature.observed_at = decision
+        outcomes.append(
+            SimpleNamespace(
+                asset_id=asset.id,
+                decision_ts=decision,
+                collapsed=collapsed,
+                rugged=False,
+            )
+        )
+    session.flush()
+
+    report, n = audit_feature_leakage(session, outcomes)
+
+    assert n == 12
+    assert not report.flagged
+
+
+def test_market_block_rejects_future_event_timestamps_and_late_pairs() -> None:
+    decision = DECISION
+    prior_pair = SimpleNamespace(
+        created_at_source=decision - timedelta(hours=2),
+        created_at=decision - timedelta(hours=2),
+    )
+    late_pair = SimpleNamespace(
+        created_at_source=decision - timedelta(days=1),
+        created_at=decision + timedelta(hours=1),
+    )
+    asset = SimpleNamespace(first_seen_at=decision - timedelta(days=2))
+    market_rows = [
+        SimpleNamespace(
+            pair_id=1,
+            ts=decision - timedelta(minutes=1),
+            observed_at=decision - timedelta(minutes=1),
+            price_usd=1.0,
+            volume_usd=10.0,
+            buys=1,
+            sells=1,
+            source_id=1,
+        ),
+        SimpleNamespace(
+            pair_id=2,
+            ts=decision + timedelta(seconds=1),
+            observed_at=decision,
+            price_usd=10.0,
+            volume_usd=100.0,
+            buys=10,
+            sells=1,
+            source_id=2,
+        ),
+    ]
+    liquidity_rows = [
+        SimpleNamespace(
+            pool_id=1,
+            ts=decision - timedelta(minutes=1),
+            observed_at=decision - timedelta(minutes=1),
+            reserve_usd=100.0,
+            source_id=1,
+        ),
+        SimpleNamespace(
+            pool_id=2,
+            ts=decision + timedelta(seconds=1),
+            observed_at=decision,
+            reserve_usd=999.0,
+            source_id=2,
+        ),
+    ]
+
+    values = compute_market_block(
+        asset=asset,
+        pairs=[prior_pair, late_pair],
+        market_rows=market_rows,
+        liquidity_rows=liquidity_rows,
+        decision_ts=decision,
+    )
+
+    assert values["pair_age_minutes"].value == 120.0
+    assert values["volume_acceleration"].missing is True
+    assert values["liquidity_depth"].value == 100.0
+
+
+def test_market_factory_ignores_liquidity_for_a_late_created_pool(session) -> None:
+    asset = seed_market_asset(session)
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    pool = session.get(models.Pool, pair.pool_id)
+    pool.created_at = DECISION + timedelta(hours=1)
+    session.flush()
+
+    values = {
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+    }
+
+    assert values["liquidity_depth"].missing is True
 
 
 # ── Finding 2: website/github presence must be unknown, not leaked ──────────

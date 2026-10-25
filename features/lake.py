@@ -294,7 +294,7 @@ class LakeReconstruction:
     holder_count: float | None
     holder_growth: float | None
     holder_concentration: float | None
-    suspicious_contract_flags: float
+    suspicious_contract_flags: float | None
 
 
 class LakeFeatureFactory:
@@ -462,7 +462,12 @@ class LakeFeatureFactory:
         """Turn one asset's reconstruction into the FeatureValue set."""
         asset = SimpleNamespace(first_seen_at=recon.pair_created_at or ensure_utc(decision_ts))
         pairs = (
-            [SimpleNamespace(created_at_source=recon.pair_created_at)]
+            [
+                SimpleNamespace(
+                    created_at_source=recon.pair_created_at,
+                    created_at=ensure_utc(decision_ts),
+                )
+            ]
             if recon.pair_created_at is not None
             else []
         )
@@ -490,10 +495,11 @@ class LakeFeatureFactory:
             1 if recon.holder_concentration is not None else 0,
             1.0 if recon.holder_concentration is not None else 0.0,
         )
-        # The SQL path reports suspicious_contract_flags as 0.0 (never
-        # missing) even with no flags; the lake path mirrors that.
         values["suspicious_contract_flags"] = _feature(
-            "suspicious_contract_flags", recon.suspicious_contract_flags, 1, 1.0
+            "suspicious_contract_flags",
+            recon.suspicious_contract_flags,
+            1 if recon.suspicious_contract_flags is not None else 0,
+            1.0 if recon.suspicious_contract_flags is not None else 0.0,
         )
         return values
 
@@ -605,7 +611,7 @@ class LakeFeatureFactory:
             return {}
         keys = self.store.list_objects(self.settings.archive_prefix)
         if not keys:
-            empty = LakeReconstruction([], [], None, None, None, None, 0.0)
+            empty = LakeReconstruction([], [], None, None, None, None, None)
             return {address: empty for address in addresses}
         import duckdb
 
@@ -640,7 +646,7 @@ class LakeFeatureFactory:
                 holder_count=holder_count,
                 holder_growth=holder_growth,
                 holder_concentration=concentration,
-                suspicious_contract_flags=flag_by_asset.get(address, 0.0),
+                suspicious_contract_flags=flag_by_asset.get(address),
             )
         return out
 
@@ -806,7 +812,7 @@ class LakeFeatureFactory:
         files: list[str],
         asset_address: str,
         naive_ts: datetime,
-    ) -> float:
+    ) -> float | None:
         """Single-asset wrapper over the batched flag count."""
         return self._flag_count_batch(con, files, [asset_address], naive_ts)[asset_address]
 
@@ -816,7 +822,7 @@ class LakeFeatureFactory:
         files: list[str],
         addresses: list[str],
         naive_ts: datetime,
-    ) -> dict[str, float]:
+    ) -> dict[str, float | None]:
         """Count evidence-backed contract flags per asset in one query: the
         GeckoTerminal pool scans whose ``reserve_in_usd`` fell below the
         discovery liquidity threshold (each created one ``low_liquidity``
@@ -835,18 +841,19 @@ class LakeFeatureFactory:
             },
         ).fetchall()
         columns = [description[0] for description in con.description]
-        out: dict[str, float] = {address: 0.0 for address in addresses}
+        out: dict[str, float | None] = {}
         for values in rows:
             record = dict(zip(columns, values, strict=True))
             address = str(record["base_address"])
-            if address not in out:
+            if address not in addresses:
                 continue
+            out.setdefault(address, 0.0)
             reserve = record["reserve_usd"]
             if reserve is not None and reserve < self.settings.min_discovery_liquidity_usd:
-                out[address] += 1.0
+                out[address] = float(out.get(address) or 0.0) + 1.0
         analysis = self._analysis_flag_count_batch(con, files, addresses, naive_ts)
-        for address in addresses:
-            out[address] += analysis.get(address, 0.0)
+        for address, count in analysis.items():
+            out[address] = float(out.get(address) or 0.0) + count
         return out
 
     def _analysis_flag_count_batch(
@@ -876,12 +883,13 @@ class LakeFeatureFactory:
             },
         ).fetchall()
         columns = [description[0] for description in con.description]
-        out: dict[str, float] = {address: 0.0 for address in addresses}
+        out: dict[str, float] = {}
         for values in rows:
             record = dict(zip(columns, values, strict=True))
             address = str(record["asset_address"])
-            if address not in out:
+            if address not in addresses:
                 continue
+            out.setdefault(address, 0.0)
             try:
                 findings = json.loads(record["findings_json"] or "[]")
             except (TypeError, ValueError):

@@ -125,7 +125,7 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         name="Wrapped Ether",
         first_seen_at=created - timedelta(days=365),
     )
-    _, pair = upsert_pool_and_pair(
+    pool, pair = upsert_pool_and_pair(
         session,
         chain_id=chain.id,
         dex_id="raydium",
@@ -134,6 +134,8 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         quote_asset_id=quote.id,
         created_at_source=created,
     )
+    pool.created_at = created
+    pair.created_at = created
 
     # Price arc over the trailing 2h.
     arc = [(2, 1.10, 7_000, 18, 7), (1, 1.25, 18_000, 38, 14)]
@@ -214,6 +216,7 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         address=BASE_ADDRESS,
         observed_at=low_observed,
     )
+    contract.created_at = low_observed
     session.add(
         models.ContractFlag(
             contract_id=contract.id,

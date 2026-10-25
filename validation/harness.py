@@ -825,11 +825,12 @@ def audit_feature_leakage(
 ) -> tuple[LeakageReport, int]:
     """Run the point-in-time leakage audit on the engine's own persisted rows.
 
-    Joins Feature rows (value + observed_at) to each outcome's
-    (asset_id, decision_ts) and scans the top-concordance features for values
-    observed AFTER their decision time — the exact failure mode the Phase 0
-    leakage audit chased. Previously this detector only ever ran on synthetic
-    self-test data; now it runs on real engine data inside run_harness.
+    Joins Feature rows to each outcome's (asset_id, decision_ts) and scans the
+    top-concordance features for values observed AFTER their decision time.
+    A feature's missing placeholder is excluded, because its numeric zero is
+    not an observed value. Market and contract-derived values use source-row
+    availability rather than feature materialization time when they can be
+    reproduced from point-in-time inputs.
     Returns (report, n_samples audited).
     """
     samples: list[tuple[int, datetime, float]] = []
@@ -852,18 +853,21 @@ def audit_feature_leakage(
             models.Feature.feature_name,
             models.Feature.feature_value,
             models.Feature.observed_at,
+            models.Feature.missing_flag,
         ).where(
             tuple_(models.Feature.asset_id, models.Feature.decision_ts).in_(
                 [(asset_id, ts) for asset_id, ts, _ in samples]
             )
         )
     ).all()
-    per_feature: dict[str, dict[tuple[int, datetime], tuple[float, datetime | None]]] = {}
-    for asset_id, feature_ts, name, value, observed_at in rows:
+    per_feature: dict[str, dict[tuple[int, datetime], tuple[float, datetime | None, bool]]] = {}
+    for asset_id, feature_ts, name, value, observed_at, missing in rows:
         per_feature.setdefault(str(name), {})[(int(asset_id), _as_utc(feature_ts))] = (
             float(value) if value is not None else float("nan"),
             _as_utc(observed_at),
+            bool(missing),
         )
+    source_available_at = _reproducible_source_times(session, samples, per_feature)
     n = len(samples)
     feature_values: dict[str, np.ndarray] = {}
     observed_at_map: dict[str, np.ndarray] = {}
@@ -876,13 +880,147 @@ def audit_feature_leakage(
                 values.append(float("nan"))
                 observed.append(ts)  # missing feature: no violation possible
             else:
-                values.append(hit[0])
-                observed.append(hit[1] if hit[1] is not None else ts)
+                values.append(float("nan") if hit[2] else hit[0])
+                source_ts = source_available_at.get(name, {}).get((asset_id, ts))
+                observed.append(
+                    source_ts if source_ts is not None else (hit[1] if hit[1] is not None else ts)
+                )
         feature_values[name] = np.array(values)
         observed_at_map[name] = np.array(observed, dtype=object)
     decision_arr = np.array([ts for _, ts, _ in samples], dtype=object)
     labels = np.array([label for _, _, label in samples])
-    return check_feature_leakage(feature_values, observed_at_map, decision_arr, labels), n
+    report = check_feature_leakage(feature_values, observed_at_map, decision_arr, labels)
+    for name, verified in source_available_at.items():
+        entries = per_feature[name]
+        non_missing = sum(not row[2] for row in entries.values())
+        unverified = non_missing - len(verified)
+        if unverified > 0:
+            report.source_unverified_values[name] = unverified
+    if report.source_unverified_values:
+        details = ", ".join(
+            f"{name}={count}" for name, count in sorted(report.source_unverified_values.items())
+        )
+        report.reason = "; ".join(
+            part
+            for part in (
+                report.reason,
+                f"source replay could not verify non-missing values: {details}",
+            )
+            if part
+        )
+    return report, n
+
+
+def _reproducible_source_times(
+    session: Session,
+    samples: list[tuple[int, datetime, float]],
+    per_feature: dict[str, dict[tuple[int, datetime], tuple[float, datetime | None, bool]]],
+) -> dict[str, dict[tuple[int, datetime], datetime]]:
+    """Return source times only when persisted values replay from point-in-time inputs."""
+    from features.factory import (
+        FeatureFactory,
+        FeatureValue,
+        _load_pit_market_inputs,
+        compute_market_block,
+    )
+
+    market_names = {"pair_age_minutes", "volume_acceleration", "liquidity_depth"}
+    contract_names = {"suspicious_contract_flags", "deployer_history_available"}
+    source_names = market_names | contract_names
+    if not source_names.intersection(per_feature):
+        return {}
+    available: dict[str, dict[tuple[int, datetime], datetime]] = {
+        name: {} for name in source_names.intersection(per_feature)
+    }
+    factory = FeatureFactory()
+    for asset_id, decision_ts, _ in samples:
+        key = (asset_id, decision_ts)
+        candidates = [
+            name
+            for name in available
+            if (hit := per_feature[name].get(key)) is not None and not hit[2]
+        ]
+        if not candidates:
+            continue
+        asset = session.get(models.Asset, asset_id)
+        if asset is None:
+            continue
+        market_rows = []
+        liquidity_rows = []
+        pairs = []
+        computed: dict[str, Any] = {}
+        if market_names.intersection(candidates):
+            pairs, market_rows, liquidity_rows = _load_pit_market_inputs(
+                session, asset_id, decision_ts
+            )
+            computed.update(
+                compute_market_block(
+                    asset=asset,
+                    pairs=pairs,
+                    market_rows=market_rows,
+                    liquidity_rows=liquidity_rows,
+                    decision_ts=decision_ts,
+                )
+            )
+        contracts = []
+        flags = []
+        if contract_names.intersection(candidates):
+            contracts = list(
+                session.scalars(
+                    select(models.Contract).where(
+                        models.Contract.asset_id == asset_id,
+                        models.Contract.created_at <= decision_ts,
+                        models.Contract.observed_at <= decision_ts,
+                    )
+                )
+            )
+            contract_ids = [contract.id for contract in contracts]
+            if contract_ids:
+                flags = list(
+                    session.scalars(
+                        select(models.ContractFlag).where(
+                            models.ContractFlag.contract_id.in_(contract_ids),
+                            models.ContractFlag.observed_at <= decision_ts,
+                            models.ContractFlag.ts <= decision_ts,
+                        )
+                    )
+                )
+            if "suspicious_contract_flags" in candidates:
+                value = factory._contract_flag_count(session, asset_id, decision_ts)
+                computed["suspicious_contract_flags"] = FeatureValue(
+                    "suspicious_contract_flags",
+                    value if value is not None else 0.0,
+                    value is None,
+                )
+            if "deployer_history_available" in candidates:
+                value = factory._deployer_history(session, asset_id, decision_ts)
+                computed["deployer_history_available"] = FeatureValue(
+                    "deployer_history_available",
+                    value if value is not None else 0.0,
+                    value is None,
+                )
+        for name in candidates:
+            expected = computed.get(name)
+            if expected is None:
+                continue
+            stored = per_feature[name][key][0]
+            if expected.missing or not np.isclose(expected.value, stored, rtol=1e-9, atol=1e-9):
+                continue
+            if name == "pair_age_minutes":
+                source_times = [pair.created_at for pair in pairs]
+            elif name == "volume_acceleration":
+                source_times = [row.observed_at for row in market_rows]
+            elif name == "liquidity_depth":
+                source_times = [row.observed_at for row in liquidity_rows]
+            elif name == "suspicious_contract_flags":
+                source_times = [contract.observed_at for contract in contracts]
+                source_times.extend(flag.observed_at for flag in flags)
+            else:
+                source_times = [contract.observed_at for contract in contracts]
+            normalized = [_as_utc(value) for value in source_times if value is not None]
+            if normalized:
+                available[name][key] = max(normalized)
+    return available
 
 
 def run_harness(
@@ -1160,12 +1298,16 @@ def run_harness(
             verdict=(
                 "insufficient_data"
                 if leak_n < min_samples
-                else ("worse" if leak_report.flagged else "better")
+                else (
+                    "worse"
+                    if leak_report.flagged
+                    else ("insufficient_data" if leak_report.source_unverified_values else "better")
+                )
             ),
             leakage_suspected=leak_report.flagged,
             note=(
                 leak_report.reason
-                if leak_report.flagged
+                if leak_report.flagged or leak_report.source_unverified_values
                 else f"point-in-time audit over {leak_n} outcome samples: no suspected leaks"
             ),
         )

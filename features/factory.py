@@ -200,11 +200,27 @@ def compute_market_block(
     Operates on duck-typed rows (``ts``, ``price_usd``, ``volume_usd``,
     ``buys``, ``sells``, ``observed_at``, ``source_id`` for market rows;
     ``ts``, ``reserve_usd``, ``observed_at`` for liquidity rows; pairs need
-    ``created_at_source``; the asset needs ``first_seen_at``), so the SQL path
+    ``created_at`` and ``created_at_source``; the asset needs ``first_seen_at``), so the SQL path
     passes ORM rows and the DuckDB lake path passes namespaces reconstructed
     from the Parquet lake. Both paths provably compute identical values.
     """
     decision_ts = ensure_utc(decision_ts)
+    market_rows = [
+        row
+        for row in market_rows
+        if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
+    ]
+    liquidity_rows = [
+        row
+        for row in liquidity_rows
+        if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
+    ]
+    known_pairs = [
+        pair
+        for pair in pairs
+        if getattr(pair, "created_at", None) is not None
+        and ensure_utc(pair.created_at) <= decision_ts
+    ]
     latest_market = max(market_rows, key=lambda row: row.ts) if market_rows else None
     latest_liquidity = max(liquidity_rows, key=lambda row: row.ts) if liquidity_rows else None
 
@@ -236,11 +252,15 @@ def compute_market_block(
     )
 
     pair_age = None
-    if pairs:
-        first_pair_time = min(
-            [pair.created_at_source for pair in pairs if pair.created_at_source]
-            or [asset.first_seen_at]
-        )
+    if known_pairs:
+        pair_times = [
+            pair.created_at_source
+            for pair in known_pairs
+            if pair.created_at_source and ensure_utc(pair.created_at_source) <= decision_ts
+        ]
+        if not pair_times and ensure_utc(asset.first_seen_at) <= decision_ts:
+            pair_times = [asset.first_seen_at]
+        first_pair_time = min(pair_times) if pair_times else None
         # Point-in-time guard: a pair created AFTER the decision time did not
         # exist yet at the decision — the age must read as missing, not clamp
         # to 0.0 (which would silently report "newborn" for a pair that was
@@ -320,6 +340,64 @@ def _volatility(market_rows: Sequence[Any]) -> float | None:
     return float(np.std(returns) * 100.0)
 
 
+def _load_pit_market_inputs(
+    session: Session, asset_id: int, decision_ts: datetime
+) -> tuple[list[models.Pair], list[models.MarketSnapshot], list[models.LiquiditySnapshot]]:
+    """Load market evidence whose records and observations existed by decision time."""
+    decision_ts = ensure_utc(decision_ts)
+    pairs = list(
+        session.scalars(
+            select(models.Pair).where(
+                models.Pair.base_asset_id == asset_id,
+                models.Pair.created_at <= decision_ts,
+            )
+        )
+    )
+    pair_ids = [pair.id for pair in pairs]
+    candidate_pool_ids = [pair.pool_id for pair in pairs if pair.pool_id is not None]
+    pool_ids = (
+        list(
+            session.scalars(
+                select(models.Pool.id).where(
+                    models.Pool.id.in_(candidate_pool_ids),
+                    models.Pool.created_at <= decision_ts,
+                )
+            )
+        )
+        if candidate_pool_ids
+        else []
+    )
+    market_rows: list[models.MarketSnapshot] = []
+    if pair_ids:
+        market_rows = list(
+            session.scalars(
+                select(models.MarketSnapshot)
+                .where(
+                    models.MarketSnapshot.pair_id.in_(pair_ids),
+                    models.MarketSnapshot.observed_at <= decision_ts,
+                    models.MarketSnapshot.ts <= decision_ts,
+                )
+                .order_by(models.MarketSnapshot.ts)
+            )
+        )
+    liquidity_rows: list[models.LiquiditySnapshot] = []
+    if pool_ids:
+        liquidity_rows = list(
+            session.scalars(
+                select(models.LiquiditySnapshot)
+                .where(
+                    models.LiquiditySnapshot.pool_id.in_(pool_ids),
+                    models.LiquiditySnapshot.observed_at <= decision_ts,
+                    models.LiquiditySnapshot.ts <= decision_ts,
+                )
+                .order_by(models.LiquiditySnapshot.ts)
+            )
+        )
+    check_rows_point_in_time(market_rows, decision_ts, feature_name="market_block")
+    check_rows_point_in_time(liquidity_rows, decision_ts, feature_name="market_block")
+    return pairs, market_rows, liquidity_rows
+
+
 class FeatureFactory:
     @require_decision_ts
     def build_for_asset(
@@ -331,41 +409,7 @@ class FeatureFactory:
         source_names: dict[int, str] | None = None,
     ) -> list[FeatureValue]:
         decision_ts = ensure_utc(decision_ts)
-        pairs = session.scalars(
-            select(models.Pair).where(models.Pair.base_asset_id == asset.id)
-        ).all()
-        pair_ids = [pair.id for pair in pairs]
-        pool_ids = [pair.pool_id for pair in pairs if pair.pool_id is not None]
-
-        market_rows: list[models.MarketSnapshot] = []
-        if pair_ids:
-            market_rows = list(
-                session.scalars(
-                    select(models.MarketSnapshot)
-                    .where(
-                        models.MarketSnapshot.pair_id.in_(pair_ids),
-                        models.MarketSnapshot.observed_at <= decision_ts,
-                    )
-                    .order_by(models.MarketSnapshot.ts)
-                )
-            )
-        liquidity_rows: list[models.LiquiditySnapshot] = []
-        if pool_ids:
-            liquidity_rows = list(
-                session.scalars(
-                    select(models.LiquiditySnapshot)
-                    .where(
-                        models.LiquiditySnapshot.pool_id.in_(pool_ids),
-                        models.LiquiditySnapshot.observed_at <= decision_ts,
-                    )
-                    .order_by(models.LiquiditySnapshot.ts)
-                )
-            )
-        # Point-in-time enforcement (plan #8): the SQL filters above are the
-        # first net; this assertion is the second - a query that ever loses
-        # its observed_at filter fails the build instead of leaking.
-        check_rows_point_in_time(market_rows, decision_ts, feature_name="market_block")
-        check_rows_point_in_time(liquidity_rows, decision_ts, feature_name="market_block")
+        pairs, market_rows, liquidity_rows = _load_pit_market_inputs(session, asset.id, decision_ts)
         market_block = compute_market_block(
             asset=asset,
             pairs=pairs,
@@ -378,6 +422,7 @@ class FeatureFactory:
             session, asset.id, decision_ts
         )
         flags = self._contract_flag_count(session, asset.id, decision_ts)
+        deployer_history = self._deployer_history(session, asset.id, decision_ts)
         mention_velocity, narrative_acceleration = self._attention_features(
             session, asset, decision_ts
         )
@@ -436,12 +481,17 @@ class FeatureFactory:
                 1 if github_presence is not None else 0,
                 1.0 if github_presence is not None else 0.0,
             ),
-            _feature("suspicious_contract_flags", flags, 1, 1.0),
+            _feature(
+                "suspicious_contract_flags",
+                flags,
+                1 if flags is not None else 0,
+                1.0 if flags is not None else 0.0,
+            ),
             _feature(
                 "deployer_history_available",
-                self._deployer_history(session, asset.id, decision_ts),
-                1,
-                1.0,
+                deployer_history,
+                1 if deployer_history is not None else 0,
+                1.0 if deployer_history is not None else 0.0,
             ),
             _feature(
                 "narrative_acceleration",
@@ -582,12 +632,18 @@ class FeatureFactory:
             growth = holder_count - float(prior_count or 0)
         return holder_count, growth, top_concentration
 
-    def _contract_flag_count(self, session: Session, asset_id: int, decision_ts: datetime) -> float:
+    def _contract_flag_count(
+        self, session: Session, asset_id: int, decision_ts: datetime
+    ) -> float | None:
         contract_ids = session.scalars(
-            select(models.Contract.id).where(models.Contract.asset_id == asset_id)
+            select(models.Contract.id).where(
+                models.Contract.asset_id == asset_id,
+                models.Contract.created_at <= decision_ts,
+                models.Contract.observed_at <= decision_ts,
+            )
         ).all()
         if not contract_ids:
-            return 0.0
+            return None
         return float(
             session.scalar(
                 select(func.count())
@@ -595,31 +651,31 @@ class FeatureFactory:
                 .where(
                     models.ContractFlag.contract_id.in_(contract_ids),
                     models.ContractFlag.observed_at <= decision_ts,
+                    models.ContractFlag.ts <= decision_ts,
                     models.ContractFlag.severity.in_(["warning", "high", "critical", "black"]),
                 )
             )
             or 0
         )
 
-    def _deployer_history(self, session: Session, asset_id: int, decision_ts: datetime) -> float:
+    def _deployer_history(
+        self, session: Session, asset_id: int, decision_ts: datetime
+    ) -> float | None:
         """Count contracts with a known deployer observed at or before decision time.
 
-        Gated on ``Contract.observed_at <= decision_ts`` so a contract that
-        was only inspected after the decision time cannot leak into a
-        historical feature snapshot.
+        Both the row's creation and observation must be no later than the
+        decision, so a later-discovered contract cannot enter a replay.
         """
-        return float(
-            session.scalar(
-                select(func.count())
-                .select_from(models.Contract)
-                .where(
-                    models.Contract.asset_id == asset_id,
-                    models.Contract.deployer_wallet.is_not(None),
-                    models.Contract.observed_at <= decision_ts,
-                )
+        contracts = session.scalars(
+            select(models.Contract).where(
+                models.Contract.asset_id == asset_id,
+                models.Contract.created_at <= decision_ts,
+                models.Contract.observed_at <= decision_ts,
             )
-            or 0
-        )
+        ).all()
+        if not contracts:
+            return None
+        return float(sum(contract.deployer_wallet is not None for contract in contracts))
 
     def _url_evidenced_before(
         self, session: Session, url: str | None, decision_ts: datetime

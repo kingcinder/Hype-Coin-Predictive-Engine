@@ -18,11 +18,13 @@ or `STATE.md` existed before 2026-09-09.
   ordinal distance 2.202 (n=396) vs always-GREEN 1.798; BLACK collapse precision
   0.0884 equals the 0.0884 base rate (n=2,013); `risk_score` and `exit_risk`
   concordance 0.9687 (n=396), both flagged suspicious-good; confidence
-  calibration error 0.0798 (n=2,013) vs 0.10 ceiling. The latest report still
-  flags `pair_age_minutes`, `volume_acceleration`, and `liquidity_depth` on
-  2,013/2,013 rows because `Feature.observed_at` is a materialization timestamp,
-  not input-source availability. The finding remains surfaced pending a
-  source-level audit `[report]`.
+  calibration error 0.0798 (n=2,013) vs 0.10 ceiling. The source-level replay
+  audit could not reproduce any non-missing values in five high-concordance
+  feature families (996 pair ages, 168 volume accelerations, 168 liquidity
+  depths, and 2,013 rows each for contract flags and deployer history). Keep
+  these historical values unverified; the current harness uses source replay
+  and retains conservative warnings. New feature builds now gate parent-record
+  creation, observation, and event times `[verified 2026-10-25]`.
 - Snapshot counts: 4,859 scores, 4,224 risk outcomes, 170,065 features,
   375 forecasts, and 522 labels `[verified 2026-10-25]`. Having persisted
   forecasts/labels does not make the forecast, hazard, or ensemble metrics
@@ -536,3 +538,34 @@ in-flight work from other agents, still untouched.
   commit `a18ae3b`; it updates only `coverage/history.json` and `coverage/trend.svg`.
   Fast-forwarded `main` and `fix/functional-pass` without rewriting history;
   both remote refs now include the final state-ledger commit and are synchronized.
+
+### 2026-10-25 — Source-level historical availability audit (done; stored history unverified)
+
+- Added source replay to `validation/harness.py`: market/liquidity and
+  contract-derived feature values are credited with source availability only
+  when the current point-in-time source rebuild exactly matches the stored
+  value. `Feature.missing_flag` placeholders are excluded from concordance.
+- Closed live-query gaps: market and liquidity event timestamps must be no
+  later than `decision_ts`; pair and contract records must have been created by
+  it; contract flags must have both event and observation timestamps by it.
+  With no eligible contract evidence, the contract features remain missing in
+  both SQL and lake paths.
+- Regression evidence: `tests/test_leakage_audit.py` covers missing zero
+  placeholders, late-created pairs/contracts, future event timestamps, and
+  feature materialization after the decision. Lake parity tests cover the
+  missing contract semantics.
+- A validation run on a consistent read-only DB backup verified 0 historical
+  values across the five source-replay candidates. Source chronology is
+  inconsistent: 608/884 market snapshots and 610/891 liquidity snapshots have
+  a parent pair created after `observed_at`; 395/483 contracts were created
+  after their `observed_at`. The prior “materialization artifact” inference is
+  withdrawn; those stored rows remain unverified and the root DB was untouched.
+- Predictive edge is still unproven: RiskBand remains worse than always-GREEN,
+  BLACK precision equals the base rate, and forecast/hazard/ensemble cells
+  remain insufficient-data. See addendum 14 in the validation field report.
+- Final verification on this checkout: `python -m pytest tests/ -o addopts= -q
+  -p no:cacheprovider` — 864 passed, 11 skipped, 1 warning; Ruff and formatting
+  pass; mypy reports no issues in 53 files; broken-import scan checks 251 files;
+  declared-dependency scan checks 29 roots/251 files. Validation self-tests
+  pass. The DB validation report is versioned at
+  `reports/validation-2026-10-25-source-availability.json`.

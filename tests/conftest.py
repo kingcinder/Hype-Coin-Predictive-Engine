@@ -178,6 +178,8 @@ def seed_market_asset(
         quote_asset_id=quote.id,
         created_at_source=now - timedelta(hours=2),
     )
+    pool.created_at = now - timedelta(hours=2)
+    pair.created_at = now - timedelta(hours=2)
     prices = [1.0, 1.05, 1.10]
     for idx, price in enumerate(prices):
         ts = now - timedelta(hours=2 - idx)

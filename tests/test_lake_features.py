@@ -217,6 +217,7 @@ def _seed_low_liquidity_scan(session, source, asset, pair, *, with_sql_rows: boo
             address=asset.address,
             observed_at=observed,
         )
+        contract.created_at = observed
         session.add(
             models.ContractFlag(
                 contract_id=contract.id,
@@ -337,6 +338,8 @@ def _seed_sql_and_lake(session, tmp_path) -> models.Asset:
         quote_asset_id=quote.id,
         created_at_source=created_at,
     )
+    pool.created_at = created_at
+    pair.created_at = created_at
 
     # price arc over the trailing 6h + a fresh print 1 minute before decision.
     arc = [
@@ -445,6 +448,7 @@ def _seed_lake_only(session, tmp_path) -> models.Asset:
         quote_asset_id=quote.id,
         created_at_source=created_at,
     )
+    pair.created_at = created_at
     arc = [
         (6, 1.00, 5_000, 12, 6),
         (5, 1.10, 7_000, 18, 7),
@@ -508,9 +512,9 @@ def test_lake_persist_for_assets_writes_rows_without_live_tables(session, tmp_pa
         if name not in ("pair_age_minutes", "suspicious_contract_flags")
     ]
     assert all(sql_values[name].missing for name in series_names)
-    # The SQL path reports suspicious_contract_flags as 0.0 (never missing).
+    # No point-in-time contract evidence means the safety flag is unknown.
     assert sql_values["suspicious_contract_flags"].value == 0.0
-    assert not sql_values["suspicious_contract_flags"].missing
+    assert sql_values["suspicious_contract_flags"].missing
 
     factory = LakeFeatureFactory(store=store, settings=_settings(tmp_path))
     output = factory.persist_for_assets(session, decision_ts=DECISION, asset_ids=[asset.id])
@@ -713,13 +717,10 @@ def test_lake_read_path_reports_missing_on_empty_lake(session, tmp_path) -> None
         store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)
     ).build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
     assert set(lake_values) == set(LAKE_FEATURE_NAMES)
-    assert all(
-        value.missing for name, value in lake_values.items() if name != "suspicious_contract_flags"
-    )
-    # suspicious_contract_flags is reported as 0.0 (never missing), mirroring
-    # the SQL path's contract-flag counter on an asset with no contracts.
+    assert all(value.missing for value in lake_values.values())
+    # No archived contract-analysis evidence means the flag count is unknown.
     assert lake_values["suspicious_contract_flags"].value == 0.0
-    assert not lake_values["suspicious_contract_flags"].missing
+    assert lake_values["suspicious_contract_flags"].missing
 
 
 def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
@@ -730,9 +731,7 @@ def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
     lake_values = LakeFeatureFactory(
         store=LocalArchiveStore(tmp_path), settings=_settings(tmp_path)
     ).build_for_asset(asset_address=other, decision_ts=DECISION)
-    assert all(
-        value.missing for name, value in lake_values.items() if name != "suspicious_contract_flags"
-    )
+    assert all(value.missing for value in lake_values.values())
     assert lake_values["suspicious_contract_flags"].value == 0.0
 
 
@@ -930,14 +929,9 @@ def test_lake_batch_reconstructs_all_assets_in_one_download(session, tmp_path) -
     # Per-asset results still match the single build for the seeded asset.
     single = factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION)
     assert values[asset.address] == single
-    # The absent asset gets the full lake-covered name set, empty/missing block
-    # (suspicious_contract_flags is never missing, mirroring the SQL path).
+    # The absent asset gets the full lake-covered name set with unknown values.
     assert set(values[other]) == set(LAKE_FEATURE_NAMES)
-    assert all(
-        value.missing
-        for name, value in values[other].items()
-        if name != "suspicious_contract_flags"
-    )
+    assert all(value.missing for value in values[other].values())
 
     LakeFeatureFactory.clear_cache()
 

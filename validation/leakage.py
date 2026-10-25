@@ -36,6 +36,7 @@ class FeatureMeta:
 @dataclass
 class LeakageReport:
     suspected: list[FeatureMeta] = field(default_factory=list)
+    source_unverified_values: dict[str, int] = field(default_factory=dict)
     flagged: bool = False
     reason: str = ""
 
@@ -43,6 +44,7 @@ class LeakageReport:
         return {
             "flagged": self.flagged,
             "reason": self.reason,
+            "source_unverified_values": self.source_unverified_values,
             "suspected_features": [
                 {
                     "name": f.name,

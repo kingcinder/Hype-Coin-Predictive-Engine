@@ -287,3 +287,32 @@ pipeline MUST pass and persist the full feature set; violations MUST land in
 
 Enforcement status: **ACTIVE** — any feature build that consumes data newer
 than its `decision_ts` now fails loudly instead of leaking silently.
+
+## Historical source replay follow-up — 2026-10-25
+
+`Feature.observed_at` is a materialization timestamp and cannot establish when
+its inputs became available. `validation.harness.audit_feature_leakage` now
+rebuilds market/liquidity and contract-derived feature values from the source
+tables at each evaluated `(asset_id, decision_ts)`. It substitutes source
+availability only when the stored value exactly matches the source replay;
+unmatched rows remain unverified and use the conservative materialization-time
+check. It also ignores numeric placeholders whose `missing_flag` is true.
+
+Source queries and `compute_market_block` now require both source observation
+and event timestamps at or before the decision. Pair age uses only pair records
+created by the decision. Contract-derived counts require a contract record
+created and observed by the decision, and contract flags require both `ts` and
+`observed_at` by then. If no contract record is available, both contract
+features are missing instead of confident zero. The lake path follows the same
+missing semantics.
+
+On the 2026-10-25 SQLite backup, 0 non-missing historical values replayed
+exactly across the five high-concordance candidates. Unverified counts were
+996 pair ages, 168 volume accelerations, 168 liquidity depths, 2,013 contract
+flag counts, and 2,013 deployer-history counts. Parent/source chronology is
+inconsistent in the stored archive: 608/884 market and 610/891 liquidity
+snapshots have parent pairs created after their `observed_at`, and 395/483
+contract records were created after their `observed_at`. Treat those historical
+values as unverified. The read-only source DB was preserved; see section 14 of
+the validation field report for the full measured results and predictive-layer
+limits.
