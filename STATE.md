@@ -62,10 +62,11 @@ or `STATE.md` existed before 2026-09-09.
 
 ## Working-tree snapshot (2026-10-25)
 
-The canonical checkout is on `fix/functional-pass`, based on local `main` at
-`81dc038`; `main` is an ancestor of the task branch. The task brief prohibits
-touching `main` and pushing. The current working tree contains in-progress F4–F11
-work; the ignored root `serpent.db` is existing user data and was not altered.
+The canonical checkout is on `fix/functional-pass`, descended from local `main`
+at `81dc038`; `main` is an ancestor and remains untouched. The user authorized
+pushing this feature branch after verification. The functional-pass code is
+committed; this final state update is pending. The ignored root `serpent.db` is
+existing user data and was not altered.
 
 ## Change ledger
 
@@ -82,6 +83,7 @@ work; the ignored root `serpent.db` is existing user data and was not altered.
 | E7 | API authentication and network exposure (loopback defaults; explicit authenticated LAN binds) | done (2026-10-23) | Bearer middleware in `api/main.py:97-166`; `common/network.py` validates API/UI bind settings; GUI API/SSE clients send the configured token; tests cover CORS, startup rejection, defaults, and SSE `[verified 2026-10-23]` |
 | E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
 | E9 | Close operational test-coverage gaps | done (2026-10-23) | Behavior tests bring watchdog to 93%, LLM calibration to 96%, liquidity watcher to 81%, validation CLI to 92%, reference seeding to 89%, and `validation.__main__` to 100%; full suite measures 77.71%, with `fail_under=75.7` `[verified 2026-10-23]` |
+| E10 | Fresh local startup and launcher API authentication | done (2026-10-25) | `ensure_api_token()` refreshes cached settings after adopting the first-run token; regression in `tests/test_api_token_provisioning.py`; clean-clone smoke proves mode 0600, authorized/unauthorized health, seeded scores, GUI, and launcher URL `[verified 2026-10-25]` |
 
 ### N — Whole new modules
 
@@ -488,10 +490,25 @@ in-flight work from other agents, still untouched.
   irrelevant.
 - F11: external Nitter RSS parsing uses defusedxml; duplicate/MinHash MD5 calls
   declare `usedforsecurity=False`; SSE has finite connect/read/write/pool
-  timeouts; Bandit medium/high findings are either removed or narrowly
-  justified (app-owned local pickle, generated archive paths). Final scan
-  result is pending after the last comment cleanup.
-- Fresh-clone runtime acceptance (F2/F3) and the full final gate remain pending.
+  timeouts. The archive reader uses DuckDB's relation API; Bandit reports no
+  medium/high findings and no nosec mismatch warnings.
+
+### 2026-10-25 — F2/F3 and final verification
+
+- Fresh-clone smoke first exposed a cache-order bug: module logging populated
+  `get_settings()` before `ensure_api_token()` added the token, so `/health`
+  returned 403 despite a persisted mode-0600 token. `ensure_api_token()` now
+  clears the settings cache whenever a token is activated. A regression test
+  failed before the fix and all six token-provisioning tests pass afterward.
+- `PATH=/tmp/hype-functional-venv/bin:$PATH ./scripts/dev.sh smoke` passed:
+  seeded data-lake/parity phases, authorized `/health` 200, unauthenticated 401,
+  seeded scores 200, GUI 200, `data_lake=ok`, parity non-red, direct engine
+  SIGINT shutdown, and launcher opening the expected loopback GUI URL followed
+  by clean SIGINT shutdown `[verified 2026-10-25]`. External requests were
+  isolated by the harness's closed loopback proxy.
+- Final full suite: `python -m pytest -o addopts= -q -p no:cacheprovider` —
+  858 passed, 11 skipped, 24 warnings. Coverage gate and remaining static gates
+  are recorded in the final verification section below.
 
 ### 2026-10-25 — F1: data-lake pass crashes on SQLite (done)
 
@@ -504,3 +521,14 @@ in-flight work from other agents, still untouched.
 - Evidence: `tests/test_data_lake_manager.py` (3 tests). On HEAD without the
   fix the naive/aware test fails with `TypeError: can't subtract offset-naive
   and offset-aware datetimes`; with the fix all 3 pass.
+
+### Final verification — 2026-10-25
+
+- `ruff check . && ruff format --check .`: clean; 268 files formatted.
+- Unified mypy package list: 161 source files, no issues.
+- `scripts/check_broken_imports.py`: 251 files; `scripts/check_declared_deps.py`:
+  29 third-party roots across 251 files.
+- Bandit first-party packages at `-ll`: exit 0, no medium/high findings.
+- `git diff --check` and `bash -n scripts/dev.sh`: pass.
+- `python -m pytest tests/ -q --cov=. --cov-report=term`: total coverage 78.56%;
+  the unchanged 75.7% threshold is met.
