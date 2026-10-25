@@ -287,6 +287,18 @@ Examples:
 EOF
 }
 
+# /health is behind the bearer gate (H4): send ENGINE_API_TOKEN from the
+# environment or $PREFIX/.env. curl -K reads the header from stdin so the
+# token never appears in the process list.
+serpent_health_probe() {
+  local tok="${ENGINE_API_TOKEN:-}"
+  if [[ -z "$tok" && -f "$PREFIX/.env" ]]; then
+    tok="$(sed -n 's/^ENGINE_API_TOKEN=//p' "$PREFIX/.env" | tail -n 1 | tr -d "\"'" | tr -d '\r')"
+  fi
+  printf 'header = "Authorization: Bearer %s"\n' "$tok" \
+    | curl -sf -K - http://localhost:8000/health >/dev/null 2>&1
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "❌ This command requires root. Use: sudo serpent $1" >&2
@@ -324,7 +336,7 @@ case "${1:-help}" in
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
       echo "  GUI : http://localhost:8501"
       echo "  API : http://localhost:8000/health"
-      if curl -sf http://localhost:8000/health >/dev/null 2>&1; then
+      if serpent_health_probe; then
         echo "  Health: ✅ responding"
       else
         echo "  Health: ⚠️  not responding yet (may still be starting)"
@@ -332,6 +344,9 @@ case "${1:-help}" in
     else
       echo "  Service is not running"
     fi
+    ;;
+  health-probe)
+    serpent_health_probe
     ;;
   logs)
     journalctl -u "$SERVICE" -f --no-pager
@@ -439,7 +454,7 @@ Version=1.0
 Type=Application
 Name=Serpent Circle Engine
 Comment=Hype-Coin Predictive Engine — start engine and open the dashboard
-Exec=bash -c 'pkexec /usr/local/bin/serpent start; for i in $(seq 1 60); do curl -sf http://localhost:8000/health >/dev/null 2>&1 && break; sleep 1; done; xdg-open http://localhost:8501'
+Exec=bash -c 'pkexec /usr/local/bin/serpent start; for i in $(seq 1 60); do /usr/local/bin/serpent health-probe && break; sleep 1; done; xdg-open http://localhost:8501'
 Icon=utilities-terminal
 Terminal=false
 Categories=Finance;Science;Development;
