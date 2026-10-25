@@ -393,8 +393,10 @@ def evaluate_hazard(
     n_censored = 0
     matched = 0
     for f in forecasts:
-        key = (f.asset_id, _as_utc(f.source_features_ts))
-        outcome = outcomes_by_asset_ts.get(key)
+        key_ts = _as_utc(f.source_features_ts)
+        if key_ts is None:
+            continue  # no source timestamp: cannot match a label row
+        outcome = outcomes_by_asset_ts.get((f.asset_id, key_ts))
         if outcome is None:
             continue
         collapsed, trough_hours = outcome
@@ -1027,7 +1029,10 @@ def run_harness(
     matched_probs: list[float] = []
     matched_labels: list[float] = []
     for f in forecasts:
-        outcome = forecast_outcomes.get((f.asset_id, _as_utc(f.source_features_ts)))
+        key_ts = _as_utc(f.source_features_ts)
+        if key_ts is None:
+            continue  # no source timestamp: cannot match a label row
+        outcome = forecast_outcomes.get((f.asset_id, key_ts))
         if outcome is None:
             continue  # unobserved — excluded
         collapsed, _ = outcome
