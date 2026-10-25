@@ -203,9 +203,163 @@ cmd_test() {
 }
 
 cmd_smoke() {
-    echo "Running smoke tests..."
+    echo "Running unit smoke tests..."
     python -m pytest tests/test_schema.py tests/test_risk_scoring.py tests/test_backtest.py -q
     python -m py_compile ui/app.py
+
+    echo "Running clean-clone startup and launcher acceptance..."
+    local smoke_root clone branch api_port ui_port engine_pid="" token unauth_code health_code gui_code scores_code
+    smoke_root="$(mktemp -d -t serpent-smoke.XXXXXX)"
+    clone="$smoke_root/repo"
+    branch="$(git branch --show-current)"
+    mkdir -p "$smoke_root/home" "$smoke_root/bin"
+
+    cleanup_smoke() {
+        if [[ -n "$engine_pid" ]] && kill -0 "$engine_pid" 2>/dev/null; then
+            kill -INT "$engine_pid" 2>/dev/null || true
+            for _ in {1..20}; do
+                kill -0 "$engine_pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -TERM "$engine_pid" 2>/dev/null || true
+            wait "$engine_pid" 2>/dev/null || true
+        fi
+        rm -rf "$smoke_root"
+    }
+    trap cleanup_smoke EXIT
+
+    git clone --quiet --no-hardlinks --single-branch --branch "$branch" "$ROOT" "$clone"
+    (
+        cd "$clone"
+        python3.12 -m venv .venv
+        .venv/bin/pip install -q -e ".[dev]"
+        ENV=local-single SERPENT_DB_PATH="$clone/serpent.db" \
+            .venv/bin/python scripts/seed_fixtures.py
+    )
+
+    api_port="$(python3.12 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    ui_port="$(python3.12 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    while [[ "$api_port" == "$ui_port" ]]; do
+        ui_port="$(python3.12 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+    done
+
+    # A fresh environment has no .env, token, or DB override. Only ports and
+    # temporary paths are supplied to avoid colliding with the operator's stack.
+    pushd "$clone" >/dev/null
+    env -i \
+        HOME="$smoke_root/home" \
+        PATH="$clone/.venv/bin:/usr/bin:/bin" \
+        API_HOST=127.0.0.1 API_PORT="$api_port" \
+        API_BASE_URL="http://127.0.0.1:$api_port" \
+        UI_HOST=127.0.0.1 UI_PORT="$ui_port" \
+        ARCHIVE_BACKEND=local ARCHIVE_LOCAL_DIR="$clone/data/archive" \
+        bash -c 'source .venv/bin/activate; exec python -m engine' \
+        >"$smoke_root/direct-engine.log" 2>&1 &
+    engine_pid=$!
+    popd >/dev/null
+
+    token=""
+    for _ in {1..90}; do
+        if [[ -f "$clone/.env" ]]; then
+            token="$(sed -n 's/^ENGINE_API_TOKEN=//p' "$clone/.env" | tail -n 1)"
+        fi
+        if [[ -n "$token" ]] && curl -sS -o "$smoke_root/health.json" \
+            -w '%{http_code}' -H "Authorization: Bearer $token" \
+            "http://127.0.0.1:$api_port/health" >"$smoke_root/health.code" 2>/dev/null; then
+            health_code="$(cat "$smoke_root/health.code")"
+            [[ "$health_code" == "200" ]] && break
+        fi
+        sleep 1
+    done
+    [[ -n "$token" ]] || { echo "FAIL: first-run API token was not provisioned"; return 1; }
+    [[ "$(stat -c '%a' "$clone/.env")" == "600" ]] || {
+        echo "FAIL: first-run .env permissions are not 0600"; return 1;
+    }
+    [[ "${health_code:-}" == "200" ]] || { echo "FAIL: authorized /health did not return 200"; return 1; }
+    unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/health")"
+    [[ "$unauth_code" == "401" || "$unauth_code" == "403" ]] || {
+        echo "FAIL: unauthenticated /health returned $unauth_code"; return 1;
+    }
+    for _ in {1..90}; do
+        gui_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$ui_port/" 2>/dev/null || true)"
+        if [[ "$gui_code" == "200" ]] && python - "$smoke_root/health.json" <<'PY'
+import json, sys
+components = {row["component"]: row["state"] for row in json.load(open(sys.argv[1]))["components"]}
+assert components.get("data_lake") == "ok"
+assert components.get("parity") != "red"
+PY
+        then
+            break
+        fi
+        sleep 1
+        curl -sS -o "$smoke_root/health.json" -H "Authorization: Bearer $token" \
+            "http://127.0.0.1:$api_port/health" || true
+    done
+    [[ "${gui_code:-}" == "200" ]] || { echo "FAIL: GUI returned ${gui_code:-no response}"; return 1; }
+    scores_code="$(curl -sS -o "$smoke_root/scores.json" -w '%{http_code}' \
+        -H "Authorization: Bearer $token" "http://127.0.0.1:$api_port/scores/top?limit=20")"
+    [[ "$scores_code" == "200" ]] && rg -q 'HYPE|DANGER' "$smoke_root/scores.json" || {
+        echo "FAIL: seeded score data was not served"; return 1;
+    }
+    python - "$smoke_root/health.json" <<'PY'
+import json, sys
+components = {row["component"]: row["state"] for row in json.load(open(sys.argv[1]))["components"]}
+assert components.get("data_lake") == "ok", components.get("data_lake")
+assert components.get("parity") != "red", components.get("parity")
+PY
+    echo "PASS: token mode 0600; /health authorized=$health_code unauthenticated=$unauth_code; seeded scores=$scores_code; GUI=$gui_code; data_lake=ok; parity not red"
+    kill -INT "$engine_pid"
+    for _ in {1..30}; do
+        kill -0 "$engine_pid" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$engine_pid" 2>/dev/null; then
+        echo "FAIL: engine did not stop after SIGINT"
+        return 1
+    fi
+    wait "$engine_pid"
+    engine_pid=""
+    echo "PASS: engine shut down cleanly on SIGINT"
+
+    cat >"$smoke_root/bin/xdg-open" <<'SH'
+#!/bin/sh
+printf '%s' "$1" >"$SMOKE_OPEN_LOG"
+SH
+    chmod +x "$smoke_root/bin/xdg-open"
+    : >"$smoke_root/opened-url"
+    pushd "$clone" >/dev/null
+    env -i \
+        HOME="$smoke_root/home" \
+        PATH="$smoke_root/bin:$clone/.venv/bin:/usr/bin:/bin" \
+        SMOKE_OPEN_LOG="$smoke_root/opened-url" \
+        API_HOST=127.0.0.1 API_PORT="$api_port" API_BASE_URL="http://127.0.0.1:$api_port" \
+        UI_HOST=127.0.0.1 UI_PORT="$ui_port" \
+        SERPENT_API_PORT="$api_port" SERPENT_UI_PORT="$ui_port" \
+        ARCHIVE_BACKEND=local ARCHIVE_LOCAL_DIR="$clone/data/archive" \
+        ./start-engine.sh >"$smoke_root/launcher.log" 2>&1 &
+    engine_pid=$!
+    popd >/dev/null
+    for _ in {1..90}; do
+        [[ -s "$smoke_root/opened-url" ]] && break
+        sleep 1
+    done
+    [[ "$(cat "$smoke_root/opened-url")" == "http://localhost:$ui_port" ]] || {
+        echo "FAIL: launcher did not open the expected GUI URL"; return 1;
+    }
+    echo "PASS: launcher opened http://localhost:$ui_port"
+    kill -INT "$engine_pid"
+    for _ in {1..30}; do
+        kill -0 "$engine_pid" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$engine_pid" 2>/dev/null; then
+        echo "FAIL: launcher engine did not stop after SIGINT"
+        return 1
+    fi
+    wait "$engine_pid"
+    engine_pid=""
+    trap - EXIT
+    cleanup_smoke
     echo "✓ Smoke tests passed"
 }
 

@@ -145,7 +145,7 @@ def check_market_snapshots(
     # ── Duplicate detection ──────────────────────────────────────────
     for i, snap in enumerate(snapshots):
         key = f"{snap.get('pair_id', '')}_{snap.get('ts', '')}_{snap.get('source_id', '')}"
-        h = hashlib.md5(key.encode()).hexdigest()[:12]
+        h = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:12]
         if h in seen_hashes:
             report.duplicate_count += 1
             report.issues.append(

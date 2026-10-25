@@ -8,8 +8,10 @@ markup changes. Falls back to Farcaster search when Nitter is unavailable.
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 from typing import Any
+
+from defusedxml import ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 from common.logging import get_logger
 from common.time import utc_now
@@ -177,12 +179,12 @@ def parse_nitter_rss(xml_text: str, search_term: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except (ET.ParseError, DefusedXmlException):
         # Try to fix common XML issues
         xml_text = xml_text.replace("&", "&amp;")
         try:
             root = ET.fromstring(xml_text)
-        except ET.ParseError:
+        except (ET.ParseError, DefusedXmlException):
             return []
 
     # Handle both RSS 2.0 (<channel><item>) and Atom (<entry>)

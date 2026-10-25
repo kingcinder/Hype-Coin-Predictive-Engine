@@ -385,3 +385,48 @@ priority explicitly. API score rows expose `score_validation[family].validated` 
 six families. The Confidence Dashboard reads the latest validation report and displays its cell
 verdict and guard status. These changes clarify presentation and ranking behavior; they do not
 add ground truth or claim that any of the six families is validated.
+
+## 13. 2026-10-25 addendum — availability audit and predictive-layer limits
+
+The 2026-10-23 T4 report lists `pair_age_minutes` (concordance 0.9761),
+`volume_acceleration` (0.9719), and `liquidity_depth` (0.9719) with 2,013/2,013
+feature rows marked observed after their decision time (availability 0.0000).
+Those are valid warnings from the audit's current input, but `Feature.observed_at`
+is set to `utc_now()` by `storage.repository.upsert_feature`; it records when a
+feature row was materialized or refreshed, including historical backfills. It is
+not the observation time of its source rows. The market feature factory separately
+filters market and liquidity source rows to `observed_at <= decision_ts` and checks
+that invariant. `tests/test_leakage_audit.py::test_historical_feature_materialization_is_not_source_availability`
+reproduces the distinction. This explains the three availability flags as a
+measurement artifact; it does not certify the entire persisted feature history or
+clear the conservative leakage cross-check. The validation report remains flagged
+until the audit can use source-level availability evidence.
+
+The same report flags `risk_score` and `exit_risk` concordance of 0.9687 as
+suspicious-good. RiskBand has ordinal distance 2.202 (95% CI 2.010–2.384) against
+the always-GREEN baseline's 1.798, so it is worse than that trivial baseline.
+BLACK collapse precision is 0.0884, equal to the 0.0884 base rate. Forecast
+collapse metrics, hazard C-index, and ensemble-weight metrics remain
+`insufficient_data` (n=0–2). No output is shown to beat noise.
+
+### Evidence required before claiming predictive edge
+
+A predictive claim needs a predeclared target and decision horizon, at least 30
+eligible point-in-time samples per reported cell (and enough independent assets
+and time periods to make uncertainty intervals useful), a strictly later
+out-of-sample window not used for feature, threshold, or calibration choices,
+and confidence intervals that beat an explicit trivial baseline (base rate,
+always-GREEN, or random ranking as appropriate). A result that only passes a
+minimum sample gate is benchmarkable, not proven useful; the held-out effect and
+its uncertainty must support the claim. Forecasts remain unvalidated until the
+30-label training gate and the held-out evaluation both succeed.
+
+The 2026-10-25 read-only rerun used a consistent SQLite backup (4,859 scores,
+4,224 outcomes, 170,065 features, 375 forecasts, 522 labels). It measured
+RiskBand ordinal distance 2.202 vs 1.798 for always-GREEN (n=396), BLACK
+precision 0.0884 vs 0.0884 base rate (n=2,013), suspicious-good risk/exit-risk
+concordance 0.9687 (n=396), and confidence calibration error 0.0798 vs 0.10
+(n=2,013). It still reports three feature availability flags and
+insufficient-data forecast, hazard, and ensemble cells. The exact run output
+was written outside the repository to `/tmp/hype-validation-2026-10-25.json`;
+no metrics were changed or hidden to produce this addendum.

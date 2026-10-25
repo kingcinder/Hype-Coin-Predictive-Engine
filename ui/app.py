@@ -1085,6 +1085,13 @@ def forecast_view() -> None:
                 st.success(status)
             else:
                 st.warning(status)
+        st.warning(
+            progress.get(
+                "forecast_validation_note",
+                "Forecasts are unvalidated until a time-ordered held-out evaluation "
+                "beats a baseline.",
+            )
+        )
     data = api_get("/forecasts", params={"limit": 200})
     if not data:
         st.info(
@@ -1094,7 +1101,8 @@ def forecast_view() -> None:
         return
     df = pd.DataFrame(data)
     st.caption(
-        "Calibrated 24h phase-transition probabilities. P(collapse) feeds RiskScore and ExitRisk."
+        "Experimental 24h phase-transition estimates. They are unvalidated and have not "
+        "demonstrated out-of-sample edge; see the Validation view and field report."
     )
     st.dataframe(
         df[
@@ -1348,6 +1356,11 @@ def backtest_results() -> None:
 
 def validation_integrity_view() -> None:
     st.header("Validation Integrity")
+    st.warning(
+        "Forecast, hazard, and ensemble outputs are unvalidated: current reports show "
+        "insufficient samples or no held-out edge. RiskBand is worse than its always-GREEN "
+        "baseline; no output is currently shown to beat noise."
+    )
     report = api_get("/validation/latest")
     if not report:
         st.info("No validation report is available yet. Run `python -m validation --db <db>`. ")

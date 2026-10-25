@@ -12,31 +12,45 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
-## Ground truth (re-audited 2026-10-23)
+## Ground truth (re-audited 2026-10-25)
 
-- Field-report verdict `[report]`: RiskBand ordinal distance indistinguishable from
-  always-GREEN (2.00 vs 2.00, n=286); BLACK collapse precision 9.09% = base rate (n=1,573);
-  concordance 1.0 on risk_score / exit_risk / uncertainty flagged as degenerate-distribution
-  artifacts; confidence calibration error 0.32 vs 0.10 trust ceiling; **0 Forecast rows and
-  8 label rows** — forecast/hazard/ensemble layers have never been benchmarkable.
+- Read-only validation on a SQLite snapshot of the available local DB: RiskBand
+  ordinal distance 2.202 (n=396) vs always-GREEN 1.798; BLACK collapse precision
+  0.0884 equals the 0.0884 base rate (n=2,013); `risk_score` and `exit_risk`
+  concordance 0.9687 (n=396), both flagged suspicious-good; confidence
+  calibration error 0.0798 (n=2,013) vs 0.10 ceiling. The latest report still
+  flags `pair_age_minutes`, `volume_acceleration`, and `liquidity_depth` on
+  2,013/2,013 rows because `Feature.observed_at` is a materialization timestamp,
+  not input-source availability. The finding remains surfaced pending a
+  source-level audit `[report]`.
+- Snapshot counts: 4,859 scores, 4,224 risk outcomes, 170,065 features,
+  375 forecasts, and 522 labels `[verified 2026-10-25]`. Having persisted
+  forecasts/labels does not make the forecast, hazard, or ensemble metrics
+  benchmarkable; the current report's forecast/hazard/ensemble cells remain
+  `insufficient_data` (n=0–2) `[report]`.
+- No output is yet shown to beat noise: RiskBand is worse than its trivial
+  always-GREEN baseline, BLACK precision is at the base rate, and the near-perfect
+  score concordances remain suspicious-good `[report]`.
 - `assess_risk()` at `risk_engine/rules.py:164` `[verified 2026-10-23]`.
 - `_BAND_CONFIDENCE` hardcoded lookup at `scoring/formulas.py:42` `[verified 2026-10-23]`.
 - `risk_engine/calibrator.py` exists and adapts risk thresholds; it does not replace `_BAND_CONFIDENCE` with a time-split confidence calibrator `[verified 2026-10-23]`.
 - LLM provider is configurable between Ollama and OpenAI-compatible APIs; the
   `LLM_OLLAMA_URL` compatibility alias remains, and the model default is no
   longer pinned to a 0.5B model `[verified 2026-10-23]`.
-- Explorer crawler is Etherscan-only (chain IDs 1 / 8453, `getcontractcreation` at
-  `crawlers/sources/explorer.py:40-46`); zero matches in `crawlers/` for mint/freeze authority
-  — Solana on-chain safety checks do not exist `[verified]`.
+- Solana mint/freeze and supported Token-2022 safety snapshots are collected by
+  `ingestion/solana_safety.py`, persisted by migration 0022, and exposed through
+  point-in-time features; unsupported LP layouts remain unknown
+  `[verified 2026-10-23]`.
 - API bearer-token authentication is implemented by `_check_bearer_token` and
   `_RequireApiTokenMiddleware` in `api/main.py:97-166`, with coverage in
   `tests/test_api_auth_webhooks.py` `[verified 2026-10-23]`.
 - Forecast gate: `forecast_min_samples = 30` (`common/config.py:377`), enforced at
   `forecast/engine.py` and `data_lake/labels.py:320` `[verified 2026-10-23]`.
-- `engine/run.py` uses `get_settings()` and the shared `storage.database.engine`; it does
-  not force a backend. With no `.env` or DB environment override, settings resolve to
-  PostgreSQL at `localhost:5432`. The checked-in root `.env` selects `local-single` and
-  SQLite; Docker Compose now selects its PostgreSQL service `[verified 2026-10-23]`.
+- `engine/__main__.py` sets `ENV=local-single` before importing settings, so a fresh
+  `python -m engine` run without `.env` or DB overrides uses SQLite at `serpent.db`.
+  `.env.example` is tracked and selects PostgreSQL; root `.env` is ignored local state
+  and is not a checked-in file. Docker Compose selects its PostgreSQL service
+  `[verified 2026-10-25]`.
 - Secrets hygiene: `.env`, `telegram.session`, `*.db` gitignored and untracked `[verified 2026-10-23]`.
   Repo is **public** — any key that ever touched git history should be rotated (not actioned).
 - Full-history Gitleaks baseline: this clone is not shallow (`git rev-parse --is-shallow-repository`
@@ -46,12 +60,12 @@ or `STATE.md` existed before 2026-09-09.
 - Remaining `[briefing]`-sourced details: the exact two-value risk distribution (59.99/66.66 —
   from report text, DB not re-queried) and hand-set rule-engine point weights.
 
-## Working-tree snapshot (2026-10-23)
+## Working-tree snapshot (2026-10-25)
 
-The canonical checkout was clean on `main` before this task began. The earlier
-September 2026 note about six uncommitted watchdog files described a different
-checkout state and is no longer current. Work for this task is on
-`codex/hype-coin-predictive-engine`.
+The canonical checkout is on `fix/functional-pass`, based on local `main` at
+`81dc038`; `main` is an ancestor of the task branch. The task brief prohibits
+touching `main` and pushing. The current working tree contains in-progress F4–F11
+work; the ignored root `serpent.db` is existing user data and was not altered.
 
 ## Change ledger
 
@@ -412,25 +426,72 @@ in-flight work from other agents, still untouched.
   (53 files); broken-import scan passed (244 files); declared-deps scan passed
   (28 roots, 244 files).
 
-### 2026-10-25 — Brief premise check and baseline gates (F3 blocked)
+### 2026-10-25 — Functional-pass baseline and premise check
 
 - Premise check: the fail-closed API gate (`_RequireApiTokenMiddleware`,
   `_check_bearer_token`) is on `main` (added in `0f02af4`, "restrict binds and
   authenticate UI requests"). `main` is an ancestor of `fix/functional-pass`,
   so this branch already has the gate. The earlier "gate missing" note was based
   on a review branch that is not on this checkout; it does not apply here.
-- F3–F9 definitions were not included in the brief text supplied, so F3 was not
-  started. No fixes were made beyond the F2 commits already recorded above.
-- Pre-existing uncommitted changes in `data_lake/manager.py`,
-  `data_lake/signal.py` and untracked `tests/test_data_lake_manager.py` were not
-  made in this session and were left unstaged.
-- Baseline gates from a fresh venv (`pip install -e ".[dev]"`) on the current tree:
-  pytest exit 0; `ruff check .` passed; `mypy api/ common/ engine/ crawlers/
-  data_lake/ ui/` (CI command) passed, 53 files; broken-import scan passed (247
-  files); declared-deps scan passed (28 roots, 247 files).
-- Not clean: `ruff format --check .` flags `tests/test_data_lake_manager.py`
-  (untracked, not from this session). Whole-repo `mypy .` fails on the
-  duplicate `rescore` module name, which CI does not run.
+- The working tree already contained uncommitted F7 parity changes in
+  `STATE.md`, `ops/parity.py`, and `tests/test_parity.py`; they were retained.
+- Fresh venv install completed on Python 3.12.3. Baseline `pytest -q
+  -p no:cacheprovider` exited 0 with the existing ignored `serpent.db` present;
+  default pytest `addopts=-q` suppressed the final count. Baseline Ruff and
+  format checks passed (266 files); current unified mypy passed (161 files);
+  import scan passed (249 files); declared-deps scan passed (28 roots, 249
+  files). Full count is recorded by the final gate below.
+
+### 2026-10-25 — F4 and F5: validation evidence and honest status
+
+- Ran `python -m validation --self-test --db /tmp/hype-validation-2026-10-25.db
+  --out /tmp/hype-validation-2026-10-25.json` against a read-only SQLite backup.
+  Self-tests passed. The report measured RiskBand distance 2.202 vs baseline
+  1.798 (n=396), BLACK precision 0.0884 vs base rate 0.0884 (n=2,013),
+  risk/exit-risk concordance 0.9687 (n=396, suspicious-good), and confidence
+  calibration error 0.0798 vs 0.10 (n=2,013). It flags three point-in-time
+  features with availability 0.0000. Snapshot counts: 522 labels and 375
+  Forecast rows; forecast/hazard/ensemble cells remain insufficient-data.
+- Traced the three feature flags: `upsert_feature` sets `Feature.observed_at`
+  to `utc_now()` on materialization/refresh; SQL market and liquidity source
+  queries filter `observed_at <= decision_ts`, followed by
+  `check_rows_point_in_time`. Added a regression test demonstrating the
+  materialization timestamp can be later while all input rows obey the cutoff.
+  The report finding remains flagged; this does not clear the full persisted
+  feature history.
+- Added the predictive-edge evidence criteria and explicit forecast, hazard,
+  and ensemble unvalidated messaging to label progress and GUI views. The
+  `forecast_min_samples=30` and validation flags were not weakened.
+
+### 2026-10-25 — F6–F8: SQLite phases, parity coverage, and types
+
+- Kept per-site `ensure_utc` normalization: a storage-wide `TypeDecorator`
+  would change every ORM DateTime result on SQLite and PostgreSQL, while the
+  observed defects are boundary-specific. The seeded integration test runs the
+  scan, data-lake, retention, and parity phases against file-backed SQLite with
+  external source calls stubbed; all phase results are error-free.
+- F7: parity records neutral `ok` health and returns `no_data` when the archive
+  is empty or contains no point-in-time feature coverage. A populated archive
+  divergence still pages red. Empty, uncovered, populated-mismatch, and
+  page-on-red tests pass.
+- F8's shared Makefile/CI package list remains unified; mypy reports no issues
+  across 161 source files.
+
+### 2026-10-25 — F9–F11: docs, hermeticity, and security scan
+
+- Corrected README/INSTALL: fresh `python -m engine` defaults to local-single
+  SQLite; `.env.example` is tracked and selects PostgreSQL; `.env` is ignored
+  local state. Changed bootstrap help to loopback.
+- F10 guard now reads the existing root SQLite fleet directly in read-only
+  mode and no longer binds `SessionLocal()`/PostgreSQL. Its root-database suite
+  tests passed; a helper regression verifies configured database settings are
+  irrelevant.
+- F11: external Nitter RSS parsing uses defusedxml; duplicate/MinHash MD5 calls
+  declare `usedforsecurity=False`; SSE has finite connect/read/write/pool
+  timeouts; Bandit medium/high findings are either removed or narrowly
+  justified (app-owned local pickle, generated archive paths). Final scan
+  result is pending after the last comment cleanup.
+- Fresh-clone runtime acceptance (F2/F3) and the full final gate remain pending.
 
 ### 2026-10-25 — F1: data-lake pass crashes on SQLite (done)
 

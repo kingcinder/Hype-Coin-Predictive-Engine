@@ -40,6 +40,7 @@ from storage.repository import (
     upsert_pool_and_pair,
 )
 from tests.conftest import seed_market_asset, seed_reference
+from validation.leakage_guard import check_rows_point_in_time
 
 T0 = datetime(2026, 5, 1, 0, 0)  # naive for SQLite compatibility
 DECISION = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
@@ -154,6 +155,35 @@ def test_deployer_history_counts_contracts_observed_at_decision(session) -> None
         value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
     }
     assert values["deployer_history_available"].value == 1.0
+
+
+def test_historical_feature_materialization_is_not_source_availability(session) -> None:
+    """Feature.observed_at records when a backfill was materialized, not when
+    its input rows became knowable. The source rows still obey the PIT cutoff."""
+    asset = _seed_arc(session, symbol="MATERIALIZED", prices=[1.0] * 48, feature_hours=[11])
+    decision = T0 + timedelta(hours=11)
+    feature = session.scalar(
+        select(models.Feature).where(
+            models.Feature.asset_id == asset.id,
+            models.Feature.decision_ts == decision,
+            models.Feature.feature_name == "liquidity_depth",
+        )
+    )
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    sources = list(
+        session.scalars(
+            select(models.MarketSnapshot).where(
+                models.MarketSnapshot.pair_id == pair.id,
+                models.MarketSnapshot.observed_at <= decision,
+            )
+        )
+    )
+
+    assert feature is not None and feature.observed_at > decision
+    assert len(sources) == 12
+    assert check_rows_point_in_time(sources, decision, feature_name="market_block") == 12
+    values = {v.name: v for v in FeatureFactory().build_for_asset(session, asset, decision)}
+    assert values["liquidity_depth"].value == 200_000.0
 
 
 # ── Finding 2: website/github presence must be unknown, not leaked ──────────
@@ -470,6 +500,9 @@ def test_forecast_status_uses_trainable_feature_aligned_label_pairs(session) -> 
 
     assert progress["usable_forecast_samples"] == 1
     assert progress["forecast_status"] == "Forecasting not live: 1/30 labels"
+    assert progress["forecast_validated"] is False
+    assert "Unvalidated" in progress["forecast_validation_note"]
+    assert "1/30" in progress["forecast_validation_note"]
 
 
 # ── Finding 7: dense-label forward windows must respect observed_at ─────────

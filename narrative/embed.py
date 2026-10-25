@@ -9,9 +9,14 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 def _shingles(text: str, size: int = 4) -> list[int]:
     joined = " ".join(_TOKEN_RE.findall(text.lower()))
     if len(joined) < size:
-        return [int(hashlib.md5(joined.encode("utf-8")).hexdigest(), 16)]
+        return [int(hashlib.md5(joined.encode("utf-8"), usedforsecurity=False).hexdigest(), 16)]
     return [
-        int(hashlib.md5(joined[index : index + size].encode("utf-8")).hexdigest(), 16)
+        int(
+            hashlib.md5(
+                joined[index : index + size].encode("utf-8"), usedforsecurity=False
+            ).hexdigest(),
+            16,
+        )
         for index in range(len(joined) - size + 1)
     ]
 

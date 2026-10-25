@@ -14,6 +14,7 @@ against an arbitrary DB, while leaving the repo's real fleet untouched.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
@@ -170,20 +171,36 @@ def real_fleet_before() -> float | None:
     """
     if not (REPO_ROOT / "serpent.db").exists():
         return None
-    from storage.database import SessionLocal
+    return _sqlite_fleet_total(REPO_ROOT / "serpent.db")
 
-    with SessionLocal() as session:
-        return float(session.scalar(select(func.sum(models.Score.risk))) or 0.0)
+
+def _sqlite_fleet_total(db_path: Path) -> float:
+    """Read the local-single fleet directly, independent of ambient Settings.
+
+    The root DB is ignored user data. Open it read-only so the guard cannot
+    migrate, create, or otherwise alter it while checking the CLI's isolation.
+    """
+    uri = f"file:{db_path.resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        row = connection.execute("SELECT COALESCE(SUM(risk), 0) FROM scores").fetchone()
+    return float(row[0])
 
 
 def _assert_real_fleet_untouched(real_fleet_before: float | None) -> None:
     if real_fleet_before is None:
         return  # no real DB in this checkout; nothing to guard
-    from storage.database import SessionLocal
-
-    with SessionLocal() as session:
-        after = float(session.scalar(select(func.sum(models.Score.risk))) or 0.0)
+    after = _sqlite_fleet_total(REPO_ROOT / "serpent.db")
     assert after == real_fleet_before, "CLI touched the real configured fleet!"
+
+
+def test_local_fleet_guard_reads_sqlite_without_configured_database(tmp_path: Path) -> None:
+    """A root serpent.db must not make the guard fall through to PostgreSQL."""
+    db_path = tmp_path / "serpent.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE scores (risk REAL NOT NULL)")
+        connection.executemany("INSERT INTO scores (risk) VALUES (?)", [(12.5,), (7.5,)])
+
+    assert _sqlite_fleet_total(db_path) == 20.0
 
 
 # ---------------------------------------------------------------------------

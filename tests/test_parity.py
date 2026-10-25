@@ -370,6 +370,71 @@ def test_parity_ok_on_consistent_lake(session, tmp_path) -> None:
     assert "0 mismatches" in row.message
 
 
+def test_parity_neutral_on_empty_lake(session, tmp_path) -> None:
+    """No archive yet is not a divergence: SQL rows exist but the lake is
+    empty -> ok, nothing compared, no mismatch rows, no push."""
+    settings = _settings(tmp_path)
+    _seed_consistent(session, tmp_path, settings)
+    session.commit()
+    for path in tmp_path.rglob("*.parquet"):
+        path.unlink()
+    assert not list(tmp_path.rglob("*.parquet"))
+
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+    assert result["status"] == "ok"
+    assert result["mismatches"] == 0
+    assert result["compared_assets"] == 0
+    assert result["pushed"] is False
+
+    row = session.scalar(
+        select(models.SystemHealth).where(models.SystemHealth.component == "parity")
+    )
+    assert row is not None
+    assert row.state == "ok"
+    assert "empty" in row.message
+
+
+def test_parity_neutral_when_archives_do_not_cover_decision(session, tmp_path) -> None:
+    """An archive object containing only post-decision evidence is no coverage,
+    not a SQL-vs-lake divergence."""
+    from ops.archive import RawEvidenceCompactor
+    from storage.repository import store_raw_evidence
+    from tests.conftest import seed_market_asset
+
+    settings = _settings(tmp_path, archive_compact_after_hours=0.0)
+    seed_market_asset(session)
+    source = get_or_create_source(
+        session,
+        name="future_only_source",
+        source_type="market_data",
+        tier="venue",
+        base_url=None,
+    )
+    store_raw_evidence(
+        session,
+        source=source,
+        payload={"new_pools": []},
+        observed_at=DECISION + timedelta(hours=1),
+    )
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(hours=3)
+    )
+    session.commit()
+    assert LocalArchiveStore(tmp_path).list_objects(settings.archive_prefix)
+
+    result = run_parity(session, decision_ts=DECISION, settings=settings)
+
+    assert result["status"] == "no_data"
+    assert result["mismatches"] == 0
+    row = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "parity")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert row is not None and row.state == "ok"
+    assert "cover" in row.message
+
+
 def test_parity_pages_mismatch_via_ntfy(session, tmp_path, monkeypatch) -> None:
     """A lake-vs-SQL divergence trips red health and pages via ntfy with the
     first mismatches as actionable examples."""

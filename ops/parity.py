@@ -274,9 +274,55 @@ def run_parity(
         # Reconstruct the lake-covered block for every asset in ONE download /
         # one DuckDB session, so a full-lake pass is not O(assets) downloads.
         lake_factory = LakeFeatureFactory(settings=settings)
+        if not lake_factory.store.list_objects(settings.archive_prefix):
+            # An empty lake means nothing is archived yet, not a divergence:
+            # there is nothing to compare, so the run is neutral (ok, 0 mismatches).
+            record_health(
+                session,
+                component=PARITY_HEALTH_COMPONENT,
+                state="ok",
+                message=(
+                    f"lake-vs-SQL parity: lake empty, nothing to compare at decision "
+                    f"{decision_ts.isoformat()}"
+                ),
+                error_count=0,
+            )
+            return {
+                "status": "ok",
+                "compared_assets": 0,
+                "mismatches": 0,
+                "errors": 0,
+                "decision_ts": decision_ts.isoformat(),
+                "pushed": False,
+                "duration_sec": round(monotonic() - started, 3),
+            }
         lake_values = lake_factory.build_for_assets(
             [asset.address for asset in assets], decision_ts
         )
+        coverage_names = set(LAKE_FEATURE_NAMES) - {"suspicious_contract_flags"}
+        has_coverage = any(
+            not values[name].missing for values in lake_values.values() for name in coverage_names
+        )
+        if not has_coverage:
+            record_health(
+                session,
+                component=PARITY_HEALTH_COMPONENT,
+                state="ok",
+                message=(
+                    f"lake-vs-SQL parity: no archived observations cover decision "
+                    f"{decision_ts.isoformat()}, nothing to compare"
+                ),
+                error_count=0,
+            )
+            return {
+                "status": "no_data",
+                "compared_assets": 0,
+                "mismatches": 0,
+                "errors": 0,
+                "decision_ts": decision_ts.isoformat(),
+                "pushed": False,
+                "duration_sec": round(monotonic() - started, 3),
+            }
         for asset in assets:
             try:
                 mismatches.extend(

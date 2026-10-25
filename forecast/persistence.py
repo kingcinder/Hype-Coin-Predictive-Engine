@@ -137,7 +137,8 @@ def load_model(version: str | None = None) -> Any | None:
 
     try:
         with open(target_file, "rb") as f:
-            artifact = pickle.load(f)  # noqa: S301 - trusted local model file
+            # Only model files produced by this app in the configured local directory are loaded.
+            artifact = pickle.load(f)  # nosec B301
         log.info(
             "forecast_model_loaded",
             version=artifact.get("version"),

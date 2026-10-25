@@ -45,6 +45,7 @@ dependencies = [
   "plotly>=5.23",
   "psutil>=5.9",
   "feedparser>=6.0",
+  "defusedxml>=0.7.1",
 ]
 
 [project.optional-dependencies]

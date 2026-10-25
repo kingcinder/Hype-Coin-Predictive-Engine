@@ -56,7 +56,7 @@ def inject_theme() -> None:
     st.markdown(_cached_css(), unsafe_allow_html=True)
 
 
-_CSS = f"""
+_CSS = """
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════
    Serpent Circle — Dark Theme & Micro-Interactions
@@ -427,3 +427,21 @@ footer {{ visibility: hidden; }}
     ">{BRAND_TAGLINE}</span>
 </div>
 """
+for _placeholder, _value in {
+    "BRAND_ACCENT": BRAND_ACCENT,
+    "BRAND_BORDER_LIGHT": BRAND_BORDER_LIGHT,
+    "BRAND_BORDER": BRAND_BORDER,
+    "BRAND_COLOR": BRAND_COLOR,
+    "BRAND_DANGER": BRAND_DANGER,
+    "BRAND_GLOW": BRAND_GLOW,
+    "BRAND_NAME": BRAND_NAME,
+    "BRAND_SUCCESS": BRAND_SUCCESS,
+    "BRAND_SURFACE_HOVER": BRAND_SURFACE_HOVER,
+    "BRAND_SURFACE": BRAND_SURFACE,
+    "BRAND_TAGLINE": BRAND_TAGLINE,
+    "BRAND_TEXT_DIM": BRAND_TEXT_DIM,
+    "BRAND_TEXT": BRAND_TEXT,
+    "BRAND_WARN": BRAND_WARN,
+}.items():
+    _CSS = _CSS.replace("{" + _placeholder + "}", _value)
+_CSS = _CSS.replace("{{", "{").replace("}}", "}")

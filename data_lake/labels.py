@@ -502,6 +502,11 @@ def label_generation_progress(session: Session) -> dict[str, Any]:
             if usable_samples >= min_samples
             else f"Forecasting not live: {usable_samples}/{min_samples} labels"
         ),
+        "forecast_validated": False,
+        "forecast_validation_note": (
+            "Unvalidated: the forecast output has not demonstrated out-of-sample edge; "
+            f"{usable_samples}/{min_samples} eligible labels are available."
+        ),
         "unique_assets_labeled": unique_assets,
         "assets_with_snapshots": assets_with_snapshots,
         "shortfall": max(0, min_samples - usable_samples),

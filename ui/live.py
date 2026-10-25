@@ -27,6 +27,7 @@ from ui.api_client import API_BASE_URL, api_auth_headers
 _engine_state: dict[str, Any] = {}
 _lock = threading.Lock()
 _started = False
+SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0)
 
 
 def _sse_worker() -> None:
@@ -34,7 +35,9 @@ def _sse_worker() -> None:
     retry = 1.0
     while True:
         try:
-            with httpx.Client(timeout=None) as client:
+            # SSE stays open, but a silent/dead peer must not pin the UI daemon
+            # forever. A quiet stream reconnects after the read deadline.
+            with httpx.Client(timeout=SSE_TIMEOUT) as client:
                 with client.stream(
                     "GET",
                     f"{API_BASE_URL}/engine/stream",

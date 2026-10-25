@@ -770,10 +770,7 @@ def query_archive(
             return []
         con = duckdb.connect()
         try:
-            con.execute(
-                f"CREATE VIEW evidence AS SELECT * FROM read_parquet({files!r}, "
-                "union_by_name=true, filename=true)"
-            )
+            con.read_parquet(files, union_by_name=True, filename=True).create_view("evidence")
             result = con.execute(sql)
             columns = [description[0] for description in result.description]
             return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]

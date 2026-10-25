@@ -31,7 +31,7 @@ Serpent Circle zero-container profile is ready.
 Run the stack (three terminals, or use `make local-worker` / `local-api` / `local-ui`):
 
   python -m ingestion.worker --loop            # scanner + radar + forecast (no archive)
-  uvicorn api.main:app --host 0.0.0.0 --port 8000
+  uvicorn api.main:app --host 127.0.0.1 --port 8000
   streamlit run ui/app.py --server.port=8501
 
 Ad-hoc jobs:

@@ -51,13 +51,13 @@ The installer will:
 - Register and start a systemd service
 - Install the `serpent` CLI command
 
-Running `python -m engine` with no environment override uses PostgreSQL at
-`localhost:5432` (`serpent` database); the installer-generated
-`ENV=local-single` profile uses SQLite at `serpent.db` instead. The bundled
-installers create that SQLite profile for a zero-container setup. To switch an
-installed service to PostgreSQL, set `ENV=local` and
+On a fresh checkout with no `.env` or database URL override, `python -m engine`
+selects `ENV=local-single` and SQLite at `serpent.db`. The bundled desktop
+installers use this zero-container profile. To switch an installed service to
+PostgreSQL, set `ENV=local` and
 `DATABASE_URL=postgresql+psycopg://serpent:<password>@localhost:5432/serpent`
-in its environment. Docker Compose starts its PostgreSQL service and points the
+in its environment. Copying `.env.example` to `.env` also selects the documented
+PostgreSQL profile. Docker Compose starts its PostgreSQL service and points the
 engine to it by default.
 
 The API and GUI bind to `127.0.0.1` by default. For an intentional LAN bind,
