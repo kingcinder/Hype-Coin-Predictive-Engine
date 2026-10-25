@@ -63,10 +63,10 @@ or `STATE.md` existed before 2026-09-09.
 ## Working-tree snapshot (2026-10-25)
 
 The canonical checkout is on `fix/functional-pass`, descended from local `main`
-at `81dc038`; `main` is an ancestor and remains untouched. The user authorized
-pushing this feature branch after verification. The functional-pass code is
-committed; this final state update is pending. The ignored root `serpent.db` is
-existing user data and was not altered.
+at `81dc038` and merged with live `origin/main` at `1d24499` (coverage chart
+update) in merge commit `a18ae3b`. `main` itself remains untouched. The user
+authorized pushing this feature branch after verification. The ignored root
+`serpent.db` is existing user data and was not altered.
 
 ## Change ledger
 
@@ -532,3 +532,7 @@ in-flight work from other agents, still untouched.
 - `git diff --check` and `bash -n scripts/dev.sh`: pass.
 - `python -m pytest tests/ -q --cov=. --cov-report=term`: total coverage 78.56%;
   the unchanged 75.7% threshold is met.
+- Merged live `origin/main` at `1d24499` into the feature branch; the commit
+  updates only `coverage/history.json` and `coverage/trend.svg`. Verified
+  `origin/main` is an ancestor of the merged feature branch; `main` was not
+  modified.
