@@ -63,6 +63,7 @@ def run_data_lake_pass(
         # 3. Label generation progress
         progress = label_generation_progress(session)
         result["progress"] = progress
+        label_progress = progress
 
         # 4. Dispatch webhooks for high-signal alerts
         webhook_results = _dispatch_high_signal_webhooks(session, signal_result, decision_ts)
@@ -81,9 +82,9 @@ def run_data_lake_pass(
             message=(
                 f"signal={signal_result.total_scored} scored, "
                 f"{signal_result.actionable_count} actionable; "
-                f"labels={label_counts['total_labels']} total "
-                f"({label_counts['progress_pct']:.0f}% of "
-                f"{label_counts['min_samples_required']} required); "
+                f"labels={label_progress['total_labels']} total "
+                f"({label_progress['progress_pct']:.0f}% of "
+                f"{label_progress['min_samples_required']} required); "
                 f"webhooks={result['webhooks']['dispatched']} dispatched; "
                 f"duration={duration:.1f}s"
             ),
@@ -93,8 +94,8 @@ def run_data_lake_pass(
             "data_lake_pass_complete",
             signal_scored=signal_result.total_scored,
             actionable=signal_result.actionable_count,
-            total_labels=label_counts["total_labels"],
-            label_progress=label_counts["progress_pct"],
+            total_labels=label_progress["total_labels"],
+            label_progress=label_progress["progress_pct"],
             webhooks_dispatched=result["webhooks"]["dispatched"],
             duration_sec=round(duration, 2),
         )

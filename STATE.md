@@ -431,3 +431,15 @@ in-flight work from other agents, still untouched.
 - Not clean: `ruff format --check .` flags `tests/test_data_lake_manager.py`
   (untracked, not from this session). Whole-repo `mypy .` fails on the
   duplicate `rescore` module name, which CI does not run.
+
+### 2026-10-25 — F1: data-lake pass crashes on SQLite (done)
+
+- Root cause 1: `_temporal_score` subtracted a naive `observed_at` (read back
+  from SQLite) from an aware `decision_ts`, raising `TypeError`.
+  Fix: normalize both with `ensure_utc` before subtracting (`data_lake/signal.py`).
+- Root cause 2: `run_data_lake_pass` read label progress from `label_counts`,
+  an undefined name at that point. Fix: use the `progress` dict that was
+  already computed (`data_lake/manager.py`).
+- Evidence: `tests/test_data_lake_manager.py` (3 tests). On HEAD without the
+  fix the naive/aware test fails with `TypeError: can't subtract offset-naive
+  and offset-aware datetimes`; with the fix all 3 pass.

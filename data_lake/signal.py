@@ -167,7 +167,9 @@ def _temporal_score(observed_at: datetime, decision_ts: datetime) -> tuple[float
     Very recent = high score. Stale = low score.
     """
     reasons: list[str] = []
-    age_hours = max(0.0, (decision_ts - observed_at).total_seconds() / 3600.0)
+    age_hours = max(
+        0.0, (ensure_utc(decision_ts) - ensure_utc(observed_at)).total_seconds() / 3600.0
+    )
 
     if age_hours <= 1:
         reasons.append(f"data is {age_hours:.1f}h old — very fresh")
