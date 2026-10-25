@@ -208,8 +208,11 @@ cmd_smoke() {
     python -m py_compile ui/app.py
 
     echo "Running clean-clone startup and launcher acceptance..."
-    local smoke_root clone branch api_port ui_port engine_pid="" token unauth_code health_code gui_code scores_code
+    # These two values remain global so the EXIT trap can clean up after this
+    # function returns from either a success or failure path.
     smoke_root="$(mktemp -d -t serpent-smoke.XXXXXX)"
+    engine_pid=""
+    local clone branch api_port ui_port token unauth_code health_code gui_code scores_code
     clone="$smoke_root/repo"
     branch="$(git branch --show-current)"
     mkdir -p "$smoke_root/home" "$smoke_root/bin"
@@ -275,7 +278,17 @@ cmd_smoke() {
     [[ "$(stat -c '%a' "$clone/.env")" == "600" ]] || {
         echo "FAIL: first-run .env permissions are not 0600"; return 1;
     }
-    [[ "${health_code:-}" == "200" ]] || { echo "FAIL: authorized /health did not return 200"; return 1; }
+    [[ "${health_code:-}" == "200" ]] || {
+        echo "FAIL: authorized /health returned ${health_code:-no response}"
+        if kill -0 "$engine_pid" 2>/dev/null; then
+            echo "Engine process is still running; startup log summary follows:"
+            rg -i 'engine_api_not_started|engine_sqlite_writer_conflict|ERROR|Traceback|Exception|Uvicorn running|Application startup' \
+                "$smoke_root/direct-engine.log" | tail -n 20 || true
+        else
+            echo "Engine process exited before health became ready."
+        fi
+        return 1
+    }
     unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/health")"
     [[ "$unauth_code" == "401" || "$unauth_code" == "403" ]] || {
         echo "FAIL: unauthenticated /health returned $unauth_code"; return 1;
