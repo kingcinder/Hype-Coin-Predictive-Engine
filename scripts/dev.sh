@@ -353,7 +353,7 @@ PY
     fi
     echo "PASS: token mode 0600; /health authorized=$health_code unauthenticated=$unauth_code; seeded scores=$scores_code; GUI=$gui_code; data_lake=ok; parity not red"
     kill -INT "$engine_pid"
-    for _ in {1..30}; do
+    for _ in {1..90}; do
         kill -0 "$engine_pid" 2>/dev/null || break
         sleep 1
     done
@@ -395,7 +395,7 @@ SH
     }
     echo "PASS: launcher opened http://localhost:$ui_port"
     kill -INT "$engine_pid"
-    for _ in {1..30}; do
+    for _ in {1..90}; do
         kill -0 "$engine_pid" 2>/dev/null || break
         sleep 1
     done
