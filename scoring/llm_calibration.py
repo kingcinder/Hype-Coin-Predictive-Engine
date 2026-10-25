@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
@@ -122,7 +122,8 @@ class LLMCalibrator:
                 "actual_collapsed": outcome.collapsed,
                 "actual_price_change": outcome.price_change_pct,
                 "base_risk_band": self._score_to_band(record.base_risk),
-                "final_risk_band": outcome.risk_band,
+                "final_risk_band": self._score_to_band(record.final_risk),
+                "actual_risk_band": outcome.risk_band,
             }
             evaluated_count += 1
 
@@ -149,7 +150,7 @@ class LLMCalibrator:
         # Step 2: Prune old calibration records (keep 2x window)
         prune_cutoff = utc_now() - timedelta(hours=settings.llm_calibration_window_hours * 2)
         session.execute(
-            select(models.LLMCalibrationRecord).where(
+            delete(models.LLMCalibrationRecord).where(
                 models.LLMCalibrationRecord.created_at < prune_cutoff
             )
         )
@@ -307,27 +308,40 @@ class LLMCalibrator:
         """Determine whether the LLM delta improved scoring accuracy.
 
         The LLM is considered to have improved accuracy if the final
-        (LLM-adjusted) risk band is closer to the actual outcome than
-        the base (rule-only) risk band.
+        (LLM-adjusted) risk band is strictly closer to the actual outcome than
+        the base (rule-only) risk band. Equal band distances fall through to
+        the strict numeric tiebreaker — an unchanged LLM adjustment is not an
+        improvement, so the calibrator cannot learn to reward doing nothing.
         """
         base_band = self._score_to_band(record.base_risk)
-        final_band = outcome.risk_band
+        final_band = self._score_to_band(record.final_risk)
         actual_collapsed = outcome.collapsed
 
         base_distance = self._band_distance(base_band, actual_collapsed)
         final_distance = self._band_distance(final_band, actual_collapsed)
-        return final_distance <= base_distance
+        if final_distance < base_distance:
+            return True
+        if final_distance > base_distance:
+            return False
+        return self._assess_improvement_tiebreaker(
+            record.base_risk, record.final_risk, actual_collapsed
+        )
 
     @staticmethod
     def _score_to_band(risk_score: float) -> str:
-        """Convert a numeric risk score to a band string."""
-        if risk_score >= 75:
+        """Convert a numeric risk score to a band string.
+
+        Uses the same 20/40/60/80 cutoffs as the ensemble's
+        ``_risk_band_from_score`` so calibration-distance math agrees with the
+        rest of the scoring stack about which band a numeric risk falls in.
+        """
+        if risk_score >= 80:
             return "BLACK"
-        elif risk_score >= 50:
+        elif risk_score >= 60:
             return "RED"
-        elif risk_score >= 25:
+        elif risk_score >= 40:
             return "ORANGE"
-        elif risk_score >= 10:
+        elif risk_score >= 20:
             return "YELLOW"
         return "GREEN"
 
@@ -348,11 +362,15 @@ class LLMCalibrator:
     def _assess_improvement_tiebreaker(
         base_risk: float, final_risk: float, collapsed: bool
     ) -> bool:
-        """Break ties: prefer the risk score closer to the collapsed/safe truth."""
+        """Break ties: prefer the risk score strictly closer to the truth.
+
+        The comparison is strict — equality is NOT improvement, so a no-op
+        LLM adjustment (final_risk == base_risk) never earns credit.
+        """
         truth_risk = 100.0 if collapsed else 0.0
         base_dist = abs(base_risk - truth_risk)
         final_dist = abs(final_risk - truth_risk)
-        return final_dist <= base_dist
+        return final_dist < base_dist
 
 
 # Module-level singleton

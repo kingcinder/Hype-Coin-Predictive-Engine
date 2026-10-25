@@ -126,27 +126,39 @@ def test_hazard_model_estimates_time_to_collapse() -> None:
 
 
 def test_forecast_engine_trains_and_predicts_collapse(session) -> None:
-    prices_flat = [1.0] * 49
-    prices_crash = [1.0] * 30 + [0.2] * 19
-    prices_late_pump = [1.0] * 30 + [2.0] * 19
+    # 97 hourly feature/label points: the honest 24h purge keeps only test rows
+    # at ts >= train[-1].ts + 24h, which needs a history spanning ~80h. Two
+    # crash/pump events each keep the train positive rate high enough for
+    # train-only calibration to clear 0.5 honestly; the price sits elevated
+    # for 24h before each event so the full pre-event window labels positive.
+    prices_flat = [1.0] * 121
+    prices_crash = [1.0] * 30 + [0.2] * 15 + [1.0] * 20 + [0.2] * 56
+    prices_pump = [1.0] * 30 + [2.0] * 35 + [4.0] * 56
     flat = _seed_arc(session, symbol="FLAT", prices=prices_flat)
     drop_a = _seed_arc(session, symbol="DROP", prices=prices_crash)
     drop_b = _seed_arc(session, symbol="DROP2", prices=prices_crash)
-    late = _seed_arc(session, symbol="LATE", prices=prices_late_pump)
+    late = _seed_arc(session, symbol="LATE", prices=prices_pump)
 
     for asset in (flat, drop_a, drop_b, late):
-        for hour in range(0, 25):
+        for hour in range(0, 97):
             _seed_features(
                 session,
                 asset,
                 hour,
                 crash=asset.symbol in ("DROP", "DROP2"),
             )
+            if asset.symbol == "LATE":
+                # Real ignition signal: dev-activity velocity separates the
+                # pump asset from FLAT (the old test-fit calibration overfit
+                # this distinction, so the fixture must carry it honestly).
+                _seed_velocity_features(
+                    session, asset, hour, kol=2.0, stars=20.0, downloads=500.0
+                )
     session.commit()
 
     engine = ForecastEngine()
     engine.settings.forecast_min_samples = 5
-    decision = T0 + timedelta(hours=48)
+    decision = T0 + timedelta(hours=120)
     result = engine.run(session, decision_ts=decision)
     session.commit()
     assert result["status"] == "ok"
@@ -371,16 +383,18 @@ def _seed_velocity_features(
 def test_forecast_matrix_carries_velocity_values_and_drift_baseline(session) -> None:
     """The dev-activity proxies reach the training matrix and the drift baseline
     re-persists when they are populated — the forecast feature-set contract."""
-    prices_flat = [1.0] * 49
-    prices_crash = [1.0] * 30 + [0.2] * 19
-    prices_late_pump = [1.0] * 30 + [2.0] * 19
+    # 97 hourly feature/label points so the honest 24h purge leaves test rows
+    # (see test_forecast_engine_trains_and_predicts_collapse).
+    prices_flat = [1.0] * 121
+    prices_crash = [1.0] * 30 + [0.2] * 15 + [1.0] * 20 + [0.2] * 56
+    prices_pump = [1.0] * 30 + [2.0] * 35 + [4.0] * 56
     flat = _seed_arc(session, symbol="FLAT", prices=prices_flat)
     drop_a = _seed_arc(session, symbol="DROP", prices=prices_crash)
     drop_b = _seed_arc(session, symbol="DROP2", prices=prices_crash)
-    late = _seed_arc(session, symbol="LATE", prices=prices_late_pump)
+    late = _seed_arc(session, symbol="LATE", prices=prices_pump)
 
     for asset in (flat, drop_a, drop_b, late):
-        for hour in range(0, 25):
+        for hour in range(0, 97):
             _seed_features(session, asset, hour, crash=asset.symbol in ("DROP", "DROP2"))
             if asset.symbol in ("DROP", "DROP2"):
                 # KOL shill + fast-growing repo/model: the dev-activity evidence
@@ -390,7 +404,7 @@ def test_forecast_matrix_carries_velocity_values_and_drift_baseline(session) -> 
 
     engine = ForecastEngine()
     engine.settings.forecast_min_samples = 5
-    decision = T0 + timedelta(hours=48)
+    decision = T0 + timedelta(hours=120)
 
     # Labels must exist before samples can be collected (as run() does).
     from forecast.labels import LabelEngine
@@ -423,7 +437,15 @@ def test_forecast_matrix_carries_velocity_values_and_drift_baseline(session) -> 
     ab_result = engine.run_velocity_ab_experiment(session, decision_ts=decision)
     session.commit()
     assert ab_result["status"] == "ok"
-    assert ab_result["samples"] == ab_result["train_samples"] + ab_result["test_samples"]
+    assert ab_result["samples"] == len(samples)
+    # The honest 24h purge drops the embargoed rows: they are collected but in
+    # neither train nor test (H21: no silent fallback to unpurged test rows).
+    split = engine._training_split(samples)
+    assert split is not None
+    train, test = split
+    assert ab_result["train_samples"] == len(train)
+    assert ab_result["test_samples"] == len(test)
+    assert ab_result["train_samples"] + ab_result["test_samples"] < ab_result["samples"]
     assert set(ab_result["full"]) == {
         "precision_at_10",
         "calibration_error",
@@ -482,17 +504,19 @@ def test_phase_conditioned_hazards(session) -> None:
     fit is selected at predict time with a global fallback, and per-phase
     survival curves are persisted as metrics."""
     # FAST crashes 12h in (the ignition bucket decays fast); SLOW crashes at
-    # hour 40 (mostly censored from a 24h forward window, so the seeding curve
+    # hour 65 (mostly censored from a 24h forward window, so the seeding curve
     # stays long). Both are kept crash-side so the ordering is driven by the
-    # phase prior, not by label imbalance.
-    fast = _seed_arc(session, symbol="FAST", prices=[1.0] * 12 + [0.2] * 37)
-    slow = _seed_arc(session, symbol="SLOW", prices=[1.0] * 40 + [0.2] * 9)
-    pump = _seed_arc(session, symbol="PUMP", prices=[1.0] * 30 + [2.0] * 19)
-    flat = _seed_arc(session, symbol="FLAT", prices=[1.0] * 49)
+    # phase prior, not by label imbalance. The 97-hour history is required so
+    # the honest 24h purge leaves test rows (see
+    # test_forecast_engine_trains_and_predicts_collapse).
+    fast = _seed_arc(session, symbol="FAST", prices=[1.0] * 12 + [0.2] * 109)
+    slow = _seed_arc(session, symbol="SLOW", prices=[1.0] * 65 + [0.2] * 56)
+    pump = _seed_arc(session, symbol="PUMP", prices=[1.0] * 30 + [2.0] * 91)
+    flat = _seed_arc(session, symbol="FLAT", prices=[1.0] * 121)
     phases = {"FAST": 1.0, "SLOW": 0.0, "PUMP": 2.0, "FLAT": 0.0}
 
     for asset in (fast, slow, pump, flat):
-        for hour in range(0, 25):
+        for hour in range(0, 97):
             _seed_features(session, asset, hour)
             ts = T0 + timedelta(hours=hour)
             upsert_feature(
@@ -509,7 +533,7 @@ def test_phase_conditioned_hazards(session) -> None:
 
     engine = ForecastEngine()
     engine.settings.forecast_min_samples = 5
-    decision = T0 + timedelta(hours=48)
+    decision = T0 + timedelta(hours=120)
     from forecast.labels import LabelEngine
 
     LabelEngine().generate(session, decision_ts=decision)
@@ -580,6 +604,62 @@ def test_forecast_engine_degrades_with_insufficient_data(session) -> None:
     session.commit()
     assert result["status"] == "insufficient_data"
     assert session.scalar(select(func.count()).select_from(models.Forecast)) == 0
+
+
+def _split_samples(hours: int) -> list[Sample]:
+    return [
+        Sample(
+            asset_id=1,
+            ts=T0 + timedelta(hours=hour),
+            features={},
+            y_ignition=hour % 2,
+            y_collapse=0,
+        )
+        for hour in range(hours)
+    ]
+
+
+def test_training_split_purge_has_no_fallback() -> None:
+    """H21: when the 24h purge removes every test row, _training_split returns
+    None instead of silently restoring the unpurged (leaking) test rows."""
+    engine = ForecastEngine()
+    # 25 hourly samples: train ends at hour 17, purge needs ts >= 41.
+    assert engine._training_split(_split_samples(25)) is None
+
+
+def test_training_split_keeps_purged_test_rows() -> None:
+    """With a long enough history the purge keeps the decontaminated tail."""
+    engine = ForecastEngine()
+    split = engine._training_split(_split_samples(100))
+    assert split is not None
+    train, test = split
+    assert len(train) == 70
+    # Every kept test row sits a full forward horizon past the last train row.
+    assert all(s.ts >= train[-1].ts + timedelta(hours=24) for s in test)
+    assert test
+    # And the embargoed rows are genuinely excluded from both sides.
+    assert len(train) + len(test) < 100
+
+
+def test_calibration_fits_on_train_labels_only() -> None:
+    """H20: the isotonic calibrator is fit on the training (probs, labels)
+    pair and only *transforms* the untouched test probabilities — the test
+    labels must not influence the fitted mapping."""
+    fit_probs = np.array([0.1, 0.2, 0.8, 0.9])
+    fit_labels = np.array([0, 0, 1, 1])
+    transform_probs = np.array([0.15, 0.85])
+
+    calibrator, calibrated = ForecastEngine._calibrate(
+        fit_probs, fit_labels, transform_probs
+    )
+    # The returned values are the transform inputs mapped through the fit...
+    assert calibrated.shape == transform_probs.shape
+    assert np.allclose(calibrated, calibrator.predict(transform_probs))
+    # ...and the fit genuinely used the *training* labels: flipping them
+    # flips the mapping even though the transform inputs are unchanged.
+    _, flipped = ForecastEngine._calibrate(fit_probs, 1 - fit_labels, transform_probs)
+    assert flipped[0] > calibrated[0]
+    assert flipped[1] < calibrated[1]
 
 
 # ── calibration-gap guard ─────────────────────────────────────────────────
@@ -744,14 +824,17 @@ def test_real_metrics_gate_detects_untrustworthy_readout() -> None:
 def test_forecast_run_gates_when_real_metrics_untrustworthy(session, monkeypatch) -> None:
     """When the gate is enabled and the real-only readout is untrustworthy, the
     engine emits no forecasts and degrades to yellow health instead."""
+    # Extended 97-hour history so the honest 24h purge leaves test rows and
+    # training succeeds before the gate trips (see
+    # test_forecast_engine_trains_and_predicts_collapse).
     for symbol, prices in {
-        "FLAT": [1.0] * 49,
-        "DROP": [1.0] * 30 + [0.2] * 19,
-        "DROP2": [1.0] * 30 + [0.2] * 19,
-        "LATE": [1.0] * 30 + [2.0] * 19,
+        "FLAT": [1.0] * 121,
+        "DROP": [1.0] * 30 + [0.2] * 15 + [1.0] * 20 + [0.2] * 56,
+        "DROP2": [1.0] * 30 + [0.2] * 15 + [1.0] * 20 + [0.2] * 56,
+        "LATE": [1.0] * 30 + [2.0] * 35 + [4.0] * 56,
     }.items():
         asset = _seed_arc(session, symbol=symbol, prices=prices)
-        for hour in range(0, 25):
+        for hour in range(0, 97):
             _seed_features(session, asset, hour, crash=symbol in ("DROP", "DROP2"))
     session.commit()
 
@@ -759,7 +842,7 @@ def test_forecast_run_gates_when_real_metrics_untrustworthy(session, monkeypatch
     engine.settings.forecast_min_samples = 5
     engine.settings.forecast_gate_on_real_metrics = True
     monkeypatch.setattr(engine, "_real_metrics_untrustworthy", lambda: True)
-    result = engine.run(session, decision_ts=T0 + timedelta(hours=48))
+    result = engine.run(session, decision_ts=T0 + timedelta(hours=120))
     session.commit()
     assert result["status"] == "gated"
     assert {

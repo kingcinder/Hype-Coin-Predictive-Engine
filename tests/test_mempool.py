@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from ingestion.rpc_pool import RpcEndpointPool
 from mempool.evm import PAIR_CREATED_TOPIC, EVMFactoryWatcher
-from mempool.solana import SolanaMempoolWatcher
+from mempool.solana import SolanaMempoolWatcher, run_solana_watch
 from storage import models
 from tests.conftest import seed_market_asset
 
@@ -201,3 +201,186 @@ def test_evm_factory_watcher_seeds_pool_from_pair_created(session, monkeypatch) 
     ).all()
     assert len(snapshots) == 1
     assert round(float(snapshots[0].reserve_usd or 0.0), 2) == 5.0
+
+
+def test_evm_factory_watcher_stable_token0_assigns_meme_base(session, monkeypatch) -> None:
+    """H11: the volatile token is always the base even when the stablecoin is
+    token0 (i.e. the stablecoin's address sorts lower)."""
+    _pin_rpc_pool(monkeypatch, chain="base", url="https://mainnet.base.org")
+    from ingestion.service import IngestionService
+
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    session.flush()
+    source = session.scalar(select(models.Source).where(models.Source.name == "evm_rpc"))
+    assert source is not None
+
+    # token0 (lower address) is USDC here; token1 is the meme token.
+    token0 = "1111222233334444555566667777888899990000"
+    token1 = "aaaabbbbccccddddeeeeffff0000111122223333"
+    pair = "ffff000011112222333344445555666677778899"
+    factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
+    log_payload = {
+        "address": factory.lower(),
+        "topics": [
+            PAIR_CREATED_TOPIC,
+            _topic_address(token0),
+            _topic_address(token1),
+            _topic_address(pair),
+        ],
+        "data": _uint_word(1),
+        "blockNumber": "0x10",
+        "logIndex": "0x0",
+        "transactionHash": "0xabc",
+    }
+
+    def symbol_response(symbol: str) -> str:
+        encoded = symbol.encode().hex()
+        padded = encoded + "0" * (64 - len(encoded))
+        return "0x" + _uint_word(32)[2:] + _uint_word(len(symbol))[2:] + padded
+
+    def rpc_handler(request):
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "eth_blockNumber":
+            return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x100"})
+        if method == "eth_getLogs":
+            return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": [log_payload]})
+        if method == "eth_call":
+            params = payload["params"][0]
+            data = params["data"]
+            if data == "0x95d89b41":  # symbol()
+                return Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": symbol_response(
+                            "USDC" if params["to"].endswith(token0) else "MEME"
+                        ),
+                    },
+                )
+            if data == "0x313ce567":  # decimals()
+                return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": _uint_word(6)})
+            if data == "0x0902f1ac":  # getReserves()
+                # reserve0 (USDC side) = 5_000_000, reserve1 (MEME side) = 1_000
+                return Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": _uint_word(5_000_000) + _uint_word(1_000)[2:],
+                    },
+                )
+            return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x"})
+        return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": None})
+
+    with respx.mock:
+        respx.post("https://mainnet.base.org/").mock(side_effect=rpc_handler)
+        watcher = EVMFactoryWatcher("base", factory)
+        try:
+            count = watcher.watch(session, source=source, decision_ts=NOW)
+        finally:
+            watcher.close()
+        session.commit()
+        assert count == 1
+
+    pool = session.scalar(select(models.Pool).where(models.Pool.address == "0x" + pair))
+    assert pool is not None
+    base = session.get(models.Asset, pool.base_asset_id)
+    quote = session.get(models.Asset, pool.quote_asset_id)
+    assert base is not None and base.symbol == "MEME"
+    assert quote is not None and quote.symbol == "USDC"
+    snapshots = session.scalars(
+        select(models.LiquiditySnapshot).where(models.LiquiditySnapshot.pool_id == pool.id)
+    ).all()
+    assert len(snapshots) == 1
+    # USD liquidity comes from the stable quote side, not the meme side.
+    assert round(float(snapshots[0].reserve_usd or 0.0), 2) == 5.0
+
+
+def test_solana_burst_idempotent_across_polls(session) -> None:
+    """M26: the same burst window must not emit a second ignition event when
+    polled again — dedup is anchored on the pool's source creation time."""
+    from ingestion.service import IngestionService
+
+    IngestionService().ensure_reference_data(session)
+    asset = seed_market_asset(
+        session,
+        address="TokenBurstId1111111111111111111111111111",
+        symbol="BURSTID",
+        pair_address="PairBurstId1111111111111111111111111111",
+    )
+    pool = session.scalar(select(models.Pool).where(models.Pool.base_asset_id == asset.id))
+    assert pool is not None
+    pool.created_at_source = NOW - timedelta(seconds=60)
+    session.commit()
+
+    signatures = [
+        {
+            "signature": f"burst{index}",
+            "blockTime": int((NOW - timedelta(seconds=90 - index)).timestamp()),
+        }
+        for index in range(20)
+    ]
+
+    watcher = SolanaMempoolWatcher()
+    first = watcher._detect_burst(session, asset, signatures, NOW)
+    session.commit()
+    assert first is True
+    assert session.scalar(select(func.count()).select_from(models.IgnitionEvent)) == 1
+
+    # a second poll 30s later sees the same window -> no duplicate event
+    later = NOW + timedelta(seconds=30)
+    second = watcher._detect_burst(session, asset, signatures, later)
+    session.commit()
+    assert second is False
+    assert session.scalar(select(func.count()).select_from(models.IgnitionEvent)) == 1
+
+
+def test_solana_watch_only_tracks_young_assets(session, monkeypatch) -> None:
+    """H12: the scan budget must go to assets inside the burst window, not to
+    the first rows the DB happens to return."""
+    from ingestion.service import IngestionService
+    from storage.repository import upsert_asset
+
+    IngestionService().ensure_reference_data(session)
+    chain = session.scalar(select(models.Chain).where(models.Chain.slug == "solana"))
+    assert chain is not None
+    old = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenOld11111111111111111111111111111111",
+        symbol="OLD",
+        name="Old Token",
+        first_seen_at=NOW - timedelta(days=10),
+    )
+    young = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenYoung111111111111111111111111111111",
+        symbol="YOUNG",
+        name="Young Token",
+        first_seen_at=NOW - timedelta(seconds=30),
+    )
+    session.commit()
+
+    seen: list[str] = []
+
+    class _FakeSolanaRpc:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def get_recent_signatures(self, address: str, limit: int = 100):
+            seen.append(address)
+            return []
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("mempool.solana.SolanaRpcClient", _FakeSolanaRpc)
+    summary = run_solana_watch(session, decision_ts=NOW)
+    assert summary["watched"] == 1
+    assert summary["errors"] == 0
+    assert seen == [str(young.address)]
+    assert str(old.address) not in seen

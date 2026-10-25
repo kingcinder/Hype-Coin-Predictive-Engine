@@ -7,6 +7,9 @@ chain primary, that primary is moved to the first surviving endpoint. The
 default target is ``.env``; use
 ``--dry-run`` to inspect the proposed change without writing it.
 
+A chain with zero healthy endpoints is left untouched: an all-down run never
+writes an empty pool CSV, so a total outage cannot delete the working config.
+
 Usage::
 
     python scripts/refresh_rpc_pools.py --dry-run
@@ -103,7 +106,20 @@ def rewrite_env_pool_csvs(
     updated = content
     for chain, field in POOL_FIELDS.items():
         result = results[chain]
-        value = ",".join(result.healthy_configured)
+        healthy = result.healthy_configured
+        if not healthy:
+            # Refuse to wipe the chain's pool: an all-endpoints-down run
+            # (total outage or network hiccup) must never rewrite the CSV as
+            # an empty line and permanently delete the working config.
+            # The existing line is left untouched; the operator re-runs once
+            # endpoints recover.
+            print(
+                f"WARNING: {chain}: no healthy endpoints probed — "
+                f"leaving {field} unchanged",
+                file=sys.stderr,
+            )
+            continue
+        value = ",".join(healthy)
         pattern = re.compile(rf"^(\s*(?:export\s+)?{re.escape(field)}\s*=\s*).*$", re.MULTILINE)
         replacement = rf"\g<1>{value}"
         if pattern.search(updated):

@@ -41,7 +41,7 @@ def test_pump_portal_parses_http_recent() -> None:
             ],
         )
     )
-    crawler = PumpPortalCrawler()
+    crawler = PumpPortalCrawler(enable_ws_fallback=False)
     try:
         items = crawler.fetch()
     finally:
@@ -64,7 +64,7 @@ def test_pump_portal_http_empty_falls_back_to_ws() -> None:
     respx.get("https://api.pumpportal.io/pumps/recent").mock(
         return_value=Response(500, text="boom")
     )
-    crawler = PumpPortalCrawler()
+    crawler = PumpPortalCrawler()  # fallback stays enabled: this tests it
     try:
         with patch("websockets.sync.client.connect", side_effect=ConnectionError("no net")):
             items = crawler.fetch()
@@ -89,7 +89,7 @@ def test_pump_portal_skips_invalid_rows() -> None:
             ],
         )
     )
-    crawler = PumpPortalCrawler()
+    crawler = PumpPortalCrawler(enable_ws_fallback=False)
     try:
         items = crawler.fetch()
     finally:

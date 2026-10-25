@@ -110,15 +110,22 @@ def compute_scores(
     download_velocity = features.get("hf_download_velocity", 0.0)
     rpc_pool_health = clamp(features.get("rpc_pool_health", 1.0), 0.0, 1.0)
 
+    # The positive components are a weighted average (weights sum to 1.15, so
+    # the sum is divided by 1.15); the flag penalty is applied separately and
+    # is NOT part of the average. This keeps hype on the 0-100 scale instead
+    # of inflating it ~15% before the clamp.
     hype = clamp(
-        0.30 * momentum
-        + 0.20 * volume_accel
-        + 0.20 * buyer_breadth
-        + 0.15 * social_velocity
-        + 0.15 * liquidity_growth
-        + 0.05 * clamp(ignition * 100.0)
-        + 0.05 * clamp(cluster_growth * 5.0)
-        + 0.05 * clamp(kol_velocity * 20.0)
+        (
+            0.30 * momentum
+            + 0.20 * volume_accel
+            + 0.20 * buyer_breadth
+            + 0.15 * social_velocity
+            + 0.15 * liquidity_growth
+            + 0.05 * clamp(ignition * 100.0)
+            + 0.05 * clamp(cluster_growth * 5.0)
+            + 0.05 * clamp(kol_velocity * 20.0)
+        )
+        / 1.15
         - 0.15 * flag_penalty
     )
     ethos = clamp(
@@ -155,25 +162,37 @@ def compute_scores(
         - data_layer_uncertainty
     )
     uncertainty = clamp(100.0 - confidence + len(missing_features) * 2.0 + data_layer_uncertainty)
+    # Weighted average of the catalyst components (weights sum to 1.25, so the
+    # sum is divided by 1.25) — keeps catalyst on the 0-100 scale instead of
+    # inflating it ~25% before the clamp.
     catalyst = clamp(
-        0.55 * narrative
-        + 0.25 * website
-        + 0.20 * github
-        + 0.15 * clamp(100.0 - catalyst_proximity * 5.0)
-        + 0.05 * clamp(star_velocity)
-        + 0.05 * clamp(download_velocity)
+        (
+            0.55 * narrative
+            + 0.25 * website
+            + 0.20 * github
+            + 0.15 * clamp(100.0 - catalyst_proximity * 5.0)
+            + 0.05 * clamp(star_velocity)
+            + 0.05 * clamp(download_velocity)
+        )
+        / 1.25
     )
     phase_penalty = clamp((lifecycle_phase - 2.0) * 25.0)  # parabolic=0, collapse=50
+    # Weighted average of the exit-risk components (weights sum to 1.90, so the
+    # sum is divided by 1.90) — keeps exit_risk on the 0-100 scale instead of
+    # nearly doubling moderate risk before the clamp.
     exit_risk = clamp(
-        0.40 * risk_assessment.score
-        + 0.25 * volatility_penalty
-        + 0.20 * max(0, -features.get("liquidity_change", 0.0))
-        + 0.15 * (100.0 - spread_quality)
-        + 0.20 * clamp(withdrawal_signal * 25.0)
-        + 0.25 * clamp(lp_removal_signal * 25.0)
-        + 0.15 * clamp(recidivism * 0.5)
-        + 0.20 * clamp(collapse_probability * 100.0)
-        + 0.10 * phase_penalty
+        (
+            0.40 * risk_assessment.score
+            + 0.25 * volatility_penalty
+            + 0.20 * max(0, -features.get("liquidity_change", 0.0))
+            + 0.15 * (100.0 - spread_quality)
+            + 0.20 * clamp(withdrawal_signal * 25.0)
+            + 0.25 * clamp(lp_removal_signal * 25.0)
+            + 0.15 * clamp(recidivism * 0.5)
+            + 0.20 * clamp(collapse_probability * 100.0)
+            + 0.10 * phase_penalty
+        )
+        / 1.90
     )
 
     research_priority = clamp(

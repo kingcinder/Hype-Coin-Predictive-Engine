@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from functools import lru_cache, partial
 from typing import Any
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
+from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from ingestion.rpc_pool import RpcEndpointPool
@@ -57,7 +58,7 @@ def probe_narrative_endpoint(source_name: str, url: str, path: str) -> bool:
     """Fast-fail health check for a narrative source endpoint."""
     try:
         params = {"limit": 1} if source_name == "reddit" else None
-        with httpx.Client(timeout=5.0) as client:
+        with build_httpx_client(timeout=5.0) as client:
             response = client.get(
                 f"{url.rstrip('/')}{path}",
                 params=params,
@@ -78,6 +79,56 @@ _SOCIAL_CRAWLERS = (
     ("huggingface", "huggingface", "public_metadata", "https://huggingface.co"),
     ("telegram", "telegram", "social", None),
 )
+
+# H13: symbols that must never attribute mentions — placeholder / generic
+# tokens (e.g. the mempool watcher's "UNKNOWN" fallback) that would otherwise
+# match ordinary words.
+_PLACEHOLDER_SYMBOLS = frozenset(
+    {"UNKNOWN", "UNNAMED", "N/A", "NA", "NULL", "NONE", "NAN", "TOKEN", "COIN", "TBD"}
+)
+# Minimum symbol length for attribution. The old 2-char minimum let symbols
+# like "AI"/"US"/"GO" claim unrelated text ("said" contains "ai").
+_SYMBOL_MIN_LENGTH = 3
+
+
+def _symbol_match_pattern(symbol: str) -> re.Pattern[str] | None:
+    """Compile a token-boundary matcher for an asset symbol (H13).
+
+    Returns None for symbols that must not attribute (too short or
+    placeholder). Matching requires the symbol to appear as a standalone
+    token — not embedded inside another word — so "AI" no longer matches
+    "said".
+    """
+    cleaned = symbol.strip().lstrip("$")
+    if len(cleaned) < _SYMBOL_MIN_LENGTH or cleaned.upper() in _PLACEHOLDER_SYMBOLS:
+        return None
+    return re.compile(
+        r"(?<![A-Za-z0-9])" + re.escape(cleaned) + r"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+
+
+def resolve_asset_by_symbol(session: Session, text: str) -> models.Asset | None:
+    """Attribute free text to an asset by symbol, deterministically (H13).
+
+    Replaces naive ``symbol.lower() in text.lower()`` substring matching with
+    token-boundary matching, a 3-char minimum, placeholder-symbol exclusion,
+    and longest-match-wins tie-breaking (then symbol, then id) instead of
+    unspecified DB order. Returns None when nothing matches.
+    """
+    if not text:
+        return None
+    best: models.Asset | None = None
+    best_key: tuple[int, str, int] | None = None
+    for asset in session.scalars(select(models.Asset)).all():
+        symbol = (asset.symbol or "").strip()
+        pattern = _symbol_match_pattern(symbol)
+        if pattern is None or not pattern.search(text):
+            continue
+        key = (len(symbol), symbol.lower(), asset.id or 0)
+        if best_key is None or key > best_key:
+            best, best_key = asset, key
+    return best
 
 
 class NarrativeEngine:
@@ -381,13 +432,9 @@ class NarrativeEngine:
             return 0
 
     def _resolve_asset(self, session: Session, text: str) -> models.Asset | None:
-        lowered = text.lower()
-        assets = session.scalars(select(models.Asset)).all()
-        for asset in assets:
-            symbol = asset.symbol.lower()
-            if symbol and len(symbol) >= 2 and symbol in lowered:
-                return asset
-        return None
+        # H13: shared deterministic resolver (token-boundary, 3-char minimum,
+        # placeholder exclusion, longest-match-wins).
+        return resolve_asset_by_symbol(session, text)
 
 
 def run_narrative(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:

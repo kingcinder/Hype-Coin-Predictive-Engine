@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from common.config import get_settings
+from common.http import build_httpx_client
 from common.logging import get_logger
 
 log = get_logger(__name__)
@@ -28,20 +29,6 @@ OLLAMA_DEFAULT_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "qwen2.5:0.5b"
 REQUEST_TIMEOUT_SECONDS = 30.0
 MAX_RETRIES = 2
-
-# Signals that indicate the LLM refused or returned garbage output
-_GARBAGE_SIGNALS = (
-    "i cannot",
-    "i can't",
-    "sorry",
-    "i don't",
-    "error:",
-    "as an ai",
-    "i am unable",
-    "please provide",
-    "not possible",
-)
-
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -108,7 +95,9 @@ class LLMPredictionEngine:
 
     def _get_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.Client(
+            # Centralized construction with an explicit, sanitized proxy policy
+            # (H26): a hostile proxy environment must never crash this.
+            self._client = build_httpx_client(
                 base_url=self._base_url,
                 timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
             )
@@ -388,38 +377,21 @@ class LLMPredictionEngine:
         )
 
     def _fallback_parse(self, asset_id: int, symbol: str, text: str) -> LLMPrediction:
-        """Fallback parser when JSON extraction fails.
+        """Fallback when JSON extraction fails (H15).
 
-        Filters out garbage LLM output (too short, error-like, or nonsensical).
-        Only accepts text that looks like genuine analysis (>20 chars, no error
-        keywords).
+        The model failed to honor the JSON contract, so its output is *not*
+        trustworthy analysis: never store it verbatim as ``narrative_summary``.
+        The old behavior persisted any >=20-char non-garbage response into the
+        narrative surface (and from there into ``ScoreExplanation``) with no
+        provenance marker distinguishing babble from structured output. Return
+        neutral deltas and empty strings instead; the raw text remains
+        available on ``LLMPrediction.raw_response`` (set by ``predict()``) for
+        debugging.
         """
-        # Filter garbage: too short, looks like an error/refusal, or is empty
-        if not text or len(text) < 20:
-            return LLMPrediction(
-                asset_id=asset_id,
-                symbol=symbol,
-                narrative_summary="",
-                risk_assessment="",
-                confidence_delta=0.0,
-                hype_delta=0.0,
-                risk_delta=0.0,
-            )
-        lower = text.lower()
-        if any(sig in lower for sig in _GARBAGE_SIGNALS):
-            return LLMPrediction(
-                asset_id=asset_id,
-                symbol=symbol,
-                narrative_summary="",
-                risk_assessment="",
-                confidence_delta=0.0,
-                hype_delta=0.0,
-                risk_delta=0.0,
-            )
         return LLMPrediction(
             asset_id=asset_id,
             symbol=symbol,
-            narrative_summary=text[:500],
+            narrative_summary="",
             risk_assessment="",
             confidence_delta=0.0,
             hype_delta=0.0,

@@ -37,6 +37,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.http import build_httpx_client
 from common.logging import get_logger
 from storage import models
 from storage.database import session_scope
@@ -160,7 +161,10 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
     session: Session, *, days: int, dry_run: bool
 ) -> dict[str, int | bool]:
     """The CoinGecko backfill body against a caller-owned session."""
-    client = httpx.Client(
+    # Centralized client construction (H26): trust_env=False with a sanitized
+    # proxy map, so a hostile proxy environment can never crash the backfill
+    # at client-construction time.
+    client = build_httpx_client(
         headers={"User-Agent": "serpent-backfill/1.0"}, follow_redirects=True, timeout=30.0
     )
     source = get_or_create_source(
@@ -198,7 +202,7 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
                     # Price history carries no volume; NULL is the honest value.
                     volume_usd=None,
                 )
-            inserted += 1
+                inserted += 1
         if history:
             covered += 1
         if not dry_run:
@@ -216,14 +220,17 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
 
 def _defillama_history(
     client: httpx.Client, coin_refs: list[str], days: int
-) -> dict[str, list[tuple[datetime, float]]]:
+) -> tuple[dict[str, list[tuple[datetime, float]]], int]:
     """Per-day batched closes from DeFiLlama coins API.
 
     One request per day across ALL coins (comma-joined), which is far fewer
-    requests than per-asset polling.
+    requests than per-asset polling. Returns ``(per-coin rows, failed days)``
+    so the caller can report ``resolve_errors`` like the CoinGecko path and
+    the CLI exit code can fire on a total failure (defect M18).
     """
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     per_coin: dict[str, list[tuple[datetime, float]]] = {ref: [] for ref in coin_refs}
+    failed_days = 0
     for offset in range(days, 0, -1):
         day = today - timedelta(days=offset)
         ts = int(day.timestamp())
@@ -234,6 +241,7 @@ def _defillama_history(
             data = resp.json().get("coins", {})
         except Exception as exc:  # noqa: BLE001
             log.warning("defillama_day_failed", day=day.date().isoformat(), error=str(exc))
+            failed_days += 1
             continue
         for ref in coin_refs:
             coin = data.get(ref)
@@ -241,7 +249,7 @@ def _defillama_history(
             if price is not None:
                 per_coin[ref].append((day, float(price)))
         time.sleep(0.5)
-    return per_coin
+    return per_coin, failed_days
 
 
 def backfill_defillama(
@@ -268,7 +276,8 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
     session: Session, *, days: int, dry_run: bool
 ) -> dict[str, int | bool]:
     """The DeFiLlama backfill body against a caller-owned session."""
-    client = httpx.Client(
+    # Centralized client construction (H26): see the CoinGecko path above.
+    client = build_httpx_client(
         headers={"User-Agent": "serpent-backfill/1.0"}, follow_redirects=True, timeout=30.0
     )
     source = get_or_create_source(
@@ -284,7 +293,7 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
         platform = PLATFORM_BY_CHAIN.get(slug)
         if platform and asset.address:
             ref_to_asset[f"{platform}:{asset.address.lower()}"] = (asset, pair)
-    history = _defillama_history(client, list(ref_to_asset.keys()), days)
+    history, failed_days = _defillama_history(client, list(ref_to_asset.keys()), days)
     inserted = 0
     covered = 0
     for ref, rows in history.items():
@@ -303,7 +312,7 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
                     # Price history carries no volume; NULL is the honest value.
                     volume_usd=None,
                 )
-            inserted += 1
+                inserted += 1
         if not dry_run:
             session.commit()
     client.close()
@@ -312,6 +321,7 @@ def _backfill_defillama_in_session(  # noqa: C901 - one-off migration tool; read
         "assets_with_pairs": len(assets),
         "assets_covered": covered,
         "snapshots_inserted": inserted,
+        "resolve_errors": failed_days,
         "dry_run": dry_run,
     }
 
@@ -338,6 +348,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         result = backfill_defillama(days=args.days, dry_run=args.dry_run)
     print(result)
+    if result.get("assets_covered", 0) == 0 and int(result.get("resolve_errors", 0)) > 0:
+        # A fully-failed backfill must not exit green: automation wrapping
+        # this script would otherwise believe history was backfilled.
+        return 1
     return 0
 
 

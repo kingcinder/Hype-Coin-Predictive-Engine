@@ -200,3 +200,160 @@ def test_base_rate_brier() -> None:
     labels = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
     assert base_rate_proportion(labels) == pytest.approx(0.1)
     assert base_rate_brier(labels) == pytest.approx(0.09)
+
+
+# ── run_harness leakage-audit wiring (H24) ──────────────────────────────────
+
+
+def test_run_harness_wires_feature_leakage_audit(session) -> None:
+    """H24: run_harness must invoke the real point-in-time leakage detector on
+    the engine's persisted Feature rows — a leaking feature (perfectly
+    concordant, observed after its decision time) must surface in the
+    feature_leakage cell and in suspicious_results."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from storage import models
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+    from validation.harness import run_harness
+
+    chain, _source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="Leak111111111111111111111111111111111111",
+        symbol="LEAK",
+        name="Leak Fixture",
+        first_seen_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    base = datetime(2026, 5, 2, tzinfo=UTC)
+    n = 12
+    for hour in range(n):
+        decision_ts = base + timedelta(hours=hour)
+        collapsed = hour % 2 == 0
+        score = models.Score(
+            asset_id=asset.id,
+            decision_ts=decision_ts,
+            observed_at=decision_ts,
+            hype=0.5,
+            ethos=0.5,
+            risk=0.5,
+            liquidity_access=0.5,
+            manipulation=0.1,
+            confidence=0.8,
+            uncertainty=0.2,
+            catalyst=0.3,
+            exit_risk=0.4,
+            research_priority=0.5,
+            risk_band="high" if collapsed else "low",
+            model_version="test",
+        )
+        session.add(score)
+        session.flush()
+        session.add(
+            models.RiskOutcome(
+                asset_id=asset.id,
+                score_id=score.id,
+                risk_band=score.risk_band,
+                scored_at=decision_ts,
+                lifecycle_phase_at_score="seeding",
+                evaluated_at=decision_ts + timedelta(hours=25),
+                collapsed=collapsed,
+                rugged=False,
+                survived=not collapsed,
+            )
+        )
+        # Perfectly concordant with the outcome but observed an hour AFTER the
+        # decision time: the exact point-in-time leak the audit hunts.
+        session.add(
+            models.Feature(
+                asset_id=asset.id,
+                decision_ts=decision_ts,
+                observed_at=decision_ts + timedelta(hours=1),
+                feature_name="future_peek",
+                feature_value=1.0 if collapsed else 0.0,
+                source_count=1,
+                freshness_score=1.0,
+                missing_flag=False,
+            )
+        )
+    session.commit()
+
+    report = run_harness(session, min_samples=5)
+    cells = [
+        cell
+        for cell in report.cells
+        if cell.output == "feature_leakage" and cell.metric == "suspected_features"
+    ]
+    assert cells, "run_harness must emit the feature_leakage/suspected_features cell"
+    cell = cells[0]
+    assert cell.n == n, "the audit must run over the eval outcome samples"
+    assert cell.leakage_suspected is True
+    leaked = [
+        entry
+        for entry in report.suspicious_results
+        if entry.get("output") == "feature:future_peek"
+    ]
+    assert leaked, "the leaking feature must land in suspicious_results"
+    assert "observed after" in leaked[0]["reason"]
+
+
+def test_load_forecasts_uses_source_features_ts(session) -> None:
+    """H25: the forecast's true decision point is details['source_features_ts']
+    (when the features were actually computed), not the later training-run
+    timestamp — outcome joins must use it, with a legacy fallback."""
+    from datetime import UTC, datetime, timedelta
+
+    from storage import models
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+    from validation.harness import load_forecasts
+
+    chain, _source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="Src111111111111111111111111111111111111111",
+        symbol="SRC",
+        name="Src Fixture",
+        first_seen_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    run_ts = datetime(2026, 5, 3, tzinfo=UTC)
+    features_ts = datetime(2026, 5, 2, 12, tzinfo=UTC)
+    session.add(
+        models.Forecast(
+            asset_id=asset.id,
+            decision_ts=run_ts,
+            observed_at=run_ts,
+            p_ignition_24h=0.1,
+            p_collapse_24h=0.2,
+            expected_hours_to_peak=None,
+            expected_hours_to_collapse=None,
+            details={"source_features_ts": features_ts.isoformat()},
+            model_version="test-marked",
+        )
+    )
+    # Legacy row without the marker falls back to decision_ts.
+    session.add(
+        models.Forecast(
+            asset_id=asset.id,
+            decision_ts=run_ts,
+            observed_at=run_ts,
+            p_ignition_24h=0.1,
+            p_collapse_24h=0.2,
+            expected_hours_to_peak=None,
+            expected_hours_to_collapse=None,
+            details={},
+            model_version="test-legacy",
+        )
+    )
+    session.commit()
+
+    rows = load_forecasts(session)
+    assert len(rows) == 2
+    marked = [r for r in rows if r.source_features_ts == features_ts]
+    assert len(marked) == 1
+    legacy = [r for r in rows if r.source_features_ts == run_ts]
+    assert len(legacy) == 1

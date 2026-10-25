@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, overload
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
 from storage import models
@@ -41,6 +41,7 @@ from validation.metrics import (
 from validation.metrics import (
     bootstrap_ci as _bootstrap_ci,
 )
+from validation.leakage import LeakageReport, check_feature_leakage
 from validation.report import MetricCell, ValidationReport
 
 # Design doc §2.1.3: embargo must be >= the 24h forward horizon.
@@ -75,6 +76,12 @@ class OutcomeRow:
 class ForecastRow:
     asset_id: int
     decision_ts: datetime
+    # The feature timestamp the forecast was actually made FROM (persisted in
+    # Forecast.details["source_features_ts"]). This is the true decision point
+    # for outcome joins: labels are keyed by their own ts, and joining a
+    # forecast to a label at the training-run timestamp would (almost) never
+    # match. Falls back to decision_ts for legacy rows without the field.
+    source_features_ts: datetime | None
     p_collapse_24h: float
     p_ignition_24h: float
     expected_hours_to_collapse: float | None
@@ -366,11 +373,18 @@ def evaluate_hazard(
 ) -> list[MetricCell]:
     """Harrell C-index for time-to-collapse with right-censoring (§1.6/§2.4).
 
-    ``outcomes_by_asset_ts`` maps (asset, decision_ts) -> (collapsed, trough_hours).
+    ``outcomes_by_asset_ts`` maps (asset, forecast_ts) -> (collapsed, trough_hours),
+    keyed by the forecast's *source feature timestamp* (the ts the forecast
+    was made from), not the training-run timestamp.
     A forecast's event time is the realized trough hours when the asset
     collapsed inside the window; otherwise it is right-censored at the 24h
     horizon. The risk score is expected_hours_to_collapse (shorter = higher
     risk), negated for the C-index's higher-risk-higher convention.
+    Forecasts with expected_hours_to_collapse None (p_collapse < 0.5) are the
+    model's "no collapse within the horizon" prediction: they enter with risk
+    24.0 (the censoring horizon, i.e. the lowest-risk prediction) instead of
+    being dropped — dropping them would compute concordance only on the
+    high-risk subset.
     """
     cells: list[MetricCell] = []
     risks: list[float] = []
@@ -379,15 +393,17 @@ def evaluate_hazard(
     n_censored = 0
     matched = 0
     for f in forecasts:
-        key = (f.asset_id, _as_utc(f.decision_ts))
+        key = (f.asset_id, _as_utc(f.source_features_ts))
         outcome = outcomes_by_asset_ts.get(key)
         if outcome is None:
             continue
-        if f.expected_hours_to_collapse is None:
-            continue
         collapsed, trough_hours = outcome
         matched += 1
-        risks.append(float(f.expected_hours_to_collapse))
+        risks.append(
+            float(f.expected_hours_to_collapse)
+            if f.expected_hours_to_collapse is not None
+            else 24.0
+        )
         if collapsed:
             # event at the realized trough (bounded by the 24h horizon)
             times.append(min(float(trough_hours) if trough_hours is not None else 24.0, 24.0))
@@ -560,18 +576,22 @@ def ensemble_weight_tracking(
             if w is None:
                 continue
             entry_ts = entry.get("ts")
-            # nearest accuracy observation at or before this weight timestamp;
-            # timestamps may be datetime or ISO strings — coerce via _ts_key
+            # Latest accuracy observation at or before this weight timestamp;
+            # timestamps may be datetime or ISO strings — coerce via _ts_key.
+            # A FUTURE accuracy observation must never be used: at the weight
+            # time it was not knowable, and selecting it would leak the future
+            # into this "at or before" meta-metric.
             best: float | None = None
-            best_delta = None
+            best_ts = None
             entry_ts_parsed = _ts_key(entry_ts)
             for acc_row in scorer_accuracy_history.get(name, []):
                 acc_ts = _ts_key(acc_row.get("ts"))
                 if acc_ts is None or entry_ts_parsed is None:
                     continue
-                delta = abs((acc_ts - entry_ts_parsed).total_seconds())
-                if best_delta is None or delta < best_delta:
-                    best_delta = delta
+                if acc_ts > entry_ts_parsed:
+                    continue
+                if best_ts is None or acc_ts > best_ts:
+                    best_ts = acc_ts
                     best = acc_row.get("accuracy")
             if best is None:
                 continue
@@ -601,7 +621,7 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
         out.append(
             OutcomeRow(
                 asset_id=outcome.asset_id,
-                decision_ts=score.decision_ts,
+                decision_ts=_as_utc(score.decision_ts),
                 score_id=outcome.score_id,
                 predicted_band=outcome.risk_band,
                 risk_score=score.risk,
@@ -618,17 +638,25 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
 
 def load_forecasts(session: Session) -> list[ForecastRow]:
     rows = session.scalars(select(models.Forecast)).all()
-    return [
-        ForecastRow(
-            asset_id=f.asset_id,
-            decision_ts=_as_utc(f.decision_ts),
-            p_collapse_24h=f.p_collapse_24h,
-            p_ignition_24h=f.p_ignition_24h,
-            expected_hours_to_collapse=f.expected_hours_to_collapse,
-            expected_hours_to_peak=f.expected_hours_to_peak,
+    out: list[ForecastRow] = []
+    for f in rows:
+        details = f.details or {}
+        # The true decision point for outcome joins (see ForecastRow).
+        source_features_ts = _ts_key(details.get("source_features_ts"))
+        if source_features_ts is None:
+            source_features_ts = _as_utc(f.decision_ts)
+        out.append(
+            ForecastRow(
+                asset_id=f.asset_id,
+                decision_ts=_as_utc(f.decision_ts),
+                source_features_ts=source_features_ts,
+                p_collapse_24h=f.p_collapse_24h,
+                p_ignition_24h=f.p_ignition_24h,
+                expected_hours_to_collapse=f.expected_hours_to_collapse,
+                expected_hours_to_peak=f.expected_hours_to_peak,
+            )
         )
-        for f in rows
-    ]
+    return out
 
 
 def load_forecast_outcomes(session: Session) -> dict[tuple[int, datetime], tuple[bool, float]]:
@@ -788,6 +816,71 @@ def classify_regime(session: Session, window_end: datetime) -> str:
     return "mixed"
 
 
+def audit_feature_leakage(
+    session: Session, outcomes: list[OutcomeRow]
+) -> tuple[LeakageReport, int]:
+    """Run the point-in-time leakage audit on the engine's own persisted rows.
+
+    Joins Feature rows (value + observed_at) to each outcome's
+    (asset_id, decision_ts) and scans the top-concordance features for values
+    observed AFTER their decision time — the exact failure mode the Phase 0
+    leakage audit chased. Previously this detector only ever ran on synthetic
+    self-test data; now it runs on real engine data inside run_harness.
+    Returns (report, n_samples audited).
+    """
+    samples: list[tuple[int, datetime, float]] = []
+    seen: set[tuple[int, datetime]] = set()
+    for o in outcomes:
+        ts = _as_utc(o.decision_ts)
+        if o.asset_id is None or ts is None:
+            continue
+        key = (o.asset_id, ts)
+        if key in seen:
+            continue
+        seen.add(key)
+        samples.append((o.asset_id, ts, 1.0 if (o.collapsed or o.rugged) else 0.0))
+    if not samples:
+        return LeakageReport(), 0
+    rows = session.execute(
+        select(
+            models.Feature.asset_id,
+            models.Feature.decision_ts,
+            models.Feature.feature_name,
+            models.Feature.feature_value,
+            models.Feature.observed_at,
+        ).where(
+            tuple_(models.Feature.asset_id, models.Feature.decision_ts).in_(
+                [(asset_id, ts) for asset_id, ts, _ in samples]
+            )
+        )
+    ).all()
+    per_feature: dict[str, dict[tuple[int, datetime], tuple[float, datetime | None]]] = {}
+    for asset_id, feature_ts, name, value, observed_at in rows:
+        per_feature.setdefault(str(name), {})[(int(asset_id), _as_utc(feature_ts))] = (
+            float(value) if value is not None else float("nan"),
+            _as_utc(observed_at),
+        )
+    n = len(samples)
+    feature_values: dict[str, np.ndarray] = {}
+    observed_at_map: dict[str, np.ndarray] = {}
+    for name, by_sample in per_feature.items():
+        values: list[float] = []
+        observed: list[datetime] = []
+        for asset_id, ts, _ in samples:
+            hit = by_sample.get((asset_id, ts))
+            if hit is None:
+                values.append(float("nan"))
+                observed.append(ts)  # missing feature: no violation possible
+            else:
+                values.append(hit[0])
+                observed.append(hit[1] if hit[1] is not None else ts)
+        feature_values[name] = np.array(values)
+        observed_at_map[name] = np.array(observed, dtype=object)
+    decision_arr = np.array([ts for _, ts, _ in samples], dtype=object)
+    labels = np.array([label for _, _, label in samples])
+    return check_feature_leakage(feature_values, observed_at_map, decision_arr, labels), n
+
+
 def run_harness(
     session: Session,
     *,
@@ -813,13 +906,27 @@ def run_harness(
             cutoff = t1 - timedelta(hours=eval_hours)
             cutoff = _as_utc(cutoff)
 
-    # Walk-forward split with embargo: evaluation = rows after cutoff;
-    # reference = rows at or before cutoff - embargo (48h).
-    eval_rows = (
-        [o for o in outcomes if cutoff is None or _as_utc(o.decision_ts) > cutoff]
-        if cutoff is not None
-        else outcomes
-    )
+    # Walk-forward split with a REAL embargo gap: evaluation = rows after
+    # cutoff; embargoed = rows within EMBARGO_HOURS before cutoff, excluded
+    # from BOTH sets because their outcome observation windows overlap the
+    # eval period; reference = rows at or before cutoff - embargo. The gap
+    # (48h >= 24h forward horizon) is the decontamination the partition
+    # metadata claims — previously no rows were actually excluded.
+    eval_rows: list[OutcomeRow] = []
+    embargoed_rows: list[OutcomeRow] = []
+    reference_rows: list[OutcomeRow] = []
+    if cutoff is None:
+        eval_rows = list(outcomes)
+    else:
+        embargo_floor = cutoff - timedelta(hours=EMBARGO_HOURS)
+        for o in outcomes:
+            ts = _as_utc(o.decision_ts)
+            if ts is None or ts > cutoff:
+                eval_rows.append(o)
+            elif ts > embargo_floor:
+                embargoed_rows.append(o)
+            else:
+                reference_rows.append(o)
     regime = classify_regime(session, cutoff or datetime.now(UTC))
 
     report = ValidationReport(
@@ -840,7 +947,8 @@ def run_harness(
             "purge_hours": PURGE_HOURS,
             "regime": regime,
             "eval_rows": len(eval_rows),
-            "reference_rows": len(outcomes) - len(eval_rows),
+            "embargoed_rows": len(embargoed_rows),
+            "reference_rows": len(reference_rows),
         },
     )
 
@@ -913,10 +1021,13 @@ def run_harness(
     # Forecast probability block. A forecast with NO matching label row is
     # EXCLUDED, never treated as a negative (methodology §3.2) — the label
     # tuple is unpacked so a non-collapse (False, ...) is not misread as truthy.
+    # The join key is the forecast's SOURCE FEATURE timestamp (the ts the
+    # forecast was made from), because labels are keyed by their own ts —
+    # joining on the training-run timestamp would (almost) never match.
     matched_probs: list[float] = []
     matched_labels: list[float] = []
     for f in forecasts:
-        outcome = forecast_outcomes.get((f.asset_id, _as_utc(f.decision_ts)))
+        outcome = forecast_outcomes.get((f.asset_id, _as_utc(f.source_features_ts)))
         if outcome is None:
             continue  # unobserved — excluded
         collapsed, _ = outcome
@@ -1019,6 +1130,53 @@ def run_harness(
                 0,
                 note="no EnsembleState weight history persisted",
             )
+        )
+
+    # Feature leakage audit on real engine data: the point-in-time leak
+    # detector scans persisted Feature rows joined to the eval outcomes. Each
+    # suspected feature lands in suspicious_results and the summary cell
+    # carries leakage_suspected=True, so the report cannot be read as genuine
+    # without the cross-check.
+    leak_report, leak_n = audit_feature_leakage(session, eval_rows)
+    report.cells.append(
+        MetricCell(
+            output="feature_leakage",
+            metric="suspected_features",
+            regime=regime,
+            n=leak_n,
+            value=float(len(leak_report.suspected)),
+            ci_low=float("nan"),
+            ci_high=float("nan"),
+            baseline_value=0.0,
+            baseline_ci_low=0.0,
+            baseline_ci_high=0.0,
+            verdict=(
+                "insufficient_data"
+                if leak_n < min_samples
+                else ("worse" if leak_report.flagged else "better")
+            ),
+            leakage_suspected=leak_report.flagged,
+            note=(
+                leak_report.reason
+                if leak_report.flagged
+                else f"point-in-time audit over {leak_n} outcome samples: no suspected leaks"
+            ),
+        )
+    )
+    for suspect in leak_report.suspected:
+        report.suspicious_results.append(
+            {
+                "output": f"feature:{suspect.name}",
+                "metric": "point_in_time_leak",
+                "regime": regime,
+                "n": suspect.n_non_missing,
+                "value": round(suspect.concordance, 4),
+                "reason": (
+                    f"concordance {suspect.concordance:.4f} with "
+                    f"{suspect.violations} values observed after their decision "
+                    f"time (availability {suspect.availability_ratio:.4f})"
+                ),
+            }
         )
 
     # Suspicious-good cross-check (Stage 4.4): only higher-is-better metrics

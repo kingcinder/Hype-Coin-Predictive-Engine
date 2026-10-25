@@ -134,7 +134,8 @@ def _ideal_thresholds_for_band(
     """Compute the ideal threshold for a band based on its precision.
 
     A band with high precision (>0.7) is doing well — keep or tighten slightly.
-    A band with low precision (<0.3) has too many false positives — relax it.
+    A band with low precision (<0.4) has too many false positives — tighten it
+    (raise the threshold) so it flags fewer, more selective candidates.
 
     ``scale_max`` bounds the result (100.0 for the rule score scale, 1.0 for
     the ML probability scale) and ``step`` scales the adjustment magnitude
@@ -153,8 +154,10 @@ def _ideal_thresholds_for_band(
         # Acceptable: small adjustment toward ideal
         ideal = current_threshold + (precision - 0.5) * step * 0.5
     else:
-        # Poor precision: relax (lower threshold) to reduce false positives
-        ideal = current_threshold - (0.5 - precision) * step * 1.5
+        # Poor precision: tighten (raise threshold) to cut false positives.
+        # Lowering the threshold here would flag MORE candidates and make the
+        # false-positive problem worse, not better.
+        ideal = current_threshold + (0.5 - precision) * step * 1.5
 
     return max(0.0, min(scale_max, ideal))
 

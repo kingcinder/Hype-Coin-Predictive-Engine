@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backtest.runner import BacktestConfig, point_in_time_market_rows, run_backtest
 from common.config import get_settings
@@ -60,8 +60,8 @@ def test_backtest_run_writes_metrics(session) -> None:
 
 def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> None:
     """feature_source flows from the config through the runner into
-    build_and_persist_features and is recorded on the run for audit."""
-    import scoring.engine as scoring_engine
+    build_replay_features and is recorded on the run for audit."""
+    import backtest.runner as backtest_runner
 
     captured: dict[str, str] = {}
 
@@ -69,7 +69,7 @@ def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> N
         captured["feature_source"] = feature_source
         return {}
 
-    monkeypatch.setattr(scoring_engine, "build_and_persist_features", _fake_build)
+    monkeypatch.setattr(backtest_runner, "build_replay_features", _fake_build)
     seed_market_asset(session)
     run = run_backtest(
         session,
@@ -149,3 +149,47 @@ def test_backtest_surfaces_latest_forecast_metrics(session) -> None:
     assert metrics.get("forecast.test_samples") == pytest.approx(40.0)
     # The backtest's own scoring metric is still present alongside them.
     assert "precision_at_10" in metrics
+
+
+def test_backtest_creates_no_production_side_effects(session) -> None:
+    """H23/M42: a replay must not touch production scoring state — no Feature,
+    Score, ScoreExplanation, Alert, or RiskOutcome rows may be created, and the
+    only writes are the BacktestRun and its BacktestResults."""
+    seed_market_asset(session)
+    session.commit()
+
+    def _count(model) -> int:
+        return session.scalar(select(func.count()).select_from(model))
+
+    before = {
+        name: _count(model)
+        for name, model in {
+            "feature": models.Feature,
+            "score": models.Score,
+            "explanation": models.ScoreExplanation,
+            "alert": models.Alert,
+            "risk_outcome": models.RiskOutcome,
+        }.items()
+    }
+    run = run_backtest(
+        session,
+        start=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        top_k=10,
+        forward_hours=1,
+    )
+    session.commit()
+    assert run.status == "completed"
+    after = {
+        name: _count(model)
+        for name, model in {
+            "feature": models.Feature,
+            "score": models.Score,
+            "explanation": models.ScoreExplanation,
+            "alert": models.Alert,
+            "risk_outcome": models.RiskOutcome,
+        }.items()
+    }
+    assert after == before
+    assert _count(models.BacktestRun) == 1
+    assert _count(models.BacktestResult) > 0

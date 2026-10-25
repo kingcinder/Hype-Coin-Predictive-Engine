@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from scoring.engine import score_current_assets
@@ -117,30 +118,57 @@ def _seed_in_session(session: Session) -> None:
                 reserve_usd=liquidity,
             )
         if symbol == "DANGER":
+            # Idempotent on the unique key (contract_id, ts, flag_type,
+            # source_id): re-running the seed must not duplicate rows.
+            flag_exists = session.scalar(
+                select(models.ContractFlag.id).where(
+                    models.ContractFlag.contract_id == contract.id,
+                    models.ContractFlag.ts == now,
+                    models.ContractFlag.flag_type == "mint_or_freeze_danger",
+                    models.ContractFlag.source_id == source.id,
+                )
+            )
+            if flag_exists is None:
+                session.add(
+                    models.ContractFlag(
+                        contract_id=contract.id,
+                        source_id=source.id,
+                        ts=now,
+                        observed_at=now,
+                        flag_type="mint_or_freeze_danger",
+                        severity="critical",
+                        details={"fixture": True},
+                    )
+                )
+        # Idempotent on the unique key (asset_id, wallet_address, ts,
+        # source_id): re-running the seed must not duplicate rows.
+        holder_exists = session.scalar(
+            select(models.Holder.id).where(
+                models.Holder.asset_id == asset.id,
+                models.Holder.wallet_address == f"wallet-{symbol}-top",
+                models.Holder.ts == now,
+                models.Holder.source_id == source.id,
+            )
+        )
+        if holder_exists is None:
             session.add(
-                models.ContractFlag(
-                    contract_id=contract.id,
+                models.Holder(
+                    asset_id=asset.id,
+                    wallet_address=f"wallet-{symbol}-top",
                     source_id=source.id,
                     ts=now,
                     observed_at=now,
-                    flag_type="mint_or_freeze_danger",
-                    severity="critical",
-                    details={"fixture": True},
+                    balance=1_000_000,
+                    pct_supply=concentration,
                 )
             )
-        session.add(
-            models.Holder(
-                asset_id=asset.id,
-                wallet_address=f"wallet-{symbol}-top",
-                source_id=source.id,
-                ts=now,
-                observed_at=now,
-                balance=1_000_000,
-                pct_supply=concentration,
-            )
-        )
         asset_ids.append(asset.id)
     score_current_assets(session, decision_ts=now, asset_ids=asset_ids)
+    # The fixture health row is a seed marker, not a log: replace it on
+    # re-runs instead of duplicating it.
+    session.execute(
+        delete(models.SystemHealth).where(models.SystemHealth.component == "fixture_seed")
+    )
     record_health(
         session, component="fixture_seed", state="ok", message="fixture scores created", ts=now
     )

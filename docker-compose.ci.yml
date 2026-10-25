@@ -1,0 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI overlay for the Archive-and-parity gate
+# (.github/workflows/archive-parity.yml :: docker-minio-parity job).
+#
+# Layered on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d postgres redis minio
+#
+# Defines the services the workflow's smoke steps need — postgres, redis,
+# minio (+ a one-shot bucket bootstrap), migrate, and worker — each with
+# healthchecks and explicit `environment:` entries. Job-level env is NOT
+# auto-forwarded into `docker compose run` containers, so every variable the
+# worker/migrate steps need is interpolated from the job environment here
+# (with CI-sane defaults so the file also works standalone).
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: serpent
+      POSTGRES_PASSWORD: serpent
+      POSTGRES_DB: serpent
+    volumes:
+      - ci-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serpent -d serpent"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      start_period: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+    volumes:
+      - ci-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+
+  # One-shot: create the archive bucket before anything writes to it.
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-raw-evidence}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    environment:
+      ENV: ${ENV:-local}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://serpent:serpent@postgres:5432/serpent}
+    # Wait for postgres explicitly: `docker compose run` starts dependencies
+    # but the migration must not race the database's first ready signal.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        python - <<'EOF'
+        import os, time
+        from sqlalchemy import create_engine, text
+        url = os.environ["DATABASE_URL"]
+        for _ in range(60):
+            try:
+                with create_engine(url).connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                break
+            except Exception as exc:  # noqa: BLE001 - keep waiting
+                print(f"waiting for postgres: {exc}", flush=True)
+                time.sleep(2)
+        else:
+            raise SystemExit("postgres never became ready")
+        EOF
+        alembic -c storage/alembic.ini upgrade head
+
+  worker:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      ENV: ${ENV:-local}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://serpent:serpent@postgres:5432/serpent}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-raw-evidence}
+      ARCHIVE_BACKEND: ${ARCHIVE_BACKEND:-s3}
+      ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-"true"}
+      PARITY_ENABLED: ${PARITY_ENABLED:-"true"}
+      NTFY_ENABLED: ${NTFY_ENABLED:-"false"}
+    command: python -m ingestion.worker --once
+
+volumes:
+  ci-postgres-data:
+    driver: local
+  ci-minio-data:
+    driver: local

@@ -23,7 +23,6 @@ from forecast.labels import (
     LabelEngine,
     seed_labels_at_feature_timestamps,
 )
-from ingestion.rpc_pool import get_rpc_pool
 from storage import models
 from storage.repository import record_health, upsert_forecast
 
@@ -530,7 +529,11 @@ class ForecastEngine:
             return None
         forward = timedelta(hours=self.settings.forecast_forward_hours)
         purged = [sample for sample in test if sample.ts >= train[-1].ts + forward]
-        return train, purged or test
+        if not purged:
+            # No test samples survive the embargo: the honest answer is "no
+            # test set", NOT silently restoring the unpurged (leaking) rows.
+            return None
+        return train, purged
 
     def _train(
         self, session: Session, samples: list[Sample], decision_ts: datetime
@@ -554,8 +557,16 @@ class ForecastEngine:
 
         ignition_probs = ignition_model.predict_proba(test_x)[:, 1]
         collapse_probs = collapse_model.predict_proba(test_x)[:, 1]
-        ignition_calibrator, calibrated_ignition = self._calibrate(ignition_probs, test_ignition)
-        collapse_calibrator, calibrated_collapse = self._calibrate(collapse_probs, test_collapse)
+        # Calibration is fit on TRAINING predictions/labels only; the untouched
+        # test predictions are transformed for metric evaluation (H20).
+        train_ignition_probs = ignition_model.predict_proba(train_x)[:, 1]
+        train_collapse_probs = collapse_model.predict_proba(train_x)[:, 1]
+        ignition_calibrator, calibrated_ignition = self._calibrate(
+            train_ignition_probs, train_ignition, ignition_probs
+        )
+        collapse_calibrator, calibrated_collapse = self._calibrate(
+            train_collapse_probs, train_collapse, collapse_probs
+        )
 
         hazard = self._fit_hazard(session, samples)
         peak_hazard = self._fit_peak_hazard(session, samples)
@@ -651,7 +662,10 @@ class ForecastEngine:
         if ignition_classifier is None or classifier is None:
             return None
         probabilities = classifier.predict_proba(test_x)[:, 1]
-        _, calibrated = self._calibrate(probabilities, test_labels)
+        # Same train-only calibration discipline as _train: fit on training
+        # predictions/labels, transform the untouched test predictions.
+        train_probabilities = classifier.predict_proba(train_x)[:, 1]
+        _, calibrated = self._calibrate(train_probabilities, train_labels, probabilities)
         return {
             "precision_at_10": self._precision_at_k(
                 calibrated, test_labels, min(10, len(test_labels))
@@ -785,10 +799,20 @@ class ForecastEngine:
         return model
 
     @staticmethod
-    def _calibrate(probs: np.ndarray, labels: np.ndarray) -> tuple[IsotonicRegression, np.ndarray]:
+    def _calibrate(
+        fit_probs: np.ndarray, fit_labels: np.ndarray, transform_probs: np.ndarray
+    ) -> tuple[IsotonicRegression, np.ndarray]:
+        """Fit isotonic calibration on TRAIN predictions only, apply to TEST.
+
+        The calibrator must never be fit on test labels: fitting on the same
+        (probs, labels) pair that the metrics are computed over is
+        self-calibration and drives calibration_error toward zero by
+        construction. Train-in-sample fit is still optimistic (the classifier
+        saw the training labels), but it no longer touches the test set.
+        """
         calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        calibrator.fit(probs, labels)
-        return calibrator, calibrator.predict(probs)
+        calibrator.fit(fit_probs, fit_labels)
+        return calibrator, calibrator.predict(transform_probs)
 
     def _matrix(
         self,
@@ -1133,20 +1157,6 @@ class ForecastEngine:
 
     # ---------------------------------------------------------------- predict
 
-    def _live_rpc_pool_health(self, session: Session, asset_id: int) -> float:
-        if not self.settings.rpc_pool_enabled:
-            return 1.0
-        asset = session.get(models.Asset, asset_id)
-        chain = session.get(models.Chain, asset.chain_id) if asset else None
-        if chain is None:
-            return 1.0
-        states = get_rpc_pool(chain.slug).snapshot()
-        if not states:
-            return 0.0
-        return sum(
-            0.0 if state.down else max(0.0, min(1.0, state.health)) for state in states
-        ) / len(states)
-
     @staticmethod
     def _model_probability(model: ForecastModel, row: np.ndarray, *, target: str) -> float:
         classifier = model.ignition if target == "ignition" else model.collapse
@@ -1206,10 +1216,11 @@ class ForecastEngine:
             features = self._features_at(session, int(asset_id), latest_ts)
             if not features:
                 continue
-            # Forecast runs before the next scoring pass, so refresh this
-            # chain-level feature directly from the live pool instead of using
-            # a stale persisted snapshot.
-            features["rpc_pool_health"] = self._live_rpc_pool_health(session, int(asset_id))
+            # NOTE: rpc_pool_health is deliberately NOT refreshed from the live
+            # pool here. The model was trained on the persisted point-in-time
+            # snapshot, and overwriting it with the live in-process pool state
+            # would create train/serve skew (the serving value would come from
+            # a different distribution than the training values).
             row = np.array(
                 [[features.get(name, _feature_default(name)) for name in FORECAST_FEATURE_NAMES]],
                 dtype=float,

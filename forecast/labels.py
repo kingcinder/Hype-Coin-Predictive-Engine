@@ -134,7 +134,11 @@ def upsert_label(
     decision_ts: datetime,
     source: str,
 ) -> bool:
-    """Idempotent label upsert used by both LabelEngine and the bootstrap."""
+    """Idempotent label upsert used by both LabelEngine and the bootstrap.
+
+    A dense (interpolated) label never overwrites a real observed label, and
+    the source marker is always updated on overwrite so it can never go stale.
+    """
     row = session.scalar(
         select(models.Label).where(
             models.Label.asset_id == asset_id,
@@ -143,8 +147,14 @@ def upsert_label(
         )
     )
     if row:
+        existing_dense = str(row.label_source or "").startswith("dense-labels:")
+        new_dense = source.startswith("dense-labels:")
+        if new_dense and not existing_dense:
+            # Interpolated label must not destroy a real observed label.
+            return False
         row.label_value = label_value
         row.observed_at = decision_ts
+        row.label_source = source
         return False
     session.add(
         models.Label(

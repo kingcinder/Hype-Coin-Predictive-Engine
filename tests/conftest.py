@@ -63,6 +63,7 @@ def _isolate_watchdog_inflight() -> Generator[None, None, None]:
     def _reset() -> None:
         with ops.watchdog._in_flight_lock:  # noqa: SLF001 - test fixture needs the internals.
             ops.watchdog._in_flight.clear()  # noqa: SLF001
+            ops.watchdog._abandoned.clear()  # noqa: SLF001
         ops.watchdog.reset_phase_skip_tracking()
 
     _reset()

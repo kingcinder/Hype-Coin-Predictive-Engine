@@ -232,3 +232,133 @@ def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(session, s3
     )
     assert by_source == [{"source_type": "market_data", "n": 3}]
     assert source.id  # keep reference for linters
+
+
+def test_s3_merge_retries_on_etag_conflict(session, s3, tmp_path, monkeypatch) -> None:
+    """H2: a lost-update race on S3 (stale ETag) must be retried, not lost.
+
+    The partition object already exists; a concurrent writer wins between
+    this compaction's read and conditional write. The first PUT raises
+    ``PartitionConflictError`` and the retry must re-read the now-current
+    object, merge on top of it, and land the full row set — no batch
+    silently dropped.
+    """
+    from ops.archive import PartitionConflictError
+
+    _seed_evidence(session, count=2, days_ago=11.0)
+    settings = _settings()
+    store = S3ArchiveStore(settings)
+    compactor = RawEvidenceCompactor(store=store, settings=settings)
+    compactor.compact(session, DECISION_TS)
+    session.flush()
+
+    _seed_evidence(session, count=3, days_ago=10.0, batch="b")
+    calls = {"count": 0}
+    real_put_if_match = store.put_object_if_match
+
+    def flaky_put_if_match(key: str, data: bytes, etag: str | None) -> int:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise PartitionConflictError("simulated concurrent writer")
+        return real_put_if_match(key, data, etag)
+
+    monkeypatch.setattr(store, "put_object_if_match", flaky_put_if_match)
+    result = compactor.compact(session, DECISION_TS)
+    session.flush()
+
+    assert result["compacted"] == 3
+    assert calls["count"] == 2, "one conflicted write, one successful retry"
+    manifest = session.scalar(select(models.ArchiveManifest))
+    assert manifest is not None
+    assert manifest.row_count == 5, "both batches must be in the partition"
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
+    assert rows == [{"n": 5}]
+
+
+def test_s3_initial_create_race_merges_instead_of_clobbering(
+    session, s3, tmp_path, monkeypatch
+) -> None:
+    """H2: a create lost between stat and write must merge, not clobber.
+
+    Faithful simulation of the initial-object race: the compactor's stat
+    sees "absent" (stale), but the conditional create fails because another
+    compactor's object is really there. The retry must re-stat, take the
+    merge path, and land the full row set.
+    """
+    _seed_evidence(session, count=2, days_ago=11.0, batch="a")
+    settings = _settings()
+    store = S3ArchiveStore(settings)
+    compactor = RawEvidenceCompactor(store=store, settings=settings)
+    compactor.compact(session, DECISION_TS)  # real: creates a valid partition
+    session.flush()
+
+    _seed_evidence(session, count=3, days_ago=10.0, batch="b")
+    real_stat = store.stat_object
+    stat_calls = {"count": 0}
+
+    def stale_stat_once(key: str):
+        stat_calls["count"] += 1
+        if stat_calls["count"] == 1:
+            return None  # stale read: object appears before our write
+        return real_stat(key)
+
+    monkeypatch.setattr(store, "stat_object", stale_stat_once)
+    result = compactor.compact(session, DECISION_TS)
+    session.flush()
+
+    assert result["compacted"] == 3
+    manifest = session.scalar(select(models.ArchiveManifest))
+    assert manifest is not None
+    assert manifest.row_count == 5, "retry must merge onto the existing object"
+    rows = query_archive("SELECT count(*) AS n FROM evidence", store=store, settings=settings)
+    assert rows == [{"n": 5}]
+
+
+def test_s3_put_object_if_absent_rejects_existing_object(s3) -> None:
+    """The conditional-create primitive rejects an existing key (moto-backed
+    S3 semantics for IfNoneMatch="*")."""
+    from botocore.exceptions import ClientError  # noqa: F401 - documents the mapping
+
+    from ops.archive import PartitionConflictError
+
+    store = S3ArchiveStore(_settings())
+    store.put_object_if_absent("evidence/k.parquet", b"first")
+    with pytest.raises(PartitionConflictError):
+        store.put_object_if_absent("evidence/k.parquet", b"second")
+
+
+def test_s3_read_object_round_trips_stored_bytes(s3) -> None:
+    """M3: the S3 read-back primitive returns exactly the stored bytes, so
+    the post-write hash verification compares against reality."""
+    store = S3ArchiveStore(_settings())
+    key = "evidence/source=x/year=2026/month=07/part-0.parquet"
+    store.put_object(key, b"parquet-bytes")
+    assert store.read_object(key) == b"parquet-bytes"
+
+
+def test_s3_same_size_corruption_fails_post_write_hash(s3, session, monkeypatch) -> None:
+    """M3: same-size corruption on the S3 backend is caught by the read-back
+    SHA-256 check (the size check alone would pass)."""
+    from ops.archive import ArchiveWriteError
+
+    settings = _settings()
+    store = S3ArchiveStore(settings)
+    _seed_evidence(session, count=1, batch="a")
+    session.commit()
+
+    real_read = S3ArchiveStore.read_object
+
+    def corrupting_read(self, key: str) -> bytes:
+        raw = bytearray(real_read(self, key))
+        raw[len(raw) // 2] ^= 0xFF  # same size, different bytes
+        return bytes(raw)
+
+    monkeypatch.setattr(S3ArchiveStore, "read_object", corrupting_read)
+    with pytest.raises(ArchiveWriteError, match="hash mismatch"):
+        RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
+    session.rollback()
+
+    unarchived = session.scalars(
+        select(models.RawEvidenceItem).where(models.RawEvidenceItem.archived_at.is_(None))
+    ).all()
+    assert len(unarchived) == 1

@@ -156,3 +156,77 @@ class TestLLMCalibratorBandDistance:
     def test_green_band_near_collapsed_token(self) -> None:
         dist = LLMCalibrator._band_distance("GREEN", collapsed=True)
         assert dist == 4
+
+
+class TestLLMCalibrationRegression:
+    def test_tiebreaker_is_strict_no_credit_for_noop(self) -> None:
+        """M34: an unchanged LLM adjustment (final_risk == base_risk) is not an
+        improvement — the tiebreak requires strictly closer to the truth."""
+        assess = LLMCalibrator._assess_improvement_tiebreaker
+        # No-op: identical risk, token collapsed — not improvement.
+        assert assess(80.0, 80.0, True) is False
+        assert assess(20.0, 20.0, False) is False
+        # Strictly closer to the truth counts.
+        assert assess(80.0, 95.0, True) is True
+        assert assess(80.0, 60.0, True) is False
+        assert assess(20.0, 5.0, False) is True
+
+    def test_prune_actually_deletes_stale_records(self, session) -> None:
+        """M35: pruning must execute a DELETE — stale calibration records are
+        removed from the table, not merely selected."""
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import func
+
+        from common.config import get_settings
+
+        asset = seed_market_asset(session)
+        settings = get_settings()
+        cutoff = datetime.now(UTC) - timedelta(
+            hours=settings.llm_calibration_window_hours * 2
+        )
+        old = models.LLMCalibrationRecord(
+            asset_id=asset.id,
+            prediction_ts=cutoff - timedelta(hours=1),
+            model_name="test",
+            hype_delta=0.0,
+            risk_delta=0.0,
+            confidence_delta=0.0,
+            llm_weight_at_time=0.5,
+            base_hype=0.5,
+            base_risk=50.0,
+            base_confidence=0.8,
+            final_hype=0.5,
+            final_risk=50.0,
+            final_confidence=0.8,
+            created_at=cutoff - timedelta(hours=1),
+        )
+        fresh = models.LLMCalibrationRecord(
+            asset_id=asset.id,
+            prediction_ts=datetime.now(UTC),
+            model_name="test",
+            hype_delta=0.0,
+            risk_delta=0.0,
+            confidence_delta=0.0,
+            llm_weight_at_time=0.5,
+            base_hype=0.5,
+            base_risk=50.0,
+            base_confidence=0.8,
+            final_hype=0.5,
+            final_risk=50.0,
+            final_confidence=0.8,
+            created_at=datetime.now(UTC),
+        )
+        session.add_all([old, fresh])
+        session.commit()
+        assert (
+            session.scalar(select(func.count()).select_from(models.LLMCalibrationRecord))
+            == 2
+        )
+
+        LLMCalibrator().calibrate(session)
+        session.commit()
+
+        remaining = session.scalars(select(models.LLMCalibrationRecord)).all()
+        assert len(remaining) == 1
+        assert remaining[0].id == fresh.id

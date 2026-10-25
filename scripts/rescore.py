@@ -376,6 +376,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rescore all historical tokens")
     parser.add_argument("--dry-run", action="store_true", help="Compute but don't write")
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the write pass without prompting (required for "
+        "non-interactive use; a bare run prompts first)",
+    )
+    parser.add_argument(
         "--compare",
         action="store_true",
         help="Print old → new risk for each token (implies --dry-run)",
@@ -430,6 +436,20 @@ if __name__ == "__main__":
     # Review-only flags imply --compare, which implies --dry-run: a write pass
     # requires a bare run (no --compare / --sweep / --export-csv / --top-pct).
     compare = args.compare or args.sweep or args.export_csv is not None or args.top_pct is not None
+    if not args.dry_run and not compare and not args.yes:
+        # The bare write path rewrites every historical score row: require an
+        # explicit confirmation so a typo'd invocation against the wrong
+        # DATABASE_URL cannot silently mutate authoritative score history.
+        try:
+            answer = input(
+                "Rescore will REWRITE every historical score row in the "
+                "configured database. Type 'yes' to continue: "
+            )
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != "yes":
+            print("Aborted. Re-run with --dry-run to preview, or --yes to confirm.")
+            raise SystemExit(2)
     # Comma-flattening, trimming, and empty-drop are owned by rescore() (single
     # source of truth, shared with the injected-session path) — pass through raw.
     rescore(

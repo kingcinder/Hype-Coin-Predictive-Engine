@@ -250,10 +250,11 @@ def run_parity(
 
     Compares the SQL and DuckDB lake read paths for every asset (or the first
     ``PARITY_MAX_ASSETS``), records ``component:parity`` health (``ok`` /
-    ``yellow`` / ``red`` by mismatch count), and pages a mismatch via ntfy at
-    most once per ``PARITY_ALERT_COOLDOWN_HOURS``. Returns the run summary or
-    ``{"skipped": True}`` when disabled, or ``{"error": ...}`` on failure —
-    never raises.
+    ``yellow`` / ``red`` by mismatch count — and escalated by per-asset
+    errors, so a broken lake read path can never report "ok"), and pages a
+    mismatch via ntfy at most once per ``PARITY_ALERT_COOLDOWN_HOURS``.
+    Returns the run summary or ``{"skipped": True}`` when disabled, or
+    ``{"error": ...}`` on failure — never raises.
     """
     settings = settings or get_settings()
     if not settings.parity_enabled or not settings.archive_enabled:
@@ -295,6 +296,15 @@ def run_parity(
         state = "ok"
         if mismatch_count > 0:
             state = "red" if mismatch_count >= settings.parity_alert_threshold else "yellow"
+        if errors > 0:
+            # A broken lake read path must never report "ok": per-asset
+            # errors escalate the run state just like mismatches do, so a
+            # systematic reconstruction failure cannot hide behind a green
+            # run (and the --strict gate exits non-zero on it).
+            if state == "ok":
+                state = "yellow"
+            if errors >= settings.parity_alert_threshold:
+                state = "red"
         examples = [_format_mismatch(mismatch) for mismatch in mismatches[:5]]
         # Evaluate the push cooldown BEFORE recording this run's health row,
         # otherwise the gate would always see the just-written red row and
@@ -309,7 +319,7 @@ def run_parity(
             message=(
                 f"lake-vs-SQL parity: {mismatch_count} mismatches across "
                 f"{len(assets)} assets at decision {decision_ts.isoformat()}; "
-                f"tolerance={settings.parity_tolerance}"
+                f"tolerance={settings.parity_tolerance}; errors={errors}"
             ),
             error_count=errors,
         )
@@ -368,7 +378,7 @@ def maybe_run_parity() -> dict[str, object]:
 
 _PARITY_MSG_RE = re.compile(
     r"lake-vs-SQL parity: (\d+) mismatches across (\d+) assets at decision "
-    r"([^;]+); tolerance=(\S+)"
+    r"([^;]+); tolerance=(\S+?)(?:; errors=(\d+))?\s*$"
 )
 
 

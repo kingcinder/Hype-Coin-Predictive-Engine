@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.config import Settings, get_settings
 from common.enums import AlertState
+from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from ingestion.rpc_pool import RpcPoolAlert
@@ -277,7 +277,13 @@ class NtfyNotifier:
     def _post(self, message: str, headers: dict[str, str]) -> None:
         base_url = self.settings.ntfy_base_url.rstrip("/")
         topic = self.settings.ntfy_topic.strip("/")
-        with httpx.Client(base_url=base_url, timeout=self.settings.ntfy_timeout_seconds) as client:
+        # H26: centralized client construction with an explicit, sanitized
+        # proxy policy — a hostile proxy environment must not silently kill
+        # every push at construction time (was: ntfy_push_failed with
+        # "Invalid port: ':1]'", alerts never delivered).
+        with build_httpx_client(
+            base_url=base_url, timeout=self.settings.ntfy_timeout_seconds
+        ) as client:
             response = client.post(f"/{topic}", content=message.encode("utf-8"), headers=headers)
             response.raise_for_status()
 

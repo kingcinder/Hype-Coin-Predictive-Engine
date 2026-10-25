@@ -249,6 +249,10 @@ class ArchiveManifest(Base):
     partition_month: Mapped[int] = mapped_column(Integer, nullable=False)
     row_count: Mapped[int] = mapped_column(Integer, nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # SHA-256 hex of the exact bytes written for this partition, captured at
+    # write time. Lets operators verify a stored object against the manifest
+    # instead of discovering bit-rot only on the next read (after prune).
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
