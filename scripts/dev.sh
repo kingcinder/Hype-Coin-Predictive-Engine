@@ -208,7 +208,7 @@ cmd_smoke() {
     python -m py_compile ui/app.py
 
     echo "Running clean-clone startup and launcher acceptance..."
-    # These two values remain global so the EXIT trap can clean up after this
+    # These two values remain global so the RETURN trap can clean up after this
     # function returns from either a success or failure path.
     smoke_root="$(mktemp -d -t serpent-smoke.XXXXXX)"
     engine_pid=""
@@ -226,6 +226,11 @@ cmd_smoke() {
                 sleep 1
             done
             kill -TERM "$engine_pid" 2>/dev/null || true
+            for _ in {1..5}; do
+                kill -0 "$engine_pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -KILL "$engine_pid" 2>/dev/null || true
             wait "$engine_pid" 2>/dev/null || true
         fi
         rm -rf "$smoke_root"
@@ -239,6 +244,23 @@ cmd_smoke() {
         .venv/bin/pip install -q -e ".[dev]"
         ENV=local-single SERPENT_DB_PATH="$clone/serpent.db" \
             .venv/bin/python scripts/seed_fixtures.py
+        ENV=local-single SERPENT_DB_PATH="$clone/serpent.db" \
+            ARCHIVE_BACKEND=local ARCHIVE_LOCAL_DIR="$clone/data/archive" \
+            .venv/bin/python - <<'PY'
+from common.config import get_settings
+from data_lake.manager import run_data_lake_pass
+from ops.parity import run_parity
+from storage.database import SessionLocal
+
+with SessionLocal() as session:
+    lake = run_data_lake_pass(session)
+    session.commit()
+    assert "error" not in lake, lake
+    parity = run_parity(session, settings=get_settings())
+    session.commit()
+    assert "error" not in parity, parity
+PY
+        echo "PASS: seeded data_lake and parity phases"
     )
 
     api_port="$(python3.12 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
@@ -247,8 +269,7 @@ cmd_smoke() {
         ui_port="$(python3.12 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
     done
 
-    # A fresh environment has no .env, token, or DB override. Only ports and
-    # temporary paths are supplied to avoid colliding with the operator's stack.
+    # Keep external requests isolated while preserving loopback API/UI access.
     pushd "$clone" >/dev/null
     env -i \
         HOME="$smoke_root/home" \
@@ -256,6 +277,10 @@ cmd_smoke() {
         API_HOST=127.0.0.1 API_PORT="$api_port" \
         API_BASE_URL="http://127.0.0.1:$api_port" \
         UI_HOST=127.0.0.1 UI_PORT="$ui_port" \
+        REQUEST_TIMEOUT_SECONDS=1 MAX_REQUEST_RETRIES=0 \
+        HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 \
+        NO_PROXY=127.0.0.1,localhost \
+        LLM_ENABLED=false NIGHTCRAWLER_ENABLED=false \
         ARCHIVE_BACKEND=local ARCHIVE_LOCAL_DIR="$clone/data/archive" \
         bash -c 'source .venv/bin/activate; exec python -m engine' \
         >"$smoke_root/direct-engine.log" 2>&1 &
@@ -267,7 +292,7 @@ cmd_smoke() {
         if [[ -f "$clone/.env" ]]; then
             token="$(sed -n 's/^ENGINE_API_TOKEN=//p' "$clone/.env" | tail -n 1)"
         fi
-        if [[ -n "$token" ]] && curl -sS -o "$smoke_root/health.json" \
+        if [[ -n "$token" ]] && curl --noproxy '*' -sS -o "$smoke_root/health.json" \
             -w '%{http_code}' -H "Authorization: Bearer $token" \
             "http://127.0.0.1:$api_port/health" >"$smoke_root/health.code" 2>/dev/null; then
             health_code="$(cat "$smoke_root/health.code")"
@@ -290,37 +315,42 @@ cmd_smoke() {
         fi
         return 1
     }
-    unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/health")"
+    unauth_code="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$api_port/health")"
     [[ "$unauth_code" == "401" || "$unauth_code" == "403" ]] || {
         echo "FAIL: unauthenticated /health returned $unauth_code"; return 1;
     }
     for _ in {1..90}; do
-        gui_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$ui_port/" 2>/dev/null || true)"
+        gui_code="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$ui_port/" 2>/dev/null || true)"
         if [[ "$gui_code" == "200" ]] && python - "$smoke_root/health.json" <<'PY'
 import json, sys
 components = {row["component"]: row["state"] for row in json.load(open(sys.argv[1]))["components"]}
-assert components.get("data_lake") == "ok"
-assert components.get("parity") != "red"
+parity = components.get("parity")
+sys.exit(0 if components.get("data_lake") == "ok" and parity is not None and parity != "red" else 1)
 PY
         then
             break
         fi
         sleep 1
-        curl -sS -o "$smoke_root/health.json" -H "Authorization: Bearer $token" \
+        curl --noproxy '*' -sS -o "$smoke_root/health.json" -H "Authorization: Bearer $token" \
             "http://127.0.0.1:$api_port/health" || true
     done
     [[ "${gui_code:-}" == "200" ]] || { echo "FAIL: GUI returned ${gui_code:-no response}"; return 1; }
-    scores_code="$(curl -sS -o "$smoke_root/scores.json" -w '%{http_code}' \
+    scores_code="$(curl --noproxy '*' -sS -o "$smoke_root/scores.json" -w '%{http_code}' \
         -H "Authorization: Bearer $token" "http://127.0.0.1:$api_port/scores/top?limit=20")"
     [[ "$scores_code" == "200" ]] && rg -q 'HYPE|DANGER' "$smoke_root/scores.json" || {
         echo "FAIL: seeded score data was not served"; return 1;
     }
-    python - "$smoke_root/health.json" <<'PY'
+    if ! python - "$smoke_root/health.json" <<'PY'
 import json, sys
 components = {row["component"]: row["state"] for row in json.load(open(sys.argv[1]))["components"]}
-assert components.get("data_lake") == "ok", components.get("data_lake")
-assert components.get("parity") != "red", components.get("parity")
+parity = components.get("parity")
+if components.get("data_lake") != "ok" or parity is None or parity == "red":
+    print(f"FAIL: smoke health components {components}", file=sys.stderr)
+    raise SystemExit(1)
 PY
+    then
+        return 1
+    fi
     echo "PASS: token mode 0600; /health authorized=$health_code unauthenticated=$unauth_code; seeded scores=$scores_code; GUI=$gui_code; data_lake=ok; parity not red"
     kill -INT "$engine_pid"
     for _ in {1..30}; do
@@ -331,7 +361,7 @@ PY
         echo "FAIL: engine did not stop after SIGINT"
         return 1
     fi
-    wait "$engine_pid"
+    wait "$engine_pid" || { echo "FAIL: engine exited with a nonzero status after SIGINT"; return 1; }
     engine_pid=""
     echo "PASS: engine shut down cleanly on SIGINT"
 
@@ -348,6 +378,9 @@ SH
         SMOKE_OPEN_LOG="$smoke_root/opened-url" \
         API_HOST=127.0.0.1 API_PORT="$api_port" API_BASE_URL="http://127.0.0.1:$api_port" \
         UI_HOST=127.0.0.1 UI_PORT="$ui_port" \
+        REQUEST_TIMEOUT_SECONDS=1 MAX_REQUEST_RETRIES=0 \
+        HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 \
+        NO_PROXY=127.0.0.1,localhost LLM_ENABLED=false NIGHTCRAWLER_ENABLED=false \
         SERPENT_API_PORT="$api_port" SERPENT_UI_PORT="$ui_port" \
         ARCHIVE_BACKEND=local ARCHIVE_LOCAL_DIR="$clone/data/archive" \
         ./start-engine.sh >"$smoke_root/launcher.log" 2>&1 &
@@ -370,7 +403,7 @@ SH
         echo "FAIL: launcher engine did not stop after SIGINT"
         return 1
     fi
-    wait "$engine_pid"
+    wait "$engine_pid" || { echo "FAIL: engine exited with a nonzero status after SIGINT"; return 1; }
     engine_pid=""
     trap - RETURN
     cleanup_smoke
