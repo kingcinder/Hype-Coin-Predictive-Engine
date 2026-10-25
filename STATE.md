@@ -62,11 +62,11 @@ or `STATE.md` existed before 2026-09-09.
 
 ## Working-tree snapshot (2026-10-25)
 
-The canonical checkout is on `main` at `c229dd4`; `fix/functional-pass` and
-`origin/main` are also at this commit. The feature branch merged live `origin/main`
-at `1d24499` (coverage chart update) in `a18ae3b`; then `main` was fast-forwarded
-to the verified feature tip without rewriting history. The ignored root
-`serpent.db` is existing user data and was not altered.
+The canonical checkout is on `main`; `origin/main` and `origin/fix/functional-pass`
+are synchronized at the final state-ledger commit. The feature branch merged live
+`origin/main` at `1d24499` (coverage chart update) in `a18ae3b`; then `main` was
+fast-forwarded to the verified feature tip without rewriting history. The ignored
+root `serpent.db` is existing user data and was not altered.
 
 ## Change ledger
 
@@ -534,5 +534,5 @@ in-flight work from other agents, still untouched.
   the unchanged 75.7% threshold is met.
 - Merged live `origin/main` at `1d24499` into the feature branch via merge
   commit `a18ae3b`; it updates only `coverage/history.json` and `coverage/trend.svg`.
-  Fast-forwarded `main` and `fix/functional-pass` to `c229dd4` without rewriting
-  history. Verified both remote refs resolve to that commit.
+  Fast-forwarded `main` and `fix/functional-pass` without rewriting history;
+  both remote refs now include the final state-ledger commit and are synchronized.
