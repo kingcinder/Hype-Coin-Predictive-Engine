@@ -732,6 +732,7 @@ def ensure_api_token(env_path: str | os.PathLike[str] = ".env") -> str | None:
         return None
     existing = os.environ.get("ENGINE_API_TOKEN", "").strip()
     if existing:
+        get_settings.cache_clear()
         return existing
 
     path = Path(env_path)
@@ -740,6 +741,7 @@ def ensure_api_token(env_path: str | os.PathLike[str] = ".env") -> str | None:
         key, sep, value = line.partition("=")
         if sep and key.strip() == "ENGINE_API_TOKEN" and value.strip():
             os.environ["ENGINE_API_TOKEN"] = value.strip()
+            get_settings.cache_clear()
             return value.strip()
 
     token = secrets.token_urlsafe(32)
@@ -750,6 +752,7 @@ def ensure_api_token(env_path: str | os.PathLike[str] = ".env") -> str | None:
         handle.write("\n".join(kept) + "\n")
     os.chmod(path, 0o600)
     os.environ["ENGINE_API_TOKEN"] = token
+    get_settings.cache_clear()
     return token
 
 

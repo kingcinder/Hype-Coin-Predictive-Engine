@@ -218,6 +218,7 @@ cmd_smoke() {
     mkdir -p "$smoke_root/home" "$smoke_root/bin"
 
     cleanup_smoke() {
+        trap - RETURN
         if [[ -n "$engine_pid" ]] && kill -0 "$engine_pid" 2>/dev/null; then
             kill -INT "$engine_pid" 2>/dev/null || true
             for _ in {1..20}; do
@@ -229,7 +230,7 @@ cmd_smoke() {
         fi
         rm -rf "$smoke_root"
     }
-    trap cleanup_smoke EXIT
+    trap cleanup_smoke RETURN
 
     git clone --quiet --no-hardlinks --single-branch --branch "$branch" "$ROOT" "$clone"
     (
@@ -371,7 +372,7 @@ SH
     fi
     wait "$engine_pid"
     engine_pid=""
-    trap - EXIT
+    trap - RETURN
     cleanup_smoke
     echo "✓ Smoke tests passed"
 }

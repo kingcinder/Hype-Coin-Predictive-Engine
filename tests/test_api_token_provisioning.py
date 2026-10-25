@@ -12,15 +12,17 @@ import stat
 
 import pytest
 
-from common.config import ensure_api_token
+from common.config import ensure_api_token, get_settings
 
 
 @pytest.fixture(autouse=True)
 def _clean_token_env(monkeypatch):
+    get_settings.cache_clear()
     monkeypatch.delenv("ENGINE_API_TOKEN", raising=False)
     monkeypatch.delenv("ENGINE_API_AUTH_BYPASS", raising=False)
     yield
     os.environ.pop("ENGINE_API_TOKEN", None)
+    get_settings.cache_clear()
 
 
 def test_generates_token_once_and_writes_env_0600(tmp_path, monkeypatch):
@@ -77,3 +79,15 @@ def test_existing_token_is_left_alone(tmp_path, monkeypatch):
 
     assert ensure_api_token(env_file) == "operator-supplied-token-value-1234"
     assert not env_file.exists()
+
+
+def test_provisioning_refreshes_settings_cached_before_token(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    assert get_settings().engine_api_token is None
+
+    token = ensure_api_token(tmp_path / ".env")
+
+    assert token is not None
+    assert get_settings().engine_api_token == token
+    get_settings.cache_clear()
