@@ -47,7 +47,10 @@ echo ""
     API_PORT="${SERPENT_API_PORT:-8000}"
     UI_PORT="${SERPENT_UI_PORT:-8501}"
     for _ in $(seq 1 90); do
-        if curl -sf "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
+        # The API gates every route with a bearer token that the engine writes to
+        # .env on first run, so read it on each attempt rather than once.
+        TOKEN="$(sed -n 's/^ENGINE_API_TOKEN=//p' "$PROJECT_DIR/.env" 2>/dev/null | tail -n 1 || true)"
+        if [ -n "$TOKEN" ] && curl -sf -H "Authorization: Bearer ${TOKEN}" "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
             sleep 2  # let the Streamlit GUI settle before opening the browser
             xdg-open "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
                 || sensible-browser "http://localhost:${UI_PORT}" >/dev/null 2>&1 \

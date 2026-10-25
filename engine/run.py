@@ -479,10 +479,12 @@ def run_engine_phases(
 
 
 def main() -> None:
-    from common.config import get_settings
+    from common.config import ensure_api_token, get_settings
     from common.network import validate_network_exposure
     from storage.database import acquire_sqlite_writer_lock
 
+    # Provision ENGINE_API_TOKEN on first run, before settings are cached.
+    ensure_api_token(Path(__file__).resolve().parents[1] / ".env")
     settings = get_settings()
     validate_network_exposure(settings)
 

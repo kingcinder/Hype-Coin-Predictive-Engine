@@ -714,6 +714,45 @@ class Settings(BaseSettings):
         return None
 
 
+def ensure_api_token(env_path: str | os.PathLike[str] = ".env") -> str | None:
+    """First-run provisioning of ``ENGINE_API_TOKEN`` (H4).
+
+    Returns ``None`` when the local-dev bypass is on. Otherwise returns the
+    existing token (from the environment or ``env_path``), or generates one
+    once, writes it to ``env_path`` with mode 0600 and exports it to
+    ``os.environ`` before ``get_settings()`` is first called. The value is never
+    logged.
+    """
+    import os
+    import secrets
+    from pathlib import Path
+
+    bypass = os.environ.get("ENGINE_API_AUTH_BYPASS", "").strip().lower()
+    if bypass in {"1", "true", "yes", "on"}:
+        return None
+    existing = os.environ.get("ENGINE_API_TOKEN", "").strip()
+    if existing:
+        return existing
+
+    path = Path(env_path)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "ENGINE_API_TOKEN" and value.strip():
+            os.environ["ENGINE_API_TOKEN"] = value.strip()
+            return value.strip()
+
+    token = secrets.token_urlsafe(32)
+    kept = [line for line in lines if line.partition("=")[0].strip() != "ENGINE_API_TOKEN"]
+    kept.append(f"ENGINE_API_TOKEN={token}")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(kept) + "\n")
+    os.chmod(path, 0o600)
+    os.environ["ENGINE_API_TOKEN"] = token
+    return token
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
