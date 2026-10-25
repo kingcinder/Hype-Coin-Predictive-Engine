@@ -81,9 +81,9 @@ def run_data_lake_pass(
             message=(
                 f"signal={signal_result.total_scored} scored, "
                 f"{signal_result.actionable_count} actionable; "
-                f"labels={label_counts['total_labels']} total "
-                f"({label_counts['progress_pct']:.0f}% of "
-                f"{label_counts['min_samples_required']} required); "
+                f"labels={progress['total_labels']} total "
+                f"({progress['progress_pct']:.0f}% of "
+                f"{progress['min_samples_required']} required); "
                 f"webhooks={result['webhooks']['dispatched']} dispatched; "
                 f"duration={duration:.1f}s"
             ),
@@ -93,8 +93,8 @@ def run_data_lake_pass(
             "data_lake_pass_complete",
             signal_scored=signal_result.total_scored,
             actionable=signal_result.actionable_count,
-            total_labels=label_counts["total_labels"],
-            label_progress=label_counts["progress_pct"],
+            total_labels=progress["total_labels"],
+            label_progress=progress["progress_pct"],
             webhooks_dispatched=result["webhooks"]["dispatched"],
             duration_sec=round(duration, 2),
         )
