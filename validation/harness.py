@@ -800,6 +800,8 @@ def classify_regime(session: Session, window_end: datetime) -> str:
         return "unclassified"
     hourly: dict[tuple[object, datetime], list[tuple[datetime, float]]] = {}
     for _, ts, price in rows:
+        if price is None:
+            continue  # the query already excludes NULL prices; keep the type narrowed
         hour = ts.replace(minute=0, second=0, microsecond=0)
         hourly.setdefault((ts.date(), hour), []).append((ts, float(price)))
     returns: list[float] = []

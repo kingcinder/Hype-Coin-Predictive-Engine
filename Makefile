@@ -1,6 +1,9 @@
 .PHONY: setup up down migrate seed worker api ui engine test lint format smoke \
 	bootstrap-local local-worker local-api local-ui archive archive-query retention parity backtest refresh-rpc-pools forecast-ab install-local \
-	check-imports check-deps rescore-compare score-drift score-drift-history
+	check-imports check-deps rescore-compare score-drift score-drift-history typecheck
+
+# Single source of truth for mypy coverage: `make lint` and CI both use it.
+MYPY_PACKAGES = api backtest catalyst common crawlers data_lake engine features fingerprint forecast ingestion llm mempool narrative ops pump_physics radar risk_engine scoring storage ui validation
 
 setup:
 	python -m pip install --upgrade pip
@@ -123,9 +126,12 @@ test:
 
 lint:
 	ruff check .
-	mypy catalyst common forecast mempool narrative ops pump_physics storage ingestion features fingerprint radar risk_engine scoring backtest api
+	$(MAKE) typecheck
 	python3 scripts/check_broken_imports.py $(if $(VENV),--venv $(VENV),)
 	python3 scripts/check_declared_deps.py
+
+typecheck:
+	mypy $(MYPY_PACKAGES)
 
 # Collection guard: fail fast on dangling repo-local imports (see CI lint job).
 # `python3` (not the venv python) on purpose: the script is stdlib-only, so it
