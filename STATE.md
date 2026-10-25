@@ -411,3 +411,23 @@ in-flight work from other agents, still untouched.
 - Post-task checks: pytest 808 passed, 11 skipped; Ruff passed; mypy passed
   (53 files); broken-import scan passed (244 files); declared-deps scan passed
   (28 roots, 244 files).
+
+### 2026-10-25 — Brief premise check and baseline gates (F3 blocked)
+
+- Premise check: the fail-closed API gate (`_RequireApiTokenMiddleware`,
+  `_check_bearer_token`) is on `main` (added in `0f02af4`, "restrict binds and
+  authenticate UI requests"). `main` is an ancestor of `fix/functional-pass`,
+  so this branch already has the gate. The earlier "gate missing" note was based
+  on a review branch that is not on this checkout; it does not apply here.
+- F3–F9 definitions were not included in the brief text supplied, so F3 was not
+  started. No fixes were made beyond the F2 commits already recorded above.
+- Pre-existing uncommitted changes in `data_lake/manager.py`,
+  `data_lake/signal.py` and untracked `tests/test_data_lake_manager.py` were not
+  made in this session and were left unstaged.
+- Baseline gates from a fresh venv (`pip install -e ".[dev]"`) on the current tree:
+  pytest exit 0; `ruff check .` passed; `mypy api/ common/ engine/ crawlers/
+  data_lake/ ui/` (CI command) passed, 53 files; broken-import scan passed (247
+  files); declared-deps scan passed (28 roots, 247 files).
+- Not clean: `ruff format --check .` flags `tests/test_data_lake_manager.py`
+  (untracked, not from this session). Whole-repo `mypy .` fails on the
+  duplicate `rescore` module name, which CI does not run.
