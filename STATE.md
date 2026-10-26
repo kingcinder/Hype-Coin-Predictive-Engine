@@ -86,6 +86,7 @@ root `serpent.db` is existing user data and was not altered.
 | E8 | History-divergence guard: pre-push hook blocks non-fast-forward pushes to `refs/heads/main` (`scripts/check_history_divergence.py` via `.pre-commit-config.yaml`, pre-commit env-var contract `PRE_COMMIT_FROM_REF`/`TO_REF`/`REMOTE_BRANCH` + raw-stdin fallback); CI `history-guard` job backstops push events (`--check github.event.before` vs `github.sha`, `fetch-depth: 0`); deliberate rewrites acknowledged via `ALLOW_HISTORY_REWRITE=1` (hook/CI) or `[history-rewrite]` head-commit marker (CI); branch-protection toggles documented in `ci.yml` header | done (2026-09-28; re-audited 2026-10-23) | `scripts/check_history_divergence.py`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, and `tests/test_history_divergence.py` remain present `[verified 2026-10-23]` |
 | E9 | Close operational test-coverage gaps | done (2026-10-23) | Behavior tests bring watchdog to 93%, LLM calibration to 96%, liquidity watcher to 81%, validation CLI to 92%, reference seeding to 89%, and `validation.__main__` to 100%; full suite measures 77.71%, with `fail_under=75.7` `[verified 2026-10-23]` |
 | E10 | Fresh local startup and launcher API authentication | done (2026-10-25) | `ensure_api_token()` refreshes cached settings after adopting the first-run token; regression in `tests/test_api_token_provisioning.py`; clean-clone smoke proves mode 0600, authorized/unauthorized health, seeded scores, GUI, and launcher URL `[verified 2026-10-25]` |
+| E11 | Restore installed-package CI paths and make required gates locally reproducible; tolerate empty/pre-migration SQLite fleet guards | done | Added the omitted `validation*` package to setuptools discovery after reproducing CI rescore's `No module named 'validation'`; `make gate` runs lint, format, unified mypy, import/dependency scans, and pytest with per-step results. `_sqlite_fleet_total` returns no fleet for an empty file or absent `scores` table; regression tests cover both `[verified 2026-10-26]` |
 
 ### N — Whole new modules
 
@@ -99,6 +100,7 @@ root `serpent.db` is existing user data and was not altered.
 | N6 | Secrets/credentials management (rotation, at-rest encryption, per-crawler scoping) | deferred | No dedicated secrets-management module; environment settings remain in `common/config.py` `[verified 2026-10-23]` |
 | N7 | Portfolio/position paper-trading simulation ledger | deferred | No paper-position ledger module is present `[verified 2026-10-23]` |
 | N8 | Point-in-time leakage guardrails: `validation/leakage_guard.py` and feature enforcement | done (re-audited 2026-10-23) | `require_decision_ts` and `check_rows_point_in_time` exist in `validation/leakage_guard.py`; tests and `docs/leakage-audit.md` remain `[verified 2026-10-23]` |
+| N9 | Ingestion first-availability timestamps for new pair, pool, and contract rows | done | Pair/Pool inherited `created_at` defaults ran after capture of child snapshot `observed_at`; ingestion now assigns the single captured observation time, while upserts preserve it. Existing historical timestamps remain unverified and untouched `[verified 2026-10-26]` |
 
 ### O — Omissions / reductions
 
@@ -565,7 +567,113 @@ in-flight work from other agents, still untouched.
   remain insufficient-data. See addendum 14 in the validation field report.
 - Final verification on this checkout: `python -m pytest tests/ -o addopts= -q
   -p no:cacheprovider` — 864 passed, 11 skipped, 1 warning; Ruff and formatting
-  pass; mypy reports no issues in 53 files; broken-import scan checks 251 files;
+  pass; the then-reported mypy scan checked 53 files and did not match the
+  unified 161-file CI typecheck. That historical claim is superseded by the
+  2026-10-26 `make gate` verification below; do not use it as typecheck evidence.
+  Broken-import scan checks 251 files;
   declared-dependency scan checks 29 roots/251 files. Validation self-tests
   pass. The DB validation report is versioned at
   `reports/validation-2026-10-25-source-availability.json`.
+
+### Final verification — 2026-10-26 (fix/final-gate)
+
+`PATH=/tmp/hype-final-gate-venv/bin:$PATH make VENV=/tmp/hype-final-gate-venv
+gate` — exit 0. Captured per-step output:
+
+```text
+== ruff check . ==
+All checks passed!
+PASS: ruff check .
+== ruff format --check . ==
+269 files already formatted
+PASS: ruff format --check .
+== make typecheck ==
+Success: no issues found in 161 source files
+PASS: make typecheck
+== scripts/check_broken_imports.py ==
+broken-import scan OK — 251 .py file(s) checked
+PASS: scripts/check_broken_imports.py
+== scripts/check_declared_deps.py ==
+declared-deps scan OK — 29 third-party root(s), 251 .py file(s) checked
+PASS: scripts/check_declared_deps.py
+== pytest ==
+Required test coverage of 75.7% reached. Total coverage: 78.27%
+PASS: pytest
+```
+
+The CI-style pytest step returned exit 0; its quiet mode printed dots rather
+than a count summary. A standalone full-suite run below will record exact
+passed/skipped counts.
+R2 acceptance run: in isolated clone `/tmp/hype-empty-db-check-2026-10-26`,
+created a zero-byte root `serpent.db` (stat before and after: 0 bytes), then ran
+`env -i PATH=/tmp/hype-final-gate-venv/bin:/usr/bin:/bin
+HOME=/tmp/hype-empty-db-home python -m pytest -o addopts= -q
+-p no:cacheprovider` — exit 0, 867 passed, 11 skipped, 24 warnings in 140.25s.
+The canonical root database was not touched.
+
+Clean-clone startup/launcher check: `PATH=/tmp/hype-final-gate-venv/bin:$PATH
+./scripts/dev.sh smoke` — exit 0; seeded Data Lake/parity passed, auth health
+200/401, seeded `/scores/top?include_black=true` 200, GUI 200, data_lake=ok,
+parity non-red, direct engine and launcher SIGINT stopped cleanly, and launcher
+opened the expected loopback URL. The fixture's two rows are BLACK and the API
+intentionally excludes them by default; the smoke now opts in explicitly.
+The exact root DB validation rerun used a read-only SQLite backup at
+`/tmp/hype-final-availability-2026-10-26.db` and wrote
+`/tmp/hype-final-availability-2026-10-26.json`: 15 cells, 4 suspicious. It
+measured RiskBand distance 2.202 vs 1.798 always-GREEN (n=396), BLACK
+precision 0.0884 vs 0.0884 base rate (n=2,013), risk/exit concordance 0.9687
+(n=396, still flagged), confidence ECE 0.0798 vs 0.10 (n=2,013), and 2
+suspected feature leaks. Forecast, hazard, and ensemble remain
+insufficient-data. Historical source replay still verifies 0 candidate values;
+the new ingestion timestamp fix does not rewrite that history.
+
+### 2026-10-26 — Final gate, SQLite edge, and availability follow-up
+
+- Recon: started from clean `main` at `40a3f00`, then created `fix/final-gate`;
+  no changes were made on `main`. The previously claimed 53-file mypy check is
+  stale and insufficient: fresh `make typecheck` initially could not find mypy
+  because the checkout's `.venv` is incomplete. A fresh Python 3.12.3 venv was
+  installed at `/tmp/hype-final-gate-venv` from `.[dev]`.
+- R1: explicitly annotated the three point-in-time replay lists in
+  `validation/harness.py`; added `validation*` to setuptools package discovery
+  after the live GitHub CI rescore job failed with `No module named
+  'validation'`; added `make gate` with one PASS/FAIL line per required check.
+  The rescore command then printed `Rescore complete (DRY RUN)`, `Updated: 2,
+  Skipped: 0, Errors: 0` in the fresh venv. The smoke probe was updated to
+  include the all-BLACK seed rows explicitly. Final gate output above supersedes
+  the stale 53-file claim.
+- R2: read-only fleet-total inspection now returns `None` when `scores` is
+  absent; tests cover a zero-byte database and a database with another table.
+  The existing 52 MB root `serpent.db` is user data and was not changed.
+- R3: confirmed source insertion-time gap in `_store_normalized_pair` and
+  `upsert_contract`/`upsert_pool_and_pair`: captured child `observed_at`
+  preceded ORM-generated parent `created_at`. New rows now share one captured
+  availability time; upserts do not change it. Historical records remain
+  unverified and untouched. On the fresh backup, later parent/creation times
+  occur in 608/884 market, 606/884 liquidity, and 395/483 contract rows. Of
+  these, 602/600/391 gaps are under one second; six/six/four are longer (up to
+  about 116 days) and their historical writers remain undetermined. Publication
+  guards keep near-perfect concordance flagged if the audit lists unreplayed
+  source rows.
+- R4: added `docs/predictive-edge-evidence.md`, linked from the field report;
+  Forecast, Data Lake progress, and Validation views already display the
+  insufficient-data/unvalidated state. Validation UI now surfaces the
+  unverified-source flag as a warning.
+- Historical DB validation was rerun only against a temporary SQLite backup.
+  Source replay found 0 exact candidate values across five feature families;
+  forecasts, hazard, and ensemble remain insufficient-data. The larger legacy
+  timestamp gaps (6 market, 6 liquidity, 4 contract rows) have no verified
+  historical writer/provenance, so they remain unresolved and were not
+  rewritten. New ingestion rows use the captured observation timestamp.
+- Docker Compose configuration validation and image build passed with a local
+  dummy `ENGINE_API_TOKEN`: `docker compose config --quiet` and
+  `docker compose build` both exited 0; engine and backup images were built.
+  This verifies image construction only, not a live Compose service or external
+  source ingestion.
+- GitHub Actions cannot verify this unpushed local branch. The latest observed
+  `main` run at `40a3f00` failed the unified mypy and rescore packaging jobs;
+  both failures have local fixes covered by the gate above. The separate
+  archive/parity workflow's MinIO image pull failed before its job steps.
+  README quickstart remains unverified verbatim; the clean-clone smoke used its
+  own isolated environment. Live-source replay and historical rows without
+  provenance remain unverified by design.
