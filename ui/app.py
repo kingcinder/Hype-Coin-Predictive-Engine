@@ -1379,7 +1379,7 @@ def validation_integrity_view() -> None:
     for cell in cells:
         if cell.get("status") == "suppressed_missing_crosscheck":
             st.warning(cell.get("guard_note") or "Concordance suppressed without leakage audit.")
-        elif cell.get("status") == "flagged_suspicious":
+        elif cell.get("status") in {"flagged_suspicious", "flagged_unverified_sources"}:
             st.warning(cell.get("guard_note") or "Concordance is flagged as suspicious.")
     if cells:
         st.dataframe(
@@ -1403,7 +1403,7 @@ def render_latest_validation_verdict() -> None:
 
     cells = report.get("cells") or []
     statuses = {cell.get("status") for cell in cells}
-    if "flagged_suspicious" in statuses:
+    if statuses & {"flagged_suspicious", "flagged_unverified_sources"}:
         st.warning("Latest report flags suspicious validation results; inspect the cell statuses.")
     elif "suppressed_missing_crosscheck" in statuses or not report.get("leakage_crosscheck_ran"):
         st.warning("Latest report has no completed point-in-time leakage cross-check.")

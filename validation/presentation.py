@@ -21,6 +21,8 @@ def guard_validation_cells(report: dict[str, Any]) -> dict[str, Any]:
         None,
     )
     audit_ran = audit_cell is not None
+    audit_note = str((audit_cell or {}).get("note") or "")
+    unverified_source_rows = "source replay could not verify non-missing values:" in audit_note
     findings = {
         (item.get("output"), item.get("metric")) for item in suspicious if isinstance(item, dict)
     }
@@ -44,6 +46,12 @@ def guard_validation_cells(report: dict[str, Any]) -> dict[str, Any]:
                     cell["guard_note"] = (
                         "Near-perfect concordance was flagged by the report cross-check; "
                         "do not interpret it as predictive skill."
+                    )
+                elif unverified_source_rows:
+                    cell["status"] = "flagged_unverified_sources"
+                    cell["guard_note"] = (
+                        "Near-perfect concordance remains unverified while the leakage audit "
+                        "reports historical source rows that could not be replayed."
                     )
                 else:
                     cell["status"] = "cross_checked"

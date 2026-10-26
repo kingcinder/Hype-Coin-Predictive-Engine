@@ -411,6 +411,8 @@ collapse metrics, hazard C-index, and ensemble-weight metrics remain
 
 ### Evidence required before claiming predictive edge
 
+The full acceptance criteria are recorded in [`predictive-edge-evidence.md`](predictive-edge-evidence.md).
+
 A predictive claim needs a predeclared target and decision horizon, at least 30
 eligible point-in-time samples per reported cell (and enough independent assets
 and time periods to make uncertainty intervals useful), a strictly later
@@ -468,6 +470,32 @@ creation-time, observation-time, and event-time guards.
 
 The measured output is committed as
 [`reports/validation-2026-10-25-source-availability.json`](../reports/validation-2026-10-25-source-availability.json).
+
+### 15. 2026-10-26 addendum — ingestion timestamp cause and fresh rerun
+
+The current write path explains most parent/child chronology differences.
+`_store_normalized_pair` captures `observed_at`, then creates Contract, Pool,
+and Pair rows whose `TimestampMixin.created_at` default was evaluated on later
+flushes. In a fresh read-only backup, text-precision comparisons found later
+parent/creation timestamps for 608/884 market snapshots, 606/884 liquidity
+snapshots, and 395/483 contracts. Parsing timestamps at microsecond precision
+shows 602, 600, and 391 of those gaps, respectively, are under one second; the
+remaining 6, 6, and 4 rows have longer gaps, with maxima around 116 days. The
+current ingestion path now assigns its one captured observation timestamp as
+the new Contract/Pool/Pair `created_at`, and does not update it on upsert.
+Stored historical timestamps were not rewritten. The minority of large gaps
+cannot be attributed to a specific historical writer from this database alone;
+their availability remains unverified.
+
+Command: `python -m validation --db /tmp/hype-final-availability-2026-10-26.db
+--out /tmp/hype-final-availability-2026-10-26.json` on a SQLite backup created
+with read-only `sqlite3.Connection.backup()`. Exit 0; 15 cells, 4 suspicious.
+Results remained: RiskBand ordinal distance 2.202 vs 1.798 always-GREEN
+(n=396); BLACK precision 0.0884 vs 0.0884 base rate (n=2,013); risk/exit
+concordance 0.9687 (n=396, flagged); confidence ECE 0.0798 vs 0.10
+(n=2,013); feature leakage suspected_features=2. Forecast, hazard, and
+ensemble cells remain insufficient-data. The report JSON is a temporary
+command output, not edited into the versioned report by hand.
 
 Predictive utility remains unresolved: RiskBand is worse than always-GREEN,
 BLACK precision equals the base rate, and no forecast/hazard/ensemble result
