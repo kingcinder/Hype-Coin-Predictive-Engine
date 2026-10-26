@@ -677,3 +677,10 @@ the new ingestion timestamp fix does not rewrite that history.
   README quickstart remains unverified verbatim; the clean-clone smoke used its
   own isolated environment. Live-source replay and historical rows without
   provenance remain unverified by design.
+- Final integrity comparison found that the live root `serpent.db` differs
+  from the audit backup only in `ensemble_state`; the live row records ten
+  predictions and an update at `2026-10-26 00:41:39 UTC`, while the backup row
+  records zero and its prior update. All other tables have matching row counts
+  and row contents. The cause is undetermined, so the live database was
+  preserved without restoration. Earlier statements that it was untouched
+  are not verified and are superseded by this comparison.
