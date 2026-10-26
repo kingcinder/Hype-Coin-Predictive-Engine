@@ -1,6 +1,6 @@
 .PHONY: setup up down migrate seed worker api ui engine test lint format smoke \
 	bootstrap-local local-worker local-api local-ui archive archive-query retention parity backtest refresh-rpc-pools forecast-ab install-local \
-	check-imports check-deps rescore-compare score-drift score-drift-history typecheck
+	check-imports check-deps rescore-compare score-drift score-drift-history typecheck gate
 
 # Single source of truth for mypy coverage: `make lint` and CI both use it.
 MYPY_PACKAGES = api backtest catalyst common crawlers data_lake engine features fingerprint forecast ingestion llm mempool narrative ops pump_physics radar risk_engine scoring storage ui validation
@@ -132,6 +132,16 @@ lint:
 
 typecheck:
 	mypy $(MYPY_PACKAGES)
+
+gate:
+	@set -e; \
+	run() { label="$$1"; shift; printf '\n== %s ==\n' "$$label"; if "$$@"; then printf 'PASS: %s\n' "$$label"; else code=$$?; printf 'FAIL: %s (exit %s)\n' "$$label" "$$code"; return "$$code"; fi; }; \
+	run 'ruff check .' ruff check .; \
+	run 'ruff format --check .' ruff format --check .; \
+	run 'make typecheck' $(MAKE) -s typecheck; \
+	run 'scripts/check_broken_imports.py' python3 scripts/check_broken_imports.py $(if $(VENV),--venv $(VENV),--venv .venv); \
+	run 'scripts/check_declared_deps.py' python3 scripts/check_declared_deps.py; \
+	run 'pytest' python -m pytest tests/ -x -q --cov=. --cov-report=term-missing --cov-report=xml
 
 # Collection guard: fail fast on dangling repo-local imports (see CI lint job).
 # `python3` (not the venv python) on purpose: the script is stdlib-only, so it
