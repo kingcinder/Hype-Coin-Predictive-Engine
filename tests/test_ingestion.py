@@ -53,7 +53,9 @@ def test_geckoterminal_pool_ingest_creates_point_in_time_rows(session, monkeypat
     source = session.scalar(select(models.Source).where(models.Source.name == "geckoterminal"))
     assert source is not None
     observed_at = datetime(2026, 5, 1, 12, 15, 30, tzinfo=UTC)
-    monkeypatch.setattr(ingestion_service, "utc_now", lambda: observed_at)
+    later_observation = observed_at + timedelta(minutes=1)
+    observations = iter((observed_at, later_observation))
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: next(observations))
     payload = {
         "id": "base_0xa3255cffb9b9aeb6363d643b1040a24d5124bac4",
         "type": "pool",
@@ -92,6 +94,14 @@ def test_geckoterminal_pool_ingest_creates_point_in_time_rows(session, monkeypat
     assert session.scalar(select(func.count()).select_from(models.MarketSnapshot)) == 1
     assert session.scalar(select(func.count()).select_from(models.LiquiditySnapshot)) == 1
     assert session.scalar(select(func.count()).select_from(models.RawEvidenceItem)) == 1
+    pair = session.scalar(select(models.Pair))
+    pool = session.scalar(select(models.Pool))
+    contract = session.scalar(select(models.Contract))
+    snapshot = session.scalar(select(models.MarketSnapshot))
+    assert pair is not None and ensure_utc(pair.created_at) == observed_at
+    assert pool is not None and ensure_utc(pool.created_at) == observed_at
+    assert contract is not None and ensure_utc(contract.created_at) == observed_at
+    assert snapshot is not None and ensure_utc(snapshot.observed_at) == observed_at
 
 
 def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:

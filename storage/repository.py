@@ -167,6 +167,7 @@ def upsert_contract(
         proxy_flag=proxy_flag,
         deployer_wallet=deployer_wallet,
         observed_at=observed_at,
+        created_at=observed_at,
     )
     session.add(row)
     session.flush()
@@ -182,6 +183,7 @@ def upsert_pool_and_pair(
     base_asset_id: int,
     quote_asset_id: int | None,
     created_at_source: datetime | None,
+    first_available_at: datetime | None = None,
 ) -> tuple[models.Pool, models.Pair]:
     pool = session.scalar(
         select(models.Pool).where(
@@ -196,6 +198,7 @@ def upsert_pool_and_pair(
             base_asset_id=base_asset_id,
             quote_asset_id=quote_asset_id,
             created_at_source=created_at_source,
+            **({"created_at": first_available_at} if first_available_at is not None else {}),
         )
         session.add(pool)
         session.flush()
@@ -216,6 +219,7 @@ def upsert_pool_and_pair(
             quote_asset_id=quote_asset_id,
             pool_id=pool.id,
             created_at_source=created_at_source,
+            **({"created_at": first_available_at} if first_available_at is not None else {}),
         )
         session.add(pair)
         session.flush()
