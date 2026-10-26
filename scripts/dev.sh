@@ -336,7 +336,8 @@ PY
     done
     [[ "${gui_code:-}" == "200" ]] || { echo "FAIL: GUI returned ${gui_code:-no response}"; return 1; }
     scores_code="$(curl --noproxy '*' -sS -o "$smoke_root/scores.json" -w '%{http_code}' \
-        -H "Authorization: Bearer $token" "http://127.0.0.1:$api_port/scores/top?limit=20")"
+        -H "Authorization: Bearer $token" \
+        "http://127.0.0.1:$api_port/scores/top?limit=20&include_black=true")"
     [[ "$scores_code" == "200" ]] && rg -q 'HYPE|DANGER' "$smoke_root/scores.json" || {
         echo "FAIL: seeded score data was not served"; return 1;
     }
