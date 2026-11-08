@@ -32,6 +32,69 @@ disagree, `INSTALL.md` and the shipped scripts win.
   Do not improvise fixes that change the install layout (paths, service
   names, ports) without telling the user.
 
+## Choosing where the engine lives (read before Step 1)
+
+The engine is a **server**: a worker loop that scans on an interval,
+a REST API, and a web dashboard. It is designed to run continuously.
+Pick the host first — it changes which install path you follow:
+
+### Option 1 — A VPS (recommended for always-on use)
+
+A small Ubuntu VPS is the natural home for this engine, and needs **no
+code changes**: use the **system install (Step 3B)**, which registers the
+engine as a systemd service with the `serpent` CLI. A free-tier ARM VPS
+(e.g. Oracle Cloud Always Free, 2 OCPU / up to 12 GB RAM total) exceeds
+the engine's floor (2 GB RAM, 10 GB disk). Notes for that host:
+
+- **ARM CPUs:** most declared Python dependencies ship ARM wheels; a few
+  may compile from source on first install — slower, not a blocker.
+- **Skip the local LLM layer** on a small VPS: leave `llm_enabled=false`
+  (the default posture without a configured provider) or point
+  `LLM_PROVIDER` at an external service. Do not try to run the Compose
+  stack's Ollama container on a free-tier box.
+- **Reaching the dashboard:** the API and GUI bind to `127.0.0.1` by
+  default, so a VPS install is not reachable from a phone or laptop
+  until you add **one** of:
+  - an SSH tunnel (`ssh -L 8501:localhost:8501 <vps>`), or
+  - a private mesh VPN (e.g. Tailscale) and browsing to the VPS's
+    address on it, or
+  - the engine's own LAN mode: `ENGINE_ALLOW_LAN=1`, a chosen
+    `API_HOST`/`UI_HOST`, a nonempty `ENGINE_API_TOKEN`, and
+    `ENGINE_API_AUTH_BYPASS=0` (startup rejects any weaker combination).
+  Prefer the tunnel or the mesh VPN; never expose the dashboard to the
+  public internet without the token gate in place.
+
+### Option 2 — Use it from an Android phone (no port required)
+
+The dashboard (port 8501) and API (port 8000) are plain web interfaces.
+If the engine runs on any reachable host (home PC or VPS), an Android
+phone needs **no translation at all**: open the dashboard URL in the
+phone's browser. This is the supported way to "use it on a phone."
+
+### Option 3 — Running it *on* an Android phone (experimental, unsupported)
+
+There is no Android build of this engine, and producing a native Android
+app would be a rewrite, not a conversion — do not attempt it as part of
+an install. The only on-device route is Linux-on-Android (e.g. Termux):
+
+- Python 3.12 under Termux can run much of the stack, but expect some
+  declared dependencies to need Termux-provided builds or source
+  compiles; budget significant troubleshooting time.
+- There is **no systemd** on Android: the system install (Step 3B) does
+  not apply. Only the desktop-style layout (venv + `python -m engine`)
+  is even a candidate.
+- Android aggressively kills long-running background processes, and the
+  engine's worker is a continuous scan loop: expect to need a persistent
+  foreground service / wake lock and a battery-optimization exemption,
+  and expect heat and battery drain while it runs.
+- The SQLite database and Parquet data lake grow on phone storage.
+
+Treat Option 3 as a research project with a real chance of partial
+success on flagship hardware — not as an install path. If the user asks
+for the engine "on their phone," default to Option 1 + Option 2
+(VPS-hosted, phone as the window) unless they explicitly insist on
+on-device execution after hearing the above.
+
 ## Step 1 — Check the environment
 
 Requirements (from `INSTALL.md`): Ubuntu 20.04 or newer (tested on 24.04),
