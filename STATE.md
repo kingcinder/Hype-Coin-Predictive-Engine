@@ -569,3 +569,11 @@ in-flight work from other agents, still untouched.
   declared-dependency scan checks 29 roots/251 files. Validation self-tests
   pass. The DB validation report is versioned at
   `reports/validation-2026-10-25-source-availability.json`.
+
+## Branch ledger merged in during reconciliation (2026-11-07)
+
+The `fix/functional-pass` branch carried its own short STATE.md tracking the reviewed fix list. Its one unique record, preserved verbatim:
+
+| Finding | Status | Commits | Evidence |
+|---|---|---|---|
+| F2: launcher and health probes sent no bearer token to `/health`, so they always got 401 and the GUI never opened | Fixed | `3cbaed9`, `2e7af15` | [verified: live gated engine on the review-branch gate (`origin/review-fixes-20260910`), port 8100. Unauthenticated, wrong-token and correct-token requests return 401, 401, 200. The probe functions from `start-engine.sh` and `packaging/serpent` returned OK for a token from `.env` and from the environment, and FAIL for a wrong or missing token.] |

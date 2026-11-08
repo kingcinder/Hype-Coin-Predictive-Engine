@@ -41,16 +41,25 @@ echo "  Ctrl+C to stop"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
 
+# Authenticated health probe: /health sits behind the bearer gate (H4), so
+# the token is sent as a header. It is read from the environment or .env and
+# passed through curl -K so the value never appears in the process list.
+probe_health() {
+    local port="$1" tok="${ENGINE_API_TOKEN:-}"
+    if [ -z "$tok" ] && [ -f .env ]; then
+        tok="$(sed -n 's/^ENGINE_API_TOKEN=//p' .env | tail -n 1 | tr -d "\"'" | tr -d '\r')"
+    fi
+    printf 'header = "Authorization: Bearer %s"\n' "$tok" \
+        | curl -sf -K - "http://localhost:${port}/health" >/dev/null 2>&1
+}
+
 # Spawn a helper that surfaces the GUI as soon as the API is healthy,
 # then hands back to the engine (exec keeps Ctrl+C wired to the engine).
 (
     API_PORT="${SERPENT_API_PORT:-8000}"
     UI_PORT="${SERPENT_UI_PORT:-8501}"
     for _ in $(seq 1 90); do
-        # The API gates every route with a bearer token that the engine writes to
-        # .env on first run, so read it on each attempt rather than once.
-        TOKEN="$(sed -n 's/^ENGINE_API_TOKEN=//p' "$PROJECT_DIR/.env" 2>/dev/null | tail -n 1 || true)"
-        if [ -n "$TOKEN" ] && curl -sf -H "Authorization: Bearer ${TOKEN}" "http://localhost:${API_PORT}/health" >/dev/null 2>&1; then
+        if probe_health "${API_PORT}"; then
             sleep 2  # let the Streamlit GUI settle before opening the browser
             xdg-open "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
                 || sensible-browser "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
