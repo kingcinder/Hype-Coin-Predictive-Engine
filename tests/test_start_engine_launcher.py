@@ -36,11 +36,16 @@ def test_gui_opens_after_authenticated_health_probe(tmp_path: Path) -> None:
     stubs.mkdir()
     opened = tmp_path / "opened.txt"
     seen = tmp_path / "curl-args.txt"
-    # curl succeeds only when the bearer token from .env is sent.
+    seen_cfg = tmp_path / "curl-config.txt"
+    # curl succeeds only when the bearer token from .env arrives
+    # on stdin: the launcher pipes it in via curl -K - so the token
+    # never appears in argv (and thus never in the process list).
     _stub(
         stubs / "curl",
         f'echo "$@" >> "{seen}"\n'
-        f'case "$*" in *"Authorization: Bearer {TOKEN}"*) exit 0;; esac\n'
+        'cfg="$(cat)"\n'
+        f'echo "$cfg" >> "{seen_cfg}"\n'
+        f'case "$cfg" in *"Authorization: Bearer {TOKEN}"*) exit 0;; esac\n'
         "exit 22\n",
     )
     _stub(stubs / "xdg-open", f'echo "$1" >> "{opened}"\n')
@@ -51,6 +56,10 @@ def test_gui_opens_after_authenticated_health_probe(tmp_path: Path) -> None:
         "PATH": f"{stubs}:{os.environ['PATH']}",
         "SERPENT_PROJECT_DIR": str(project),
     }
+    # Keep the probe on the .env path: an ambient ENGINE_API_TOKEN
+    # (e.g. leaked into os.environ by the provisioning tests) would
+    # otherwise take precedence over the .env this test sets up.
+    env.pop("ENGINE_API_TOKEN", None)
     result = subprocess.run(
         ["bash", str(project / "start-engine.sh")],
         env=env,
@@ -66,4 +75,7 @@ def test_gui_opens_after_authenticated_health_probe(tmp_path: Path) -> None:
         time.sleep(0.2)
     assert opened.exists(), "GUI was never opened"
     assert opened.read_text(encoding="utf-8").strip() == "http://localhost:8501"
-    assert f"Authorization: Bearer {TOKEN}" in seen.read_text(encoding="utf-8")
+    # The bearer header arrived through curl's stdin config (curl -K -) ...
+    assert f'header = "Authorization: Bearer {TOKEN}"' in seen_cfg.read_text(encoding="utf-8")
+    # ... and the token never appeared in curl's argv (the process list).
+    assert TOKEN not in seen.read_text(encoding="utf-8")
