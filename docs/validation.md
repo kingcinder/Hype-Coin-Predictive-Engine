@@ -51,7 +51,11 @@ Review `/opt/serpent/.env` before restarting the API, worker, and UI. Verify:
 ```bash
 systemctl is-enabled serpent-api serpent-worker serpent-ui serpent-retention.timer
 systemctl --no-pager status serpent-api serpent-worker serpent-ui serpent-retention.timer
-curl -fsS http://127.0.0.1:8000/health
+# /health requires the API bearer token (unauthenticated requests get 401).
+# Feed it via curl's stdin config (curl -K -), as the shipped probes do, so
+# the token never appears on the command line:
+token="$(sed -n 's/^ENGINE_API_TOKEN=//p' /opt/serpent/.env | tr -d '"' | tr -d '\r')"
+printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fsS -K - http://127.0.0.1:8000/health
 journalctl -u serpent-worker --since today --no-pager
 ```
 
@@ -69,7 +73,7 @@ docker compose up --build
 
 Confirm:
 
-- `GET http://localhost:8000/health` returns `ok`.
+- `GET http://localhost:8000/health` with the bearer token returns `ok` (without it, `401` — the auth gate covers `/health`).
 - `http://localhost:8501` renders the dashboard.
 - Worker logs show either successful scans or explicit source failure reasons.
 - `system_health` rows exist for `api`, `worker`, and configured sources.

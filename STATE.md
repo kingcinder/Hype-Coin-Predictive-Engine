@@ -62,13 +62,18 @@ or `STATE.md` existed before 2026-09-09.
 - Remaining `[briefing]`-sourced details: the exact two-value risk distribution (59.99/66.66 —
   from report text, DB not re-queried) and hand-set rule-engine point weights.
 
-## Working-tree snapshot (2026-10-25)
+## Working-tree snapshot (2026-11-07)
 
-The canonical checkout is on `main`; `origin/main` and `origin/fix/functional-pass`
-are synchronized at the final state-ledger commit. The feature branch merged live
-`origin/main` at `1d24499` (coverage chart update) in `a18ae3b`; then `main` was
-fast-forwarded to the verified feature tip without rewriting history. The ignored
-root `serpent.db` is existing user data and was not altered.
+All development is on `main`. On 2026-11-07 every outstanding branch was
+reconciled into `main` (`bb51b2d` merged `fix/functional-pass`; `cb21d48`
+merged `fix/final-gate`, including the preserved uncommitted work in
+`dccd09b`), the launcher health-probe test was updated to the option-B
+stdin-config protocol (`aa3f523`), and the result was pushed to GitHub:
+local `main` and `origin/main` are synchronized. The old side branches
+(`fix/functional-pass`, `fix/final-gate`, `codex/hype-coin-predictive-engine`)
+remain on the remote as historical refs; every one of their tips is an
+ancestor of `main`, so `main` alone is the line to pull and build on.
+The ignored root `serpent.db` is existing user data and was not altered.
 
 ## Change ledger
 
@@ -691,3 +696,40 @@ the new ingestion timestamp fix does not rewrite that history.
   and row contents. The cause is undetermined, so the live database was
   preserved without restoration. Earlier statements that it was untouched
   are not verified and are superseded by this comparison.
+
+### 2026-11-07 — Reconciliation shipped: unified `main`, option-B health probe
+
+- All outstanding branches were reconciled into `main` and pushed to GitHub:
+  `bb51b2d` merged `fix/functional-pass`; `cb21d48` merged `fix/final-gate`.
+  The 14 previously uncommitted files from `fix/final-gate` are preserved in
+  `dccd09b`. The remote side branches (`fix/functional-pass` at `a014676`,
+  `fix/final-gate` at `06fa89d`, `codex/hype-coin-predictive-engine` at
+  `81dc038`) remain as historical refs; each tip was verified an ancestor of
+  `main` on 2026-11-07, so `main` is the single line to pull. This supersedes
+  the 2026-10-26 note above that GitHub Actions could not verify an unpushed
+  local branch: the work is pushed, and `origin/main` == local `main`.
+- Health-probe protocol settled (option B, decided 2026-11-07): the launcher
+  (`start-engine.sh`) and system installer (`packaging/install.sh`) probes
+  read `ENGINE_API_TOKEN` from the environment or `.env` and feed it to curl
+  as a stdin config (`printf 'header = "Authorization: Bearer %s"' |
+  curl -K -`), so the token never appears in a command line or the process
+  list. No shipped probe passes the token as a curl argument.
+- `aa3f523` updated `tests/test_start_engine_launcher.py` to that protocol:
+  the stub curl now reads its config from stdin, and the test asserts the
+  header arrives via the config while the token stays out of argv. The same
+  commit makes the test hermetic against an ambient `ENGINE_API_TOKEN`
+  (the provisioning tests leave one set in `os.environ`, which hijacked the
+  probe off the `.env` path in full-suite runs — a pre-existing isolation
+  defect, reproduced pairwise before the fix).
+- Final suite state on `main` at `aa3f523` (local `.venv`, serial run —
+  pytest-xdist is not installed in the venv): **856 passed, 0 failed,
+  11 skipped, 3 collection errors**. The 3 uncollectable files
+  (`tests/test_fleet_expansion.py`, `tests/test_nightcrawler_orchestrator.py`,
+  `tests/test_security_hygiene.py`) fail to import because `defusedxml` —
+  declared in `pyproject.toml` (`defusedxml>=0.7.1`) — is missing from this
+  checkout's venv; a pre-existing environment gap, not merge damage.
+- Documentation synced to this state in a follow-up docs commit (README,
+  INSTALL, STATE, `docs/validation.md`): `/health` is documented as
+  token-gated everywhere it is referenced, install examples point at the
+  canonical `Hype-Coin-Predictive-Engine` checkout name, and the stated
+  Python requirement is 3.12+ per `pyproject.toml`.

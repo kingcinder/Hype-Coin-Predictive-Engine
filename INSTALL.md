@@ -40,7 +40,7 @@ sudo bash packaging/install.sh
 Or if the project is already on your machine:
 
 ```bash
-sudo bash ~/Documents/Hype-Coin-Predictive-Engine-main/packaging/install.sh
+sudo bash ~/Hype-Coin-Predictive-Engine/packaging/install.sh
 ```
 
 The installer will:
@@ -90,7 +90,7 @@ sudo serpent start
 
 # Open the dashboard
 # → http://localhost:8501
-# → http://localhost:8000/health (API health check)
+# → http://localhost:8000/health (API health check; bearer token required — see note below)
 
 # View logs
 sudo serpent logs
@@ -104,6 +104,15 @@ sudo serpent stop
 # Restart
 sudo serpent restart
 ```
+
+> **Health check needs the API token.** `/health` sits behind the same
+> bearer authentication as the rest of the API: an unauthenticated request
+> returns `401`. The shipped probes (the `start-engine.sh` launcher and
+> `packaging/install.sh`) read `ENGINE_API_TOKEN` from the environment or
+> `.env` and pass it to curl as a stdin config (`curl -K -`), so the token
+> never appears in a command line or the process list. A `401` from a bare
+> browser/curl visit is the gate working, not an outage — use
+> `sudo serpent status` for a token-free status check.
 
 ## Docker & Compose (optional container deployment)
 
@@ -231,7 +240,7 @@ sudo serpent uninstall --remove-data
 ## System Requirements
 
 - Ubuntu 20.04+ (tested on 24.04)
-- Python 3.10+ (3.12 recommended)
+- Python 3.12 or newer (the package declares `requires-python = ">=3.12"`)
 - 2 GB RAM minimum
 - 10 GB disk space
 
@@ -315,5 +324,5 @@ If the worker logs `database is locked` repeatedly or falls silent for hours
 **Reinstall from scratch:**
 ```bash
 sudo serpent uninstall --remove-data
-sudo bash /path/to/Hype-Coin-Predictive-Engine-main/packaging/install.sh
+sudo bash /path/to/Hype-Coin-Predictive-Engine/packaging/install.sh
 ```

@@ -143,7 +143,7 @@ Register HTTP endpoints to receive real-time alerts:
 ## API Endpoints
 
 ### Core
-- `GET /health` — API health status
+- `GET /health` — API health status (bearer token required — the API gates `/health` too)
 - `GET /tokens/hot` — Top hype tokens
 - `GET /scores/top` — Top research candidates
 - `GET /tokens/{id}` — Token detail with features and explanation
@@ -295,7 +295,7 @@ sudo serpent update      # pull latest + restart
 sudo serpent uninstall   # remove (keeps data)
 ```
 
-Open **http://localhost:8501** for the GUI, **http://localhost:8000/health** for the API.
+Open **http://localhost:8501** for the GUI. The API is at **http://localhost:8000**; its `/health` endpoint requires the bearer token (`ENGINE_API_TOKEN`), so a bare browser visit returns `401` by design.
 
 See **[INSTALL.md](INSTALL.md)** for full instructions, configuration, troubleshooting, and the uninstaller.
 
