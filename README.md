@@ -1,5 +1,9 @@
 # Serpent Circle Hype-Coin Predictive Engine
 
+> ## 🤖 Installing with an AI agent? Start here
+>
+> **Hand your coding agent the [Agentic AI Install Guide](AGENTIC_INSTALL.md)** — a starter prompt that walks an agentic AI through installing and verifying this engine end to end.
+
 [![CI](https://github.com/kingcinder/Hype-Coin-Predictive-Engine/actions/workflows/ci.yml/badge.svg)](https://github.com/kingcinder/Hype-Coin-Predictive-Engine/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/kingcinder/Hype-Coin-Predictive-Engine/branch/main/graph/badge.svg)](https://codecov.io/gh/kingcinder/Hype-Coin-Predictive-Engine)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)
