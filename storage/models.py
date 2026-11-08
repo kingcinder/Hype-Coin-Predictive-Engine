@@ -72,6 +72,20 @@ class Asset(Base, TimestampMixin):
     github_url: Mapped[str | None] = mapped_column(String(1024))
 
 
+class MarketAnalysisRun(Base):
+    __tablename__ = "market_analysis_runs"
+    __table_args__ = (Index("ix_market_analysis_asset_generated", "asset_id", "generated_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    llm_model: Mapped[str | None] = mapped_column(String(128))
+    narrative_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    narrative: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    risk_assessment: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
 class Contract(Base, TimestampMixin):
     __tablename__ = "contracts"
     __table_args__ = (UniqueConstraint("chain_id", "address", name="uq_contracts_chain_address"),)

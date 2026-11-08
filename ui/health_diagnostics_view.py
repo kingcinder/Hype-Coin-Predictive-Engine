@@ -33,6 +33,53 @@ def _state_color(state: str) -> str:
     return {"ok": "#00ff88", "yellow": "#eab308", "red": "#f97316"}.get(state, "#9ca3af")
 
 
+def _format_timestamp(value: Any) -> str:
+    return str(value)[:19] if value is not None and value != "" else "n/a"
+
+
+def _weight_evolution_figure(
+    weight_history: list[dict[str, Any]], llm_history: list[dict[str, Any]]
+) -> go.Figure | None:
+    rows: list[dict[str, Any]] = []
+    for history in weight_history:
+        weights = history.get("weights") or {}
+        rows.append(
+            {
+                "ts": history.get("ts"),
+                "Rule": weights.get("rule"),
+                "ML": weights.get("ml"),
+                "Heuristic": weights.get("heuristic"),
+                "LLM": None,
+            }
+        )
+    for history in llm_history:
+        rows.append(
+            {
+                "ts": history.get("ts"),
+                "Rule": None,
+                "ML": None,
+                "Heuristic": None,
+                "LLM": history.get("new_weight"),
+            }
+        )
+    if not rows:
+        return None
+
+    ev_df = pd.DataFrame(rows)
+    ev_df["ts"] = pd.to_datetime(ev_df["ts"], errors="coerce")
+    ev_df = ev_df.dropna(subset=["ts"]).sort_values("ts").set_index("ts")
+    weight_columns = ["Rule", "ML", "Heuristic", "LLM"]
+    ev_df[weight_columns] = ev_df[weight_columns].apply(pd.to_numeric, errors="coerce")
+    ev_df[weight_columns] = ev_df[weight_columns].ffill()
+    if ev_df.empty:
+        return None
+
+    fig = px.line(ev_df, y=weight_columns, labels={"value": "weight", "variable": "scorer"})
+    fig.update_layout(height=280, legend=dict(orientation="h", y=1.02))
+    apply_dark_theme(fig)
+    return fig
+
+
 def _render_score_drift_panel() -> None:
     """Score-distribution drift card: persisted risk vs the live formula.
 
@@ -564,44 +611,9 @@ def _render_health_body() -> None:
     llm_history = (calibration or {}).get("weight_history") or []
     if weight_history or llm_history:
         st.markdown("**Weight evolution across recalibrations**")
-        rows: list[dict[str, Any]] = []
-        for h in weight_history:
-            if not isinstance(h, dict):
-                continue
-            weights = h.get("weights") or {}
-            rows.append(
-                {
-                    "ts": h.get("ts"),
-                    "Rule": float(weights.get("rule", 0)),
-                    "ML": float(weights.get("ml", 0)),
-                    "Heuristic": float(weights.get("heuristic", 0)),
-                    "LLM": None,
-                }
-            )
-        for h in llm_history:
-            if not isinstance(h, dict):
-                continue
-            rows.append(
-                {
-                    "ts": h.get("ts"),
-                    "Rule": None,
-                    "ML": None,
-                    "Heuristic": None,
-                    "LLM": h.get("new_weight"),
-                }
-            )
-        if rows:
-            ev_df = pd.DataFrame(rows)
-            ev_df["ts"] = pd.to_datetime(ev_df["ts"], errors="coerce")
-            ev_df = ev_df.dropna(subset=["ts"]).sort_values("ts")
-            ev_df = ev_df.set_index("ts")
-            for col in ("Rule", "ML", "Heuristic", "LLM"):
-                ev_df[col] = ev_df[col].ffill()
-            if not ev_df.empty:
-                fig = px.line(ev_df, labels={"value": "weight", "variable": "scorer"})
-                fig.update_layout(height=280, legend=dict(orientation="h", y=1.02))
-                apply_dark_theme(fig)
-                st.plotly_chart(fig, width="stretch")
+        fig = _weight_evolution_figure(weight_history, llm_history)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
 
     # ── Cross-source fusion activity ─────────────────────────────────────
     if fusion:
@@ -654,7 +666,7 @@ def _render_health_body() -> None:
             st.markdown(f"**Enabled:** {'Yes' if enabled else 'No'}")
         with llm_c2:
             if last_check:
-                st.markdown(f"**Last Check:** {last_check[:19]}")
+                st.markdown(f"**Last Check:** {_format_timestamp(last_check)}")
             if error:
                 st.error(f"Error: {error}")
     else:
@@ -669,7 +681,7 @@ def _render_health_body() -> None:
         scan = engine.get("scan", {})
         phase = scan.get("phase", "unknown")
         iteration = scan.get("iteration", 0)
-        duration = scan.get("duration_sec", 0)
+        duration = float(scan.get("duration_sec") or 0)
         error_msg = scan.get("error_message")
         phase_color = (
             "green" if phase in ("idle", "completed") else "orange" if phase == "running" else "red"

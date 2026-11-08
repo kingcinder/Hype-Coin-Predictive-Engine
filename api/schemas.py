@@ -169,6 +169,13 @@ class TokenDetail(BaseModel):
     solana_safety: dict[str, Any] | None = None
 
 
+class MarketAnalysisRequest(BaseModel):
+    asset_id: int | None = None
+    address: str | None = None
+    chain: str | None = None
+    pair_address: str | None = None
+
+
 class AlertRow(BaseModel):
     id: int
     asset_id: int

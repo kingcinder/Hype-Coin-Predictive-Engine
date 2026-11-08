@@ -15,7 +15,7 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.orm import Session
 
 from api.analytics import similar_setups
@@ -44,6 +44,7 @@ from api.schemas import (
     LakeBudgetHealthRow,
     LifecycleEventRow,
     LifecycleTransitionAlertRow,
+    MarketAnalysisRequest,
     NarrativeClusterRow,
     NotifierHealthRow,
     OpsConsoleResponse,
@@ -470,6 +471,311 @@ def scores_top(
 ) -> list[TokenScoreRow]:
     rows = latest_scores(session, limit=limit, include_black=include_black, order_by=order_by)
     return [_score_row(session, row) for row in rows]
+
+
+@app.get("/assets/search")
+def search_assets(
+    q: Annotated[str, Query(min_length=1, max_length=160)],
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> list[dict[str, object]]:
+    term = q.strip().casefold()
+    if not term:
+        return []
+    rows = session.execute(
+        select(models.Asset, models.Chain.slug)
+        .join(models.Chain, models.Chain.id == models.Asset.chain_id)
+        .where(
+            func.lower(models.Asset.symbol).contains(term)
+            | func.lower(models.Asset.name).contains(term)
+            | func.lower(models.Asset.address).contains(term)
+        )
+        .order_by(models.Asset.symbol, models.Chain.slug)
+        .limit(limit)
+    ).all()
+    results = [
+        {
+            "asset_id": asset.id,
+            "chain": chain,
+            "address": asset.address,
+            "symbol": asset.symbol,
+            "name": asset.name,
+            "external": False,
+        }
+        for asset, chain in rows
+    ]
+    if results or len(term) < 20 or any(char.isspace() for char in term):
+        return results
+    from ingestion.source_clients import DexScreenerClient
+
+    client = DexScreenerClient()
+    try:
+        pairs = client.search_pairs(q.strip())
+    except Exception as exc:  # noqa: BLE001 - local search remains available when live search fails.
+        log.warning("market_asset_live_search_failed", error=str(exc))
+        return []
+    finally:
+        client.close()
+    exact = [
+        pair
+        for pair in pairs
+        if str((pair.get("baseToken") or {}).get("address") or "").casefold() == term
+    ]
+
+    def _liquidity(pair: dict) -> float:
+        try:
+            return float((pair.get("liquidity") or {}).get("usd") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    exact.sort(key=_liquidity, reverse=True)
+    return [
+        {
+            "asset_id": None,
+            "chain": pair.get("chainId"),
+            "address": (pair.get("baseToken") or {}).get("address"),
+            "symbol": (pair.get("baseToken") or {}).get("symbol"),
+            "name": (pair.get("baseToken") or {}).get("name"),
+            "pair_address": pair.get("pairAddress"),
+            "dex": pair.get("dexId"),
+            "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+            "external": True,
+        }
+        for pair in exact[:limit]
+    ]
+
+
+@app.post("/market-analysis/analyze")
+def analyze_market(request: MarketAnalysisRequest, session: DbSession) -> dict[str, object]:
+    from ingestion.market_analysis import build_market_evidence, select_dexscreener_pair
+    from ingestion.service import IngestionService
+    from ingestion.source_clients import DexScreenerClient
+
+    asset = session.get(models.Asset, request.asset_id) if request.asset_id else None
+    if request.asset_id and asset is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    if asset is None and not request.address:
+        raise HTTPException(status_code=422, detail="provide asset_id or contract address")
+
+    client = DexScreenerClient()
+    try:
+        if asset:
+            chain = session.get(models.Chain, asset.chain_id)
+            chain_slug = chain.slug if chain else ""
+            try:
+                pairs = client.token_pairs(chain_slug, asset.address) if chain_slug else []
+            except Exception as exc:  # noqa: BLE001 - continue with stored history.
+                log.warning("market_analysis_live_lookup_failed", error=str(exc))
+                pairs = []
+            live_pair = select_dexscreener_pair(pairs, asset.address, chain_slug)
+        else:
+            try:
+                candidates = client.search_pairs(request.address or "")
+            except Exception as exc:  # noqa: BLE001 - no live resolution means no new asset.
+                log.warning("market_analysis_ca_resolution_failed", error=str(exc))
+                raise HTTPException(status_code=502, detail="live CA lookup failed") from exc
+            candidates = [
+                pair
+                for pair in candidates
+                if str((pair.get("baseToken") or {}).get("address") or "").casefold()
+                == str(request.address).casefold()
+                and (
+                    not request.chain
+                    or str(pair.get("chainId") or "").casefold() == request.chain.casefold()
+                )
+            ]
+            if request.pair_address:
+                candidates = [
+                    pair
+                    for pair in candidates
+                    if str(pair.get("pairAddress") or "").casefold()
+                    == request.pair_address.casefold()
+                ]
+            if not candidates:
+                raise HTTPException(status_code=404, detail="no DexScreener market found for CA")
+            if len(candidates) > 1 and not request.pair_address:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "multiple chain/pair markets found; choose one",
+                        "candidates": [
+                            {
+                                "chain": pair.get("chainId"),
+                                "dex": pair.get("dexId"),
+                                "pair_address": pair.get("pairAddress"),
+                                "symbol": (pair.get("baseToken") or {}).get("symbol"),
+                                "liquidity_usd": (pair.get("liquidity") or {}).get("usd"),
+                            }
+                            for pair in candidates[:20]
+                        ],
+                    },
+                )
+            live_pair = candidates[0]
+            chain_slug = str(live_pair.get("chainId") or "").casefold()
+            service = IngestionService()
+            service.ensure_reference_data(session)
+            source = session.scalar(
+                select(models.Source).where(models.Source.name == "dexscreener")
+            )
+            if source is None or not service._store_dexscreener_pair(session, source, live_pair):
+                raise HTTPException(
+                    status_code=422, detail="could not normalize DexScreener market"
+                )
+            chain = session.scalar(select(models.Chain).where(models.Chain.slug == chain_slug))
+            asset = (
+                session.scalar(
+                    select(models.Asset).where(
+                        models.Asset.chain_id == chain.id,
+                        func.lower(models.Asset.address) == str(request.address).casefold(),
+                    )
+                )
+                if chain
+                else None
+            )
+            if asset is None:
+                raise HTTPException(
+                    status_code=422, detail="resolved market has no supported asset"
+                )
+    finally:
+        client.close()
+
+    market_client = DexScreenerClient()
+    try:
+        try:
+            current_pairs = (
+                market_client.token_pairs(chain_slug, asset.address) if chain_slug else []
+            )
+        except Exception as exc:  # noqa: BLE001 - saved and initial data remain usable.
+            log.warning("market_analysis_live_refresh_failed", error=str(exc))
+            current_pairs = []
+        refreshed_pair = select_dexscreener_pair(current_pairs, asset.address, chain_slug)
+    finally:
+        market_client.close()
+
+    liquidity_by_pool_ts = (
+        select(
+            models.LiquiditySnapshot.pool_id.label("pool_id"),
+            models.LiquiditySnapshot.ts.label("ts"),
+            func.max(models.LiquiditySnapshot.reserve_usd).label("reserve_usd"),
+        )
+        .group_by(models.LiquiditySnapshot.pool_id, models.LiquiditySnapshot.ts)
+        .subquery()
+    )
+    market_rows = session.execute(
+        select(models.MarketSnapshot, models.Source.name, liquidity_by_pool_ts.c.reserve_usd)
+        .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
+        .join(models.Source, models.Source.id == models.MarketSnapshot.source_id)
+        .outerjoin(
+            liquidity_by_pool_ts,
+            and_(
+                liquidity_by_pool_ts.c.pool_id == models.Pair.pool_id,
+                liquidity_by_pool_ts.c.ts == models.MarketSnapshot.ts,
+            ),
+        )
+        .where(models.Pair.base_asset_id == asset.id)
+        .order_by(desc(models.MarketSnapshot.ts))
+        .limit(24)
+    ).all()
+    stored = [
+        {
+            "ts": row.ts,
+            "observed_at": row.observed_at,
+            "price_usd": row.price_usd,
+            "volume_usd": row.volume_usd,
+            "trades": row.trades,
+            "buys": row.buys,
+            "sells": row.sells,
+            "liquidity_usd": liquidity_usd,
+            "source": source_name,
+        }
+        for row, source_name, liquidity_usd in market_rows
+    ]
+    evidence = build_market_evidence(refreshed_pair, stored)
+    from llm.engine import llm_engine
+
+    narrative = ""
+    risk_assessment = ""
+    llm_model = None
+    if get_settings().llm_enabled:
+        narrative, risk_assessment = llm_engine.market_analysis_narrative(evidence)
+        llm_model = llm_engine._model
+    narrative_status = "generated" if narrative or risk_assessment else "unavailable"
+    generated_at = utc_now()
+    run = models.MarketAnalysisRun(
+        asset_id=asset.id,
+        generated_at=generated_at,
+        llm_model=llm_model,
+        narrative_status=narrative_status,
+        evidence=evidence,
+        narrative=narrative,
+        risk_assessment=risk_assessment,
+    )
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    chain = session.get(models.Chain, asset.chain_id)
+    return {
+        "run_id": run.id,
+        "asset_id": asset.id,
+        "chain": chain.slug if chain else chain_slug,
+        "address": asset.address,
+        "symbol": asset.symbol,
+        "name": asset.name,
+        "generated_at": run.generated_at,
+        "narrative_status": run.narrative_status,
+        "llm_model": run.llm_model,
+        "evidence": run.evidence,
+        "narrative": run.narrative,
+        "risk_assessment": run.risk_assessment,
+    }
+
+
+@app.get("/market-analysis/{asset_id}/history")
+def market_analysis_history(
+    asset_id: int,
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[dict[str, object]]:
+    if session.get(models.Asset, asset_id) is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    rows = session.scalars(
+        select(models.MarketAnalysisRun)
+        .where(models.MarketAnalysisRun.asset_id == asset_id)
+        .order_by(desc(models.MarketAnalysisRun.generated_at))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "run_id": row.id,
+            "generated_at": row.generated_at,
+            "narrative_status": row.narrative_status,
+            "llm_model": row.llm_model,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/market-analysis/runs/{run_id}")
+def market_analysis_run(run_id: int, session: DbSession) -> dict[str, object]:
+    run = session.get(models.MarketAnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="analysis run not found")
+    asset = session.get(models.Asset, run.asset_id)
+    chain = session.get(models.Chain, asset.chain_id) if asset else None
+    return {
+        "run_id": run.id,
+        "asset_id": run.asset_id,
+        "chain": chain.slug if chain else "unknown",
+        "address": asset.address if asset else "",
+        "symbol": asset.symbol if asset else "UNKNOWN",
+        "name": asset.name if asset else None,
+        "generated_at": run.generated_at,
+        "narrative_status": run.narrative_status,
+        "llm_model": run.llm_model,
+        "evidence": run.evidence,
+        "narrative": run.narrative,
+        "risk_assessment": run.risk_assessment,
+    }
 
 
 @app.get("/tokens/{asset_id}", response_model=TokenDetail)
