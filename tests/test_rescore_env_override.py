@@ -174,7 +174,7 @@ def real_fleet_before() -> float | None:
     return _sqlite_fleet_total(REPO_ROOT / "serpent.db")
 
 
-def _sqlite_fleet_total(db_path: Path) -> float:
+def _sqlite_fleet_total(db_path: Path) -> float | None:
     """Read the local-single fleet directly, independent of ambient Settings.
 
     The root DB is ignored user data. Open it read-only so the guard cannot
@@ -182,6 +182,11 @@ def _sqlite_fleet_total(db_path: Path) -> float:
     """
     uri = f"file:{db_path.resolve()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as connection:
+        has_scores = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scores'"
+        ).fetchone()
+        if has_scores is None:
+            return None
         row = connection.execute("SELECT COALESCE(SUM(risk), 0) FROM scores").fetchone()
     return float(row[0])
 
@@ -201,6 +206,20 @@ def test_local_fleet_guard_reads_sqlite_without_configured_database(tmp_path: Pa
         connection.executemany("INSERT INTO scores (risk) VALUES (?)", [(12.5,), (7.5,)])
 
     assert _sqlite_fleet_total(db_path) == 20.0
+
+
+@pytest.mark.parametrize("schema", ["empty", "without-scores"])
+def test_local_fleet_guard_accepts_database_without_scores_table(
+    tmp_path: Path, schema: str
+) -> None:
+    db_path = tmp_path / "serpent.db"
+    if schema == "empty":
+        db_path.touch()
+    else:
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("CREATE TABLE unrelated (value INTEGER)")
+
+    assert _sqlite_fleet_total(db_path) is None
 
 
 # ---------------------------------------------------------------------------

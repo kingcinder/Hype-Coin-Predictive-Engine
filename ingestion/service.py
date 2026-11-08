@@ -927,6 +927,7 @@ class IngestionService:
             base_asset_id=base_asset.id,
             quote_asset_id=quote_asset.id if quote_asset else None,
             created_at_source=normalized.pair_created_at,
+            first_available_at=observed_at,
         )
         ts = floor_to_hour(observed_at)
         insert_market_snapshot_once(

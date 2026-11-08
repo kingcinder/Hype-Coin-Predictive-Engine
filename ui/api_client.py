@@ -36,9 +36,9 @@ def api_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
         return None
 
 
-def api_post(path: str, *, json: dict[str, Any] | None = None) -> Any:
+def api_post(path: str, *, json: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(f"{API_BASE_URL}{path}", json=json, headers=api_auth_headers())
             response.raise_for_status()
             return response.json()

@@ -316,3 +316,12 @@ contract records were created after their `observed_at`. Treat those historical
 values as unverified. The read-only source DB was preserved; see section 14 of
 the validation field report for the full measured results and predictive-layer
 limits.
+
+The parent/child chronology mismatch in that history had a reproducible
+current-ingestion cause: `_store_normalized_pair` captured `observed_at` before
+creating Contract, Pool, and Pair rows, whose default `created_at` timestamps
+were assigned on later flushes. New rows now set `created_at` to the captured
+`observed_at`; their upserts preserve that first-availability value. Source
+creation metadata remains separately stored as `created_at_source`. This fix
+does not establish the origin of old persisted rows, which continue to be
+treated as unverified and are never backdated or rewritten.

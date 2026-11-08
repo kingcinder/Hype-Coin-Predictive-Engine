@@ -945,9 +945,9 @@ def _reproducible_source_times(
         asset = session.get(models.Asset, asset_id)
         if asset is None:
             continue
-        market_rows = []
-        liquidity_rows = []
-        pairs = []
+        market_rows: list[models.MarketSnapshot] = []
+        liquidity_rows: list[models.LiquiditySnapshot] = []
+        pairs: list[models.Pair] = []
         computed: dict[str, Any] = {}
         if market_names.intersection(candidates):
             pairs, market_rows, liquidity_rows = _load_pit_market_inputs(

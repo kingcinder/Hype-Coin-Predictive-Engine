@@ -8,12 +8,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from common.config import get_settings
 from ui.api_client import (
     api_get,
     api_get_silent,
     api_post,
     api_status,  # noqa: F401
 )
+from ui.gmgn import gmgn_link_html, gmgn_token_url
 from ui.live import engine_snapshot, start_engine_subscriber
 from ui.theme import apply_dark_theme, inject_theme
 
@@ -63,6 +65,7 @@ NAV_SECTIONS: list[tuple[str, list[str]]] = [
             "Risk Console",
             "Forecast",
             "Confidence Dashboard",
+            "Independent Market Analysis",
         ],
     ),
     (
@@ -112,6 +115,7 @@ VIEW_ICONS: dict[str, str] = {
     "Risk Console": "⚠️",
     "Forecast": "🔮",
     "Confidence Dashboard": "📈",
+    "Independent Market Analysis": "📊",
     "Token Detail Page": "🔎",
     "Why It Ranked": "🧠",
     "What Changed": "🔄",
@@ -358,6 +362,7 @@ def score_table(df: pd.DataFrame) -> None:
         "asset_id",
         "chain",
         "symbol",
+        "address",
         "hype",
         "risk_band",
         "risk",
@@ -367,6 +372,10 @@ def score_table(df: pd.DataFrame) -> None:
         "research_priority",
     ]
     display = df[columns].copy()
+    display["GMGN"] = [
+        gmgn_token_url(chain, address)
+        for chain, address in zip(display.chain, display.address, strict=True)
+    ]
     if "risk_band" in display.columns:
         display["risk_band"] = display["risk_band"].map(_band_cell)
     unvalidated_help = (
@@ -374,6 +383,8 @@ def score_table(df: pd.DataFrame) -> None:
         f"[Read the validation field report]({VALIDATION_FIELD_REPORT_URL})."
     )
     column_config = {
+        "address": st.column_config.TextColumn("CA", width="medium"),
+        "GMGN": st.column_config.LinkColumn("GMGN", display_text="↗", help="Open token on GMGN"),
         "hype": st.column_config.NumberColumn("Hype · unvalidated", help=unvalidated_help),
         "liquidity_access": st.column_config.NumberColumn(
             "Liquidity · unvalidated", help=unvalidated_help
@@ -436,7 +447,8 @@ def token_selector(df: pd.DataFrame) -> int | None:
     if df.empty:
         return None
     options = {
-        f"{row.symbol} | {row.chain} | id={row.asset_id} | risk={row.risk_band}": int(row.asset_id)
+        f"{row.symbol} | {row.chain} | {str(getattr(row, 'address', ''))[:12]}… | "
+        f"id={row.asset_id} | risk={row.risk_band}": int(row.asset_id)
         for row in df.itertuples(index=False)
     }
     label = st.selectbox("Token", list(options.keys()))
@@ -531,7 +543,7 @@ def render_token_detail(asset_id: int | None) -> None:
         return
     score = data.get("latest_score")
     st.subheader(f"{data['symbol']} on {data['chain']}")
-    st.caption(data["address"])
+    st.markdown(gmgn_link_html(data["chain"], data["address"]), unsafe_allow_html=True)
     _render_solana_safety(data.get("solana_safety"))
     if not score:
         st.info("This token exists in the universe but has not been scored yet.")
@@ -621,6 +633,151 @@ def render_token_detail(asset_id: int | None) -> None:
         st.info("No previous comparable score snapshot exists yet.")
 
 
+def _market_value(value: Any) -> str:
+    try:
+        return f"${float(value):,.6g}"
+    except (TypeError, ValueError):
+        return "Unavailable"
+
+
+def _render_market_analysis(result: dict[str, Any]) -> None:
+    st.subheader(f"{result.get('symbol') or 'Token'} · {result.get('chain') or 'unknown'}")
+    st.markdown(
+        gmgn_link_html(result.get("chain", ""), result.get("address", "")),
+        unsafe_allow_html=True,
+    )
+    evidence = result.get("evidence") or {}
+    live = evidence.get("live") or {}
+    if not live:
+        st.warning(
+            "Live market data is unavailable. The report uses stored observations where available."
+        )
+    else:
+        st.caption(
+            f"Live source: {live.get('provider', 'unknown')} · "
+            f"fetched {live.get('observed_at', 'unknown')} · "
+            f"{live.get('dex') or 'venue unknown'} · provider values retrieved during this analysis"
+        )
+        cols = st.columns(4)
+        cols[0].metric("Live price", _market_value(live.get("price_usd")))
+        cols[1].metric("Liquidity", _market_value(live.get("liquidity_usd")))
+        cols[2].metric("24h volume", _market_value((live.get("volume_usd") or {}).get("h24")))
+        cols[3].metric(
+            "Market cap", _market_value(live.get("market_cap_usd") or live.get("fdv_usd"))
+        )
+
+    history = evidence.get("history") or []
+    st.markdown("**Stored market observations**")
+    if history:
+        st.dataframe(pd.DataFrame(history), width="stretch", hide_index=True)
+        st.caption(
+            f"{len(history)} stored observations · latest observation "
+            f"{history[0].get('observed_at') or 'unknown'} · "
+            f"freshness: {history[0].get('freshness') or 'unknown'}"
+        )
+    else:
+        st.info("No stored market history is available for this asset.")
+
+    st.markdown("**Independent LLM narrative**")
+    if result.get("narrative_status") == "generated":
+        if result.get("narrative"):
+            st.write(result["narrative"])
+        if result.get("risk_assessment"):
+            st.markdown("**Evidence and risk limits**")
+            st.write(result["risk_assessment"])
+        if result.get("llm_model"):
+            st.caption(f"Model: {result['llm_model']}")
+    else:
+        st.info(
+            "Narrative generation was unavailable for this run. "
+            "This saved report does not use the engine score narrative."
+        )
+    st.caption(
+        f"Analysis saved at {result.get('generated_at', 'unknown')} · "
+        f"run #{result.get('run_id', '—')}"
+    )
+
+
+def independent_market_analysis() -> None:
+    st.header("Independent Market Analysis")
+    st.caption(
+        "Combines live DexScreener market data with stored observations. "
+        "The separate narrative does not use engine scores or forecasts."
+    )
+    with st.form("market_analysis_search_form"):
+        query = st.text_input("Search by symbol, name, or contract address")
+        submitted = st.form_submit_button("Search assets")
+    if submitted:
+        st.session_state["market_analysis_search_results"] = (
+            api_get("/assets/search", params={"q": query.strip(), "limit": 20})
+            if query.strip()
+            else []
+        )
+        st.session_state.pop("market_analysis_result", None)
+
+    results = st.session_state.get("market_analysis_search_results") or []
+    selected: dict[str, Any] | None = None
+    if results:
+        labels = [
+            f"{item.get('symbol') or 'UNKNOWN'} · {item.get('chain') or 'unknown'} · "
+            f"{item.get('address') or ''}"
+            + (
+                f" · {item.get('dex') or 'DEX'} · "
+                f"${float(item.get('liquidity_usd') or 0):,.0f} liquidity"
+                if item.get("external")
+                else ""
+            )
+            for item in results
+        ]
+        index = st.selectbox(
+            "Choose an asset or market pair",
+            range(len(results)),
+            format_func=lambda idx: labels[idx],
+            key="market_analysis_asset_choice",
+        )
+        selected = results[index]
+        if st.button("Run independent analysis", type="primary"):
+            payload = (
+                {
+                    "address": selected["address"],
+                    "chain": selected["chain"],
+                    "pair_address": selected.get("pair_address"),
+                }
+                if selected.get("external")
+                else {"asset_id": selected["asset_id"]}
+            )
+            llm_settings = get_settings()
+            timeout = max(
+                30.0,
+                llm_settings.llm_timeout_seconds * (llm_settings.llm_max_retries + 1) + 10,
+            )
+            with st.spinner("Fetching live market data and generating the analysis..."):
+                result = api_post("/market-analysis/analyze", json=payload, timeout=timeout)
+            if result:
+                st.session_state["market_analysis_result"] = result
+
+    result = st.session_state.get("market_analysis_result")
+    if selected and selected.get("asset_id"):
+        runs = (
+            api_get(f"/market-analysis/{selected['asset_id']}/history", params={"limit": 50}) or []
+        )
+        if runs:
+            labels = [f"{run['generated_at']} · run #{run['run_id']}" for run in runs]
+            history_index = st.selectbox(
+                "Saved analyses",
+                range(len(runs)),
+                format_func=lambda idx: labels[idx],
+                key=f"market_analysis_history_{selected['asset_id']}",
+            )
+            if st.button("Open saved analysis"):
+                result = api_get(f"/market-analysis/runs/{runs[history_index]['run_id']}")
+                if result:
+                    st.session_state["market_analysis_result"] = result
+    if result:
+        st.divider()
+        _render_market_analysis(result)
+
+
 def top_hype() -> pd.DataFrame:
     st.header("Top Hype Tokens")
     render_unvalidated_score_badge()
@@ -684,12 +841,18 @@ def risk_console() -> None:
     filtered = filtered.sort_values(["risk_band", "risk"], ascending=[True, False])
     display = filtered.copy()
     display["risk_band"] = display["risk_band"].map(_band_cell)
+    display["GMGN"] = [
+        gmgn_token_url(chain, address)
+        for chain, address in zip(display.chain, display.address, strict=True)
+    ]
     st.dataframe(
         display[
             [
                 "asset_id",
                 "chain",
                 "symbol",
+                "address",
+                "GMGN",
                 "risk_band",
                 "risk",
                 "hype",
@@ -699,6 +862,10 @@ def risk_console() -> None:
         ],
         width="stretch",
         hide_index=True,
+        column_config={
+            "address": st.column_config.TextColumn("CA", width="medium"),
+            "GMGN": st.column_config.LinkColumn("GMGN", display_text="↗"),
+        },
     )
     asset_id = token_selector(filtered)
     if asset_id:
@@ -1379,7 +1546,7 @@ def validation_integrity_view() -> None:
     for cell in cells:
         if cell.get("status") == "suppressed_missing_crosscheck":
             st.warning(cell.get("guard_note") or "Concordance suppressed without leakage audit.")
-        elif cell.get("status") == "flagged_suspicious":
+        elif cell.get("status") in {"flagged_suspicious", "flagged_unverified_sources"}:
             st.warning(cell.get("guard_note") or "Concordance is flagged as suspicious.")
     if cells:
         st.dataframe(
@@ -1403,7 +1570,7 @@ def render_latest_validation_verdict() -> None:
 
     cells = report.get("cells") or []
     statuses = {cell.get("status") for cell in cells}
-    if "flagged_suspicious" in statuses:
+    if statuses & {"flagged_suspicious", "flagged_unverified_sources"}:
         st.warning("Latest report flags suspicious validation results; inspect the cell statuses.")
     elif "suppressed_missing_crosscheck" in statuses or not report.get("leakage_crosscheck_ran"):
         st.warning("Latest report has no completed point-in-time leakage cross-check.")
@@ -2395,13 +2562,23 @@ def command_center() -> None:
             st.info("No scored tokens yet — run ingestion or seed fixtures.")
         else:
             hot_display = hot.head(6).copy()
+            hot_display["GMGN"] = [
+                gmgn_token_url(chain, address)
+                for chain, address in zip(hot_display.chain, hot_display.address, strict=True)
+            ]
             if "risk_band" in hot_display.columns:
                 hot_display["risk_band"] = hot_display["risk_band"].map(_band_cell)
             st.dataframe(
-                hot_display[["symbol", "chain", "hype", "risk_band", "research_priority"]],
+                hot_display[
+                    ["symbol", "chain", "address", "GMGN", "hype", "risk_band", "research_priority"]
+                ],
                 width="stretch",
                 hide_index=True,
                 height=220,
+                column_config={
+                    "address": st.column_config.TextColumn("CA", width="medium"),
+                    "GMGN": st.column_config.LinkColumn("GMGN", display_text="↗"),
+                },
             )
     with right:
         st.markdown("**Top Research**")
@@ -2409,13 +2586,25 @@ def command_center() -> None:
             st.info("No research candidates yet.")
         else:
             research_display = research.head(6).copy()
+            research_display["GMGN"] = [
+                gmgn_token_url(chain, address)
+                for chain, address in zip(
+                    research_display.chain, research_display.address, strict=True
+                )
+            ]
             if "risk_band" in research_display.columns:
                 research_display["risk_band"] = research_display["risk_band"].map(_band_cell)
             st.dataframe(
-                research_display[["symbol", "chain", "research_priority", "risk_band", "hype"]],
+                research_display[
+                    ["symbol", "chain", "address", "GMGN", "research_priority", "risk_band", "hype"]
+                ],
                 width="stretch",
                 hide_index=True,
                 height=220,
+                column_config={
+                    "address": st.column_config.TextColumn("CA", width="medium"),
+                    "GMGN": st.column_config.LinkColumn("GMGN", display_text="↗"),
+                },
             )
 
     f_left, f_right = st.columns(2)
@@ -2494,6 +2683,8 @@ def render_active_view(view: str) -> None:
         top_research()
     elif view == "Risk Console":
         risk_console()
+    elif view == "Independent Market Analysis":
+        independent_market_analysis()
     elif view in {"Token Detail Page", "Why It Ranked", "What Changed"}:
         hot_df = score_frame("/tokens/hot", include_black=True)
         render_token_detail(token_selector(hot_df))
@@ -2569,6 +2760,8 @@ def _sidebar_nav() -> str:
             views,
             key=key,
             index=views.index(current) if current else None,
+            on_change=_select_nav_view,
+            args=(key,),
             format_func=lambda name: f"{VIEW_ICONS.get(name, '')} {name}".strip(),
             label_visibility="collapsed",
         )
@@ -2576,6 +2769,17 @@ def _sidebar_nav() -> str:
             st.session_state.nav_view = picked
             st.rerun()
     return st.session_state.nav_view
+
+
+def _select_nav_view(widget_key: str) -> None:
+    """Persist the selection and clear other section radios before rerendering."""
+    selected = st.session_state.get(widget_key)
+    if selected in {view for _, views in NAV_SECTIONS for view in views}:
+        st.session_state.nav_view = selected
+        for section, _ in NAV_SECTIONS:
+            other_key = f"nav_{section}"
+            if other_key != widget_key and other_key in st.session_state:
+                st.session_state[other_key] = None
 
 
 def _sidebar_footer() -> None:

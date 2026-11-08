@@ -48,6 +48,29 @@ def test_near_perfect_concordance_is_flagged_after_suspicious_crosscheck() -> No
     assert guarded["cells"][0]["status"] == "flagged_suspicious"
 
 
+def test_unverified_source_rows_keep_near_perfect_concordance_flagged_without_finding() -> None:
+    guarded = guard_validation_cells(
+        {
+            "cells": [
+                {"output": "risk_score", "metric": "concordance", "value": 0.99, "n": 100},
+                {
+                    "output": "feature_leakage",
+                    "metric": "suspected_features",
+                    "value": 1.0,
+                    "n": 100,
+                    "note": (
+                        "source replay could not verify non-missing values: pair_age_minutes=100"
+                    ),
+                },
+            ],
+            "suspicious_results": [],
+        }
+    )
+
+    assert guarded["cells"][0]["status"] == "flagged_unverified_sources"
+    assert guarded["cells"][0]["value"] == 0.99
+
+
 def test_validation_api_surfaces_crosschecked_warning(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
