@@ -64,6 +64,40 @@ the engine's floor (2 GB RAM, 10 GB disk). Notes for that host:
   Prefer the tunnel or the mesh VPN; never expose the dashboard to the
   public internet without the token gate in place.
 
+### Option 1A — Zero-config Oracle VPS (the francisco-build quick path)
+
+On the `francisco-build` branch, Option 1 collapses to **one command**.
+The branch ships `deploy/oracle-vps/install-oracle.sh`, which is the
+whole install: it installs OS prerequisites, runs the system installer
+(Step 3B) tracking this branch, then fills in the only settings a
+phone-first deployment needs — an auto-generated `ENGINE_API_TOKEN`
+(never printed), ntfy push notifications enabled with **all five alert
+event types** and a generated private topic, and the LLM layer off
+(a free-tier VPS has no room for a local model). If `HOOK_URL` is set,
+it also registers that webhook for **every** webhook event type via
+`deploy/oracle-vps/register-hooks.py`. It finishes by restarting the
+service and running the authenticated health check.
+
+```bash
+git clone -b francisco-build \
+  https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
+cd Hype-Coin-Predictive-Engine
+sudo bash deploy/oracle-vps/install-oracle.sh
+# optional: NTFY_TOPIC=my-topic HOOK_URL=https://example.org/hook
+```
+
+The script's final screen is the deliverable: report the **ntfy topic**
+(the user subscribes to it in the free ntfy app — that is how every
+alert reaches their phone) and the dashboard instructions. Do not print
+the API token; it lives only in `/opt/serpent/.env`.
+
+**Phone GUI on this branch:** the dashboard is instantiated phone-first
+— a centered single-column layout with the sidebar collapsed
+(`ui/app.py` page config) and a dark high-contrast Streamlit theme
+(`.streamlit/config.toml`) — because on this deployment the phone *is*
+the screen. It is reached over an SSH tunnel
+(`ssh -L 8501:localhost:8501 <vps>`) or a mesh VPN, never exposed raw.
+
 ### Option 2 — Use it from an Android phone (no port required)
 
 The dashboard (port 8501) and API (port 8000) are plain web interfaces.

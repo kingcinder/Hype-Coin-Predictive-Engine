@@ -2799,7 +2799,11 @@ def main() -> None:
     st.set_page_config(
         page_title="Serpent Circle Hype-Coin Engine",
         page_icon="🐍",
-        layout="wide",
+        # francisco-build: phone-first instantiation — the dashboard's
+        # primary screen is a modern smartphone, so a single centered
+        # column with the sidebar collapsed, not a wide desktop grid.
+        layout="centered",
+        initial_sidebar_state="collapsed",
     )
     # ── Branding: inject dark-theme CSS + Serpent Circle palette ──────────
     # The theme already renders the branded hero header, so no duplicate
