@@ -299,6 +299,8 @@ Open **http://localhost:8501** for the GUI. The API is at **http://localhost:800
 
 See **[INSTALL.md](INSTALL.md)** for full instructions, configuration, troubleshooting, and the uninstaller.
 
+**Installing with an AI agent? Start here:** hand your coding agent the starter prompt in **[AGENTIC_INSTALL.md](AGENTIC_INSTALL.md)** — it walks the agent through environment checks, install, startup, and the authenticated health check end to end.
+
 ## Development
 
 ### Import & dependency guards
