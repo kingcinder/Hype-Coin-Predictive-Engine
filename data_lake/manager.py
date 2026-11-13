@@ -71,6 +71,16 @@ def run_data_lake_pass(
         result["labels"] = label_counts
         session.commit()
 
+        # 2b. Re-derive the band→survival confidence map from the outcomes now
+        # persisted (two aggregates); until it validates, the conservative
+        # fallback stays in place and every read path reports it as unvalidated.
+        from scoring.band_calibration import refresh_band_calibration
+
+        result["confidence_calibration"] = {
+            "validated": refresh_band_calibration(session)["validated"]
+        }
+        session.commit()
+
         # 3. Label generation progress
         progress = label_generation_progress(session)
         result["progress"] = progress
@@ -222,6 +232,9 @@ def get_confidence_dashboard_data(
     Returns label progress, scoring breakdown, and feature importance data.
     """
     progress = label_generation_progress(session)
+    from api.schemas import score_family_validation
+
+    validated = score_family_validation(session)["hype"].validated
 
     # Get top-scored tokens with feature breakdown
     from storage.repository import latest_scores
@@ -270,7 +283,7 @@ def get_confidence_dashboard_data(
                 "confidence": round(score.confidence, 2),
                 "research_priority": round(score.research_priority, 2),
                 "score_validation": {
-                    family: {"validated": False}
+                    family: {"validated": validated}
                     for family in (
                         "hype",
                         "ethos",

@@ -20,7 +20,8 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from xml.etree import ElementTree
+
+from defusedxml import ElementTree  # defused: coverage.xml is input, not trusted
 
 COVERAGE_DIR = Path(__file__).resolve().parents[1] / "coverage"
 HISTORY_PATH = COVERAGE_DIR / "history.json"

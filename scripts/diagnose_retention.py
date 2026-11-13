@@ -122,14 +122,15 @@ def _processes_open(path: str) -> dict[str, str]:
 
 
 def _port_in_use(port: int) -> bool:
+    """True when something accepts connections on ``port`` on this host.
+
+    A connect probe replaces binding the wildcard address: it answers the same
+    question ('is the port taken?') without asking to listen on every interface.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-            try:
-                sock.bind(("0.0.0.0", port))
-            except OSError:
-                return True
-            return False
+            sock.settimeout(0.5)
+            return sock.connect_ex(("127.0.0.1", port)) == 0
     except OSError:
         return True
 

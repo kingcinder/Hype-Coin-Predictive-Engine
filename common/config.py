@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     reddit_client_id: str | None = None
     reddit_client_secret: str | None = None
 
+    # Minimum evaluated outcomes per risk band before the band→survival
+    # confidence table is treated as validated (scoring/band_calibration.py).
+    risk_confidence_band_min_samples: int = 30
     min_discovery_liquidity_usd: float = 15_000
     min_validated_liquidity_usd: float = 50_000
     min_liquid_momentum_usd: float = 250_000

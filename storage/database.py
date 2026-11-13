@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from common.config import Settings, database_url_env_override, get_settings
@@ -116,7 +117,13 @@ def acquire_sqlite_writer_lock(settings: Settings | None = None) -> int | None:
     url = resolve_database_url(settings)
     if "sqlite" not in url:
         return None
-    lock_path = Path(f"{url.replace('sqlite:///', '')}.lock")
+    # Derive the file from the parsed URL: string-replacing "sqlite:///" breaks
+    # for sqlite+pysqlite://, absolute paths, query strings and in-memory DBs,
+    # which silently pointed the guard at the wrong (or a nonexistent) file.
+    database_path = make_url(url).database
+    if not database_path or database_path == ":memory:":
+        return None  # in-process database: no second writer to guard against
+    lock_path = Path(f"{database_path}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:

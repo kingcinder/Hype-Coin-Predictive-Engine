@@ -629,6 +629,9 @@ class IngestionService:
             store_raw_evidence(
                 session, source=source, payload={"top_boosts": tokens}, observed_at=utc_now()
             )
+            # The evidence row lands before the per-token loop: from here on the
+            # loop's HTTP call must never run inside an open write transaction.
+            session.commit()
             for token in tokens[:100]:
                 chain_slug = str(token.get("chainId") or "").lower()
                 token_address = token.get("tokenAddress")
@@ -637,6 +640,10 @@ class IngestionService:
                 for pair_payload in client.token_pairs(chain_slug, str(token_address)):
                     if self._store_dexscreener_pair(session, source, pair_payload):
                         count += 1
+                # Per-token commit: the next token's token_pairs() call is network
+                # I/O, and holding SQLite's single write lock across it starved the
+                # engine's write queue (stage-level commits alone were too coarse).
+                session.commit()
             record_health(
                 session, component="source:dexscreener_pairs", state="ok", message=f"{count} pairs"
             )
@@ -671,6 +678,9 @@ class IngestionService:
                 for pool_payload in items:
                     if self._store_geckoterminal_pool(session, source, pool_payload):
                         count += 1
+                # Per-chain commit: new_pools() for the next chain is network I/O,
+                # so the lock must be released before it starts.
+                session.commit()
             record_health(
                 session,
                 component="source:geckoterminal_new_pools",

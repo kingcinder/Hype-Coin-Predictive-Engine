@@ -13,10 +13,10 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
+from tenacity import Retrying, retry_if_exception, stop_after_attempt
 
 from common.config import get_settings
-from common.http import build_httpx_client
+from common.http import build_httpx_client, jittered_backoff
 from common.logging import get_logger
 
 log = get_logger(__name__)
@@ -435,7 +435,7 @@ class LLMPredictionEngine:
     def _retry_request(self, method: Any, path: str, **kwargs: Any) -> httpx.Response:
         retryer = Retrying(
             retry=retry_if_exception(_is_retryable),
-            wait=wait_exponential_jitter(initial=0.1, max=0.5),
+            wait=jittered_backoff(initial=0.1, maximum=0.5),
             stop=stop_after_attempt(self._max_retries + 1),
             reraise=True,
         )

@@ -1156,3 +1156,43 @@ the new ingestion timestamp fix does not rewrite that history.
   `SERPENT_BACKUP_KEEP=2`, asserting exactly two remain (the new one plus the
   newest old one) and that the log reports `kept 2 newest of 4`; the other
   asserts a non-numeric keep exits 2.
+
+### 2026-11-13 — Ingestion lock holds, shutdown edges, and measured score confidence (done)
+
+- **Per-item ingestion commits:** `_ingest_dexscreener_boosts` committed once per
+  stage, so each token's `token_pairs()` HTTP call ran inside one write
+  transaction; it now commits the boosts evidence row before the loop and once
+  per token. `_ingest_geckoterminal_new_pools` now commits once per chain, before
+  the next chain's `new_pools()` call.
+- **Shutdown:** `stop_write_queue(timeout=WRITE_QUEUE_DRAIN_TIMEOUT_SECONDS)` (15 s)
+  bounds the final drain and logs `engine_write_queue_drain_timeout` instead of
+  waiting forever; a second SIGINT/SIGTERM logs
+  `engine_force_exit_second_signal` and exits 130; the Streamlit child starts in
+  its own session (`start_new_session=True`) and shutdown signals the whole
+  process group (`killpg`, SIGTERM then SIGKILL) so its children cannot linger on
+  the UI port.
+- **tenacity:** `jittered_backoff()` in `common/http.py` passes `wait_initial`/
+  `wait_max` when the installed tenacity accepts them and falls back to
+  `initial`/`max` on the locked 9.1.4; `llm/engine.py` and the HTTP client both
+  use it, so the deprecated keyword names are gone from the call sites.
+- **Bandit:** `scripts/coverage_history.py` parses `coverage.xml` with
+  `defusedxml.ElementTree` (B314), and `scripts/diagnose_retention.py::_port_in_use`
+  is a loopback connect probe instead of binding the wildcard address (B104).
+- **Writer-lock path:** `acquire_sqlite_writer_lock` derives the lock file from
+  `make_url(url).database` (handles `sqlite+pysqlite://`, absolute paths, query
+  strings) and returns `None` for `:memory:`, instead of string-replacing
+  `"sqlite:///"`.
+- **P2 predictive validity:** `_BAND_CONFIDENCE` is gone. `scoring/
+  band_calibration.py` derives band→survival from persisted, evaluated
+  `RiskOutcome` rows, publishes it only when every band has
+  `risk_confidence_band_min_samples` (default 30) outcomes **and** survival is
+  monotone across GREEN→BLACK, and otherwise keeps a documented fallback and
+  records `confidence_band_calibration` as yellow/unvalidated. `scoring/
+  formulas.py` reads the calibrated map; the data-lake pass refreshes it and
+  commits; `score_family_validation(session)` in `api/schemas.py` reports the
+  persisted status instead of a hardcoded `False`, and the dashboard uses the
+  same helper.
+- **Tests:** new `tests/test_band_calibration.py` (defaults reported until
+  validated, validated map equals measured survival, non-monotone survival stays
+  unvalidated, unevaluated outcomes are ignored) and the existing ingestion, API,
+  phase-integration and risk-scoring suites pass.

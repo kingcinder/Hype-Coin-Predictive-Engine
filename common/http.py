@@ -124,6 +124,23 @@ def build_httpx_client(
         raise
 
 
+def jittered_backoff(*, initial: float, maximum: float) -> Any:
+    """``wait_exponential_jitter`` with the keyword the installed tenacity accepts.
+
+    tenacity renamed this strategy's parameters (``initial``/``max`` ->
+    ``wait_initial``/``wait_max``) and deprecates the old names on newer
+    releases, while the locked 9.1.4 only accepts the old ones. Passing whichever
+    the installed version accepts keeps retries warning-free on either.
+    """
+    # `Any` because the two keyword sets are mutually exclusive per version and
+    # the installed stubs only know one of them.
+    factory: Any = wait_exponential_jitter
+    try:
+        return factory(wait_initial=initial, wait_max=maximum)
+    except TypeError:
+        return factory(initial=initial, max=maximum)
+
+
 class HttpClient:
     def __init__(
         self,
@@ -164,7 +181,7 @@ class HttpClient:
         retry=retry_if_exception_type(
             (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError)
         ),
-        wait=wait_exponential_jitter(initial=0.5, max=8.0),
+        wait=jittered_backoff(initial=0.5, maximum=8.0),
         stop=stop_after_attempt(3),
         reraise=True,
     )

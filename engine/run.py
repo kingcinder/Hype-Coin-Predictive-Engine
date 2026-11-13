@@ -32,6 +32,11 @@ from common.logging import get_logger
 
 log = get_logger(__name__)
 
+#: Seconds shutdown waits for the write queue to drain before giving up. The
+#: queue is the last thing to stop, so this bounds how long Ctrl+C can take when
+#: a submitted write is itself stuck.
+WRITE_QUEUE_DRAIN_TIMEOUT_SECONDS = 15.0
+
 
 def _bootstrap() -> None:
     """Idempotent zero-container bootstrap: migrations + schema + reference rows."""
@@ -521,6 +526,11 @@ def main() -> None:
     stop = threading.Event()
 
     def _handle_stop(signum: int, _frame: object) -> None:
+        if stop.is_set():
+            # Second signal: the graceful path is already running and something
+            # in it is wedged. Never require SIGKILL from the operator.
+            log.warning("engine_force_exit_second_signal", signal=signum)
+            os._exit(130)
         log.info("engine_shutdown_signal", signal=signum)
         stop.set()
 
@@ -584,6 +594,9 @@ def main() -> None:
         env={**os.environ, "API_BASE_URL": settings.api_base_url},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # Own process group: Streamlit spawns children, and terminating only the
+        # parent left them holding the UI port after the engine exited.
+        start_new_session=True,
     )
 
     print(
@@ -668,17 +681,31 @@ def main() -> None:
         except Exception:
             pass
         if ui.poll() is None:
-            ui.terminate()
+            # Signal the whole group (the UI child and anything it spawned), since
+            # a lone terminate() orphaned Streamlit's children on the UI port.
+            try:
+                os.killpg(os.getpgid(ui.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                ui.terminate()
             try:
                 ui.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                ui.kill()
+                try:
+                    os.killpg(os.getpgid(ui.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    ui.kill()
         api_server.should_exit = True
         api_thread.join(timeout=10)
         # Drain the write queue: every submitted write commits before exit, so
         # shutdown loses no point-in-time evidence.
         try:
-            stop_write_queue()
+            # Bounded drain: a wedged writer thread must not keep the process up
+            # forever; stop() returns False when the timeout expires.
+            if not stop_write_queue(timeout=WRITE_QUEUE_DRAIN_TIMEOUT_SECONDS):
+                log.warning(
+                    "engine_write_queue_drain_timeout",
+                    timeout_seconds=WRITE_QUEUE_DRAIN_TIMEOUT_SECONDS,
+                )
         except Exception:  # noqa: BLE001 - never fail shutdown on queue drain.
             log.exception("engine_write_queue_stop_failed")
         log.info("engine_stopped")

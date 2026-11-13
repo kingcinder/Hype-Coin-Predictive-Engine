@@ -225,7 +225,7 @@ def _score_row(session: Session, score: models.Score) -> TokenScoreRow:
         exit_risk=score.exit_risk,
         research_priority=score.research_priority,
         risk_band=score.risk_band,
-        score_validation=score_family_validation(),
+        score_validation=score_family_validation(session),
     )
 
 
@@ -1253,7 +1253,7 @@ def token_similar_setups(
                 hype=row.score.hype if row.score else None,
                 risk_band=row.score.risk_band if row.score else None,
                 research_priority=row.score.research_priority if row.score else None,
-                score_validation=score_family_validation(),
+                score_validation=score_family_validation(session),
             )
         )
     return out

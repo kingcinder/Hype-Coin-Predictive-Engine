@@ -121,8 +121,29 @@ UNVALIDATED_SCORE_FAMILIES = (
 )
 
 
-def score_family_validation() -> dict[str, ScoreFamilyValidation]:
-    return {family: ScoreFamilyValidation(validated=False) for family in UNVALIDATED_SCORE_FAMILIES}
+def score_family_validation(session: object | None = None) -> dict[str, ScoreFamilyValidation]:
+    """Per-family validation status, read from the persisted calibration.
+
+    Hardcoding ``validated=False`` told callers nothing about *why* and could
+    never flip; the band calibration row is the source of truth
+    (scoring/band_calibration.py), and its absence means unvalidated.
+    """
+    validated = False
+    if session is not None:
+        from sqlalchemy import select
+
+        from storage import models
+
+        row = session.scalar(  # type: ignore[attr-defined]
+            select(models.SystemHealth)
+            .where(models.SystemHealth.component == "confidence_band_calibration")
+            .order_by(models.SystemHealth.ts.desc())
+            .limit(1)
+        )
+        validated = bool(row is not None and "validated=True" in (row.message or ""))
+    return {
+        family: ScoreFamilyValidation(validated=validated) for family in UNVALIDATED_SCORE_FAMILIES
+    }
 
 
 class TokenScoreRow(BaseModel):
