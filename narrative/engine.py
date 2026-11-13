@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from functools import lru_cache, partial
 from typing import Any
@@ -91,6 +92,7 @@ _PLACEHOLDER_SYMBOLS = frozenset(
 _SYMBOL_MIN_LENGTH = 3
 
 
+@lru_cache(maxsize=8192)
 def _symbol_match_pattern(symbol: str) -> re.Pattern[str] | None:
     """Compile a token-boundary matcher for an asset symbol (H13).
 
@@ -108,7 +110,12 @@ def _symbol_match_pattern(symbol: str) -> re.Pattern[str] | None:
     )
 
 
-def resolve_asset_by_symbol(session: Session, text: str) -> models.Asset | None:
+def resolve_asset_by_symbol(
+    session: Session,
+    text: str,
+    *,
+    assets: Sequence[models.Asset] | None = None,
+) -> models.Asset | None:
     """Attribute free text to an asset by symbol, deterministically (H13).
 
     Replaces naive ``symbol.lower() in text.lower()`` substring matching with
@@ -120,7 +127,8 @@ def resolve_asset_by_symbol(session: Session, text: str) -> models.Asset | None:
         return None
     best: models.Asset | None = None
     best_key: tuple[int, str, int] | None = None
-    for asset in session.scalars(select(models.Asset)).all():
+    candidates = assets if assets is not None else session.scalars(select(models.Asset)).all()
+    for asset in candidates:
         symbol = (asset.symbol or "").strip()
         pattern = _symbol_match_pattern(symbol)
         if pattern is None or not pattern.search(text):
@@ -160,6 +168,11 @@ class NarrativeEngine:
                     message="all configured endpoints are down; crawl batch skipped",
                     error_count=1,
                 )
+                # Commit before the next source's fetch: record_health opens a write
+                # transaction, and carrying it into the next crawl's HTTP call held
+                # SQLite's write lock for the whole fetch (measured 11.7s on
+                # source:reddit_public), dropping the engine's system_health writes.
+                session.commit()
                 counts[name] = 0
                 continue
             crawler = self._social_crawler(name, endpoint_url=endpoint_url)
@@ -308,8 +321,9 @@ class NarrativeEngine:
                 raw_path=f"narrative:{source_name}:{decision_ts.isoformat()}",
             )
             stored = 0
+            assets = session.scalars(select(models.Asset)).all()
             for item in items:
-                asset = self._resolve_asset(session, item.get("title") or "")
+                asset = self._resolve_asset(session, item.get("title") or "", assets=assets)
                 ts = item.get("published") or decision_ts
                 upsert_social_mention(
                     session,
@@ -333,6 +347,7 @@ class NarrativeEngine:
                 state="ok",
                 message=f"{stored} mentions",
             )
+            session.commit()
             return stored
         except Exception as exc:  # noqa: BLE001 - preserve per-source failure.
             log.warning("narrative_crawl_failed", source=source_name, error=str(exc))
@@ -343,6 +358,7 @@ class NarrativeEngine:
                 message=str(exc),
                 error_count=1,
             )
+            session.commit()
             return 0
 
     def _crawl_rss(self, session: Session, *, decision_ts: datetime) -> int:
@@ -370,9 +386,10 @@ class NarrativeEngine:
                 raw_path=f"narrative:rss:{decision_ts.isoformat()}",
             )
             stored = 0
+            assets = session.scalars(select(models.Asset)).all()
             for item in items:
                 title = item.get("title") or ""
-                asset = self._resolve_asset(session, title)
+                asset = self._resolve_asset(session, title, assets=assets)
                 if not asset:
                     continue
                 upsert_news_item(
@@ -391,6 +408,7 @@ class NarrativeEngine:
                 state="ok",
                 message=f"{stored} news items",
             )
+            session.commit()
             return stored
         except Exception as exc:  # noqa: BLE001
             log.warning("rss_crawl_failed", error=str(exc))
@@ -401,6 +419,7 @@ class NarrativeEngine:
                 message=str(exc),
                 error_count=1,
             )
+            session.commit()
             return 0
 
     def cluster(self, session: Session, *, decision_ts: datetime | None = None) -> int:
@@ -431,10 +450,19 @@ class NarrativeEngine:
             )
             return 0
 
-    def _resolve_asset(self, session: Session, text: str) -> models.Asset | None:
+    def _resolve_asset(
+        self,
+        session: Session,
+        text: str,
+        *,
+        assets: Sequence[models.Asset] | None = None,
+    ) -> models.Asset | None:
         # H13: shared deterministic resolver (token-boundary, 3-char minimum,
-        # placeholder exclusion, longest-match-wins).
-        return resolve_asset_by_symbol(session, text)
+        # placeholder exclusion, longest-match-wins). ``assets`` is preloaded by
+        # the crawl loops: resolving each mention used to re-select the whole
+        # table and recompile every symbol pattern, which held SQLite's write
+        # lock for ~10s while a stage was persisting its batch.
+        return resolve_asset_by_symbol(session, text, assets=assets)
 
 
 def run_narrative(session: Session, *, decision_ts: datetime | None = None) -> dict[str, Any]:

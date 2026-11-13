@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from functools import partial
 from time import sleep
 from typing import Any
@@ -62,6 +63,10 @@ from storage.repository import (
 )
 
 log = get_logger(__name__)
+
+
+class ScanInterrupted(Exception):
+    """Raised between scan stages when the engine is shutting down."""
 
 
 def _int_from_result(value: Any) -> int:
@@ -175,7 +180,13 @@ class IngestionService:
             )
 
     @staticmethod
-    def _commit_stage(session: Session) -> None:
+    def _check_stop(stop: threading.Event | None) -> None:
+        """Abort the scan at a stage boundary when the engine is shutting down."""
+        if stop is not None and stop.is_set():
+            raise ScanInterrupted
+
+    @staticmethod
+    def _commit_stage(session: Session, stop: threading.Event | None = None) -> None:
         """End the scan's current transaction so SQLite's write lock is released.
 
         SQLite allows exactly one writer, and a transaction keeps that lock from
@@ -192,13 +203,23 @@ class IngestionService:
         intended trade-off; it is also what makes the scan survivable at all.
         """
         session.commit()
+        # Between stages is where a shutdown request can be honoured: the stage
+        # that just finished is already persisted, and the next one may sit in a
+        # network call for a minute or more.
+        IngestionService._check_stop(stop)
 
     def run_once(
-        self, session: Session, *, pre_scan_health: dict[str, object] | None = None
+        self,
+        session: Session,
+        *,
+        pre_scan_health: dict[str, object] | None = None,
+        stop: threading.Event | None = None,
     ) -> dict[str, Any]:
         self.ensure_reference_data(session)
         # Reference rows are written before the first network call; commit them
         # so the scan never opens its write transaction during a slow fetch.
+        # No stop check here: this call sits outside the try, and the first
+        # stage boundary inside it honours the request a moment later.
         self._commit_stage(session)
         errors: list[str] = []
         result: dict[str, Any] = {
@@ -213,38 +234,38 @@ class IngestionService:
         try:
             decision_ts = utc_now()
             result["profiles"] = self._ingest_dexscreener_profiles(session)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
             result["safety_snapshots"] = self._ingest_solana_safety_snapshots(session)
             result["holder_snapshots"] += self._ingest_evm_holder_snapshots(session)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
             result["lp_removals"] = LiquidityRemovalWatcher().scan(session, decision_ts=decision_ts)
             result["prelaunch"] = len(PrelaunchQueue().scan(session, decision_ts=decision_ts))
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["narrative"] = run_narrative(session, decision_ts=decision_ts)
             result["catalysts"] = extract_catalysts(session, decision_ts=decision_ts)
             result["catalyst_alerts"] = alert_upcoming_catalysts(session, decision_ts=decision_ts)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             radar_result = IgnitionRadar().scan(session, decision_ts=decision_ts)
             result["ignition_events"] = sum(radar_result.values())
             fingerprint = FingerprintEngine()
             result["fingerprint_clusters"] = fingerprint.learn(session)
             result["fingerprints"] = len(fingerprint.assess(session))
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["lifecycle"] = run_lifecycle(session, decision_ts=decision_ts)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             forecast_result = run_forecast_if_due(session, decision_ts=decision_ts)
             result["forecasts"] = forecast_result.get("forecasts", 0)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             scores = score_current_assets(session, decision_ts=decision_ts)
             result["scores"] = len(scores)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             # ── Risk calibration: learn from historical outcomes ─────────
             try:
                 from risk_engine.calibrator import run_calibration
@@ -257,9 +278,9 @@ class IngestionService:
                 }
             except Exception as cal_exc:  # noqa: BLE001
                 log.debug("risk_calibration_failed", error=str(cal_exc))
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             result["ntfy"] = run_notifier(session, decision_ts=decision_ts)
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             # Compaction is owned by the retention autopilot on its cadence
             # (RETENTION_CADENCE_HOURS), running on a per-partition schedule.
             # The scan never touches the archive; it just reports the stage as
@@ -272,7 +293,7 @@ class IngestionService:
             except Exception as qe:  # noqa: BLE001
                 log.debug("data_quality_check_failed", error=str(qe))
                 result["data_quality"] = {"error": str(qe)}
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             # ── Phase 1: Contract analysis for new assets ───────────────
             try:
                 contract_result = self._run_contract_analysis(session, decision_ts)
@@ -280,7 +301,7 @@ class IngestionService:
             except Exception as ce:  # noqa: BLE001
                 log.debug("contract_analysis_failed", error=str(ce))
                 result["contract_analysis"] = {"error": str(ce)}
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
             record_health(
                 session,
                 component="worker",
@@ -292,7 +313,8 @@ class IngestionService:
                 ),
             )
             # Commit before the RPC pool probes below, which are network calls.
-            self._commit_stage(session)
+            self._commit_stage(session, stop)
+            self._check_stop(stop)
             # Probe downed endpoints so the health rows reflect fresh state
             # (the background threads cover long-running workers; this covers
             # --once runs and makes recovery deterministic per scan).
@@ -336,6 +358,11 @@ class IngestionService:
                 details={"pre_scan_health": pre_scan_health or {}},
             )
             session.commit()
+        except ScanInterrupted:
+            # Committed stages stayed; only the in-flight stage is discarded.
+            session.rollback()
+            result["interrupted"] = True
+            log.info("ingestion_scan_interrupted", stage="scan")
         except Exception as exc:  # noqa: BLE001 - must preserve exact source failure.
             session.rollback()
             with session.begin():

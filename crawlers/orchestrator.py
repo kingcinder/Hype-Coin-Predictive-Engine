@@ -134,6 +134,7 @@ class NightCrawlerOrchestrator:
         *,
         decision_ts: datetime | None = None,
         force: bool = False,
+        stop: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Run all crawlers that are due, with adaptive frequency.
 
@@ -156,6 +157,10 @@ class NightCrawlerOrchestrator:
                     results[name] = {"status": "skipped", "reason": "not_due"}
 
         for name, crawler in due:
+            if stop is not None and stop.is_set():
+                log.info("nightcrawler_stop_requested", remaining=[n for n, _ in due])
+                results.setdefault("interrupted", True)
+                break
             try:
                 log.info("nightcrawler_start", name=name)
                 items = crawler.fetch()

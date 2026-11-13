@@ -950,3 +950,44 @@ the new ingestion timestamp fix does not rewrite that history.
   and both STATE.md entries that described the aside/restore dance were rewritten.
   The `.env.gate-aside` line came out of `.gitignore` too, since nothing creates
   that file any more.
+
+### 2026-11-13 — Nightcrawler holds, responsive shutdown, and a clean-stop test (done)
+
+- **What was actually holding the lock.** The per-source and per-batch commits were
+  in place, so the phases themselves were fine; the holds came from *health writes
+  left uncommitted across network work*. Instrumenting every SQLite transaction on a
+  copy of the real DB (`sqlite3.set_trace_callback`, probe kept outside the repo)
+  named two: `INSERT INTO system_health ... 'source:evm_mempool'` held 16.3s (the
+  next stage's liquidity RPC ran inside it) and `'source:reddit_public'` held 11.7s
+  (the next narrative source's fetch ran inside it). That is the ~2 dropped
+  `system_health` writes per cycle: a ~16s hold against a 5s busy timeout.
+- **Fixed:** `mempool/evm.py` and `mempool/solana.py` commit their summary health row
+  before returning; `narrative/engine.py` commits after every per-source health write
+  (success, red, and all-endpoints-down paths, social and RSS);
+  `radar/liquidity.py` commits per chain and after its summary row.
+- **Second hold, found on the way:** a single `raw_evidence_items` transaction sat
+  for 9.8s because `resolve_asset_by_symbol` re-selected the whole asset table and
+  recompiled every symbol pattern *per mention* (40 mentions x ~1.8k assets). The
+  crawl loops now preload the asset list once and pass it, and
+  `_symbol_match_pattern` is `lru_cache`d. Same scan, same DB copy, worst remaining
+  hold **3.6s** (label densification), everything else under 3s.
+- **Resilience:** `crawlers/pipeline.run_nightcrawler_pipeline` also commits at its
+  step boundaries (after the crawl, after scoring, after heuristics) and returns an
+  `interrupted` result when a stop lands between sources, recording a yellow
+  `nightcrawler_pipeline` row instead of a red failure.
+- **Shutdown is now responsive mid-work.** The engine's stop event is threaded into
+  `ingestion.worker.run_once`, `IngestionService.run_once` (a `ScanInterrupted` is
+  raised at each stage boundary, after the stage's commit, so completed stages stay
+  and only the in-flight one is discarded), `NightCrawlerOrchestrator.run_all`
+  (checked between sources) and `run_data_lake_pass` (checked between steps). The
+  scan now logs `ingestion_scan_interrupted` instead of finishing out its remaining
+  stages — the reason the runbooks had escalated to SIGKILL.
+- **Tests** (`tests/test_engine_boot_writes.py`): the full-phase-cycle test still
+  passes unchanged (229s: crawl + data-lake complete, no write-queue losses, no hold
+  over the 10s budget), plus a new `test_engine_stops_cleanly_on_sigint_mid_scan`: it
+  waits until a scan is provably in flight, sends SIGINT, and requires exit status 0,
+  the `engine_stopped` epilogue, a logged `ingestion_scan_interrupted` (so the scan
+  was genuinely cut short, not merely finished), no `ingestion_scan_failed`, and a
+  released write lock — all within a bounded stop budget.
+- **Gate with a real `.env` present:** exit 0 — ruff, format, mypy (164 files), both
+  lint scans, the full pytest suite (including both boot tests), coverage 78.21%.

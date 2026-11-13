@@ -16,9 +16,11 @@ SQLite file (``SERPENT_DB_PATH``) and asserts, while the engine keeps running:
 2. an independent connection can acquire the write lock,
 3. one full post-scan phase cycle completes (forecast/retention/parity, crawl,
    then the data-lake pass) without the engine holding that lock for more than a
-   few seconds at a time, and
+   few seconds at a time,
 4. the engine log contains no ``write_queue_task_failed`` /
-   ``write_queue_heartbeat_failed`` events across that cycle.
+   ``write_queue_heartbeat_failed`` events across that cycle, and
+5. a SIGINT mid-scan stops the process on its own, within a bounded time and
+   with exit status 0, instead of needing SIGKILL.
 """
 
 from __future__ import annotations
@@ -44,6 +46,12 @@ MAX_PHASE_LOCK_HOLD_SECONDS = 10.0
 # a shared runner fetches the same sources much slower than a workstation, and the
 # point of the bound is to fail a wedged phase instead of hanging forever.
 PHASE_CYCLE_TIMEOUT_SECONDS = 600.0
+
+# A scan can sit inside one network stage for a minute on a slow runner, so the
+# stop budget covers a worst-case stage plus the shutdown handshake (UI child,
+# API thread, write-queue drain). It is far below the old behaviour, which never
+# returned from Ctrl+C at all.
+STOP_TIMEOUT_SECONDS = 120.0
 
 
 def _free_port() -> int:
@@ -212,6 +220,97 @@ def _terminate_group(proc: subprocess.Popen[bytes]) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
+
+
+def test_engine_stops_cleanly_on_sigint_mid_scan(tmp_path: Path) -> None:
+    """SIGINT while a scan is running must stop the engine — no SIGKILL needed.
+
+    Every scan stage is a unit of work, and the scan honours the shutdown event
+    at each boundary. Before that, ``run_once`` was uninterruptible: Ctrl+C only
+    set the event, and the process sat inside the remaining stages until the
+    whole multi-minute scan finished, which is why the runbooks escalated to
+    SIGKILL.
+    """
+    db_path = tmp_path / "serpent.db"
+    archive_dir = tmp_path / "archive"
+    api_port = _free_port()
+    ui_port = _free_port()
+    engine_log = tmp_path / "engine.log"
+
+    with engine_log.open("wb") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "engine"],
+            cwd=REPO_ROOT,
+            env=_env_for(db_path, api_port, ui_port, archive_dir),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            if not _wait_for_port("127.0.0.1", api_port):
+                _fail(
+                    f"engine never brought up its API within 60s; poll()={proc.poll()}",
+                    engine_log,
+                )
+
+            # Wait until the first scan is demonstrably in flight: it has written
+            # rows, and it has not yet logged its completion.
+            deadline = time.monotonic() + 60.0
+            in_flight = False
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    _fail("engine exited before the scan was observed", engine_log)
+                rows = _health_rows(db_path) or 0
+                if rows > 0 and "engine_scan_complete" not in engine_log.read_text(
+                    errors="replace"
+                ):
+                    in_flight = True
+                    break
+                time.sleep(0.5)
+            if not in_flight:
+                _fail(
+                    "the first scan never started writing, so a mid-scan stop could "
+                    "not be exercised",
+                    engine_log,
+                )
+
+            proc.send_signal(signal.SIGINT)
+            try:
+                returncode = proc.wait(timeout=STOP_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                _fail(
+                    f"the engine was still running {STOP_TIMEOUT_SECONDS:.0f}s after "
+                    "SIGINT mid-scan (the old SIGKILL-only behaviour)",
+                    engine_log,
+                )
+                returncode = -1  # unreachable: _fail raises
+
+            log_text = engine_log.read_text(errors="replace")
+            if returncode != 0:
+                _fail(
+                    f"clean stop exited {returncode} instead of 0",
+                    engine_log,
+                )
+            if "engine_stopped" not in log_text:
+                _fail("the engine never reached its shutdown epilogue", engine_log)
+            if "ingestion_scan_interrupted" not in log_text:
+                _fail(
+                    "the scan was not reported as interrupted: SIGINT did not reach a "
+                    "stage boundary, so shutdown still waited out the scan",
+                    engine_log,
+                )
+            if "ingestion_scan_failed" in log_text:
+                _fail(
+                    "the shutdown was recorded as a scan failure instead of an interruption",
+                    engine_log,
+                )
+            if not _can_take_write_lock(db_path, timeout=5.0):
+                _fail(
+                    "the write lock was still held after shutdown",
+                    engine_log,
+                )
+        finally:
+            _terminate_group(proc)
 
 
 def test_engine_keeps_writing_after_boot(tmp_path: Path) -> None:

@@ -372,4 +372,8 @@ def run_evm_watch(session: Session, *, decision_ts: datetime | None = None) -> d
         message=f"{total} pairs discovered, {errors} chain errors",
         error_count=errors,
     )
+    # Commit the summary row before returning: the caller continues with the
+    # liquidity watcher's RPC calls, and an open transaction here held the write
+    # lock straight through them (measured 16.3s on source:evm_mempool).
+    session.commit()
     return {"pairs": total, "errors": errors}

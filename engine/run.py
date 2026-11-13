@@ -286,7 +286,7 @@ def run_engine_phases(
             from storage.database import SessionLocal
 
             with SessionLocal() as session:
-                result = run_nightcrawler_pipeline(session)
+                result = run_nightcrawler_pipeline(session, stop=stop)
                 session.commit()
                 return result
 
@@ -298,7 +298,7 @@ def run_engine_phases(
             from storage.database import SessionLocal
 
             with SessionLocal() as session:
-                result = run_data_lake_pass(session)
+                result = run_data_lake_pass(session, stop=stop)
                 session.commit()
                 return result
 
@@ -619,7 +619,9 @@ def main() -> None:
                 engine_state.mark_scanning(
                     iteration=iteration, message=f"Scan iteration {iteration}"
                 )
-                result = run_once()
+                # Passing the shutdown event lets SIGINT/SIGTERM cut a scan
+                # short at a stage boundary instead of waiting out a full pass.
+                result = run_once(stop=stop)
                 engine_state.mark_scan_result(result)
                 log.info("engine_scan_complete", iteration=iteration, result=result)
             except Exception as exc:  # noqa: BLE001 - individual scan failure must not kill the engine

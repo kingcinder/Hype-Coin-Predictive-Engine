@@ -96,6 +96,10 @@ class LiquidityRemovalWatcher:
                     error_count=1,
                 )
                 log.warning("lp_removal_watch_failed", chain=chain.slug, error=str(exc))
+            # Per-chain commit: the health write above (and any persisted event)
+            # must not ride into the next chain's eth_getLogs call, which would
+            # hold the write lock across that RPC round-trip.
+            session.commit()
         state = "ok" if counts["errors"] == 0 else "yellow"
         record_health(
             session,
@@ -107,6 +111,7 @@ class LiquidityRemovalWatcher:
             ),
             error_count=counts["errors"],
         )
+        session.commit()
         return counts
 
     def _logs_for_pools(self, chain_slug: str, pool_addresses: list[str]) -> list[dict[str, Any]]:

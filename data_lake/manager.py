@@ -10,6 +10,7 @@ Called after each ingestion scan to:
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Any
@@ -32,6 +33,7 @@ def run_data_lake_pass(
     session: Session,
     *,
     decision_ts: datetime | None = None,
+    stop: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Run one full data lake pass: signal scoring + label densification + webhooks.
 
@@ -60,6 +62,11 @@ def run_data_lake_pass(
         # holding SQLite's write lock for the whole pass).
         session.commit()
 
+        if stop is not None and stop.is_set():
+            log.info("data_lake_pass_interrupted", stage="labels")
+            session.commit()
+            return {**result, "interrupted": True}
+
         # 2. Label densification
         label_counts = generate_dense_labels(session, decision_ts=decision_ts)
         result["labels"] = label_counts
@@ -69,6 +76,11 @@ def run_data_lake_pass(
         progress = label_generation_progress(session)
         result["progress"] = progress
         label_progress = progress
+
+        if stop is not None and stop.is_set():
+            log.info("data_lake_pass_interrupted", stage="webhooks")
+            session.commit()
+            return {**result, "interrupted": True}
 
         # 4. Dispatch webhooks for high-signal alerts
         webhook_results = _dispatch_high_signal_webhooks(session, signal_result, decision_ts)

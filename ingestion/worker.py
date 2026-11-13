@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import time
 
 from common.config import get_settings
@@ -16,7 +17,7 @@ from storage.database import SessionLocal
 log = get_logger(__name__)
 
 
-def run_once() -> dict[str, object]:
+def run_once(*, stop: threading.Event | None = None) -> dict[str, object]:
     service = IngestionService()
     with SessionLocal() as session:
         # Pre-scan lake freshness check: when the retention cadence has elapsed
@@ -25,7 +26,7 @@ def run_once() -> dict[str, object]:
         # yellow row survives even if the scan itself fails and rolls back.
         freshness = check_lake_freshness(session)
         session.commit()
-        return service.run_once(session, pre_scan_health={"lake": freshness})
+        return service.run_once(session, pre_scan_health={"lake": freshness}, stop=stop)
 
 
 def main() -> None:

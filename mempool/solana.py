@@ -271,4 +271,7 @@ def run_solana_watch(
         message=message,
         error_count=errors,
     )
+    # Commit the summary row before returning so the caller's next stage does
+    # not inherit this write transaction for its network work.
+    session.commit()
     return {"watched": watched, "bursts": bursts, "errors": errors}
