@@ -231,6 +231,9 @@ class NightCrawlerOrchestrator:
                 )
             except Exception as exc:  # noqa: BLE001 — one crash must not abort the fleet
                 log.exception("nightcrawler_crawler_failed", crawler=name, error=str(exc))
+                # Drop this crawler's partial writes separately from the ones that
+                # already landed; its health row below is the durable record.
+                session.rollback()
                 results[name] = {
                     "status": "error",
                     "error": str(exc),
@@ -243,6 +246,13 @@ class NightCrawlerOrchestrator:
                     message=str(exc),
                     error_count=1,
                 )
+
+            # Per-source commit. SQLite holds its write lock from a transaction's
+            # first write until COMMIT, so without this the next crawler's fetch()
+            # (network I/O) would run with the whole fleet's lock held — the phase
+            # kept the database locked for its entire duration and the engine's
+            # write queue dropped every insert with "database is locked".
+            session.commit()
 
         # Prune stale heuristics to prevent unbounded memory growth
         try:

@@ -171,6 +171,9 @@ class ScoringEngine:
             )
             result_by_asset[asset_id] = result
             scores.append(score)
+            # Per-asset commit: scoring an entire universe in one transaction
+            # held SQLite's write lock for ~30s and starved the write queue.
+            session.commit()
         # ── Optional LLM batch layer, isolated by the phase watchdog ───────
         # Slow local generation must not hold the scan loop; timed-out daemon
         # work has bounded HTTP requests and is skipped until it unwinds.

@@ -259,6 +259,9 @@ def run_solana_watch(
             bursts += 1
         if "error" in result:
             errors += 1
+        # Per-asset commit: watch_asset talks to RPC, so the next asset's call
+        # must not inherit this one's open write transaction.
+        session.commit()
     state = "ok" if not errors else "yellow"
     message = f"{watched} mints watched, {bursts} bursts, {errors} errors"
     record_health(

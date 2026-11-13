@@ -212,6 +212,10 @@ def generate_dense_labels(
             current += timedelta(hours=1)
             hour_count += 1
 
+        # Per-asset batch commit: one asset's hourly grid is a bounded unit of
+        # work, and the next asset must not extend the same write transaction.
+        session.commit()
+
     return counts
 
 

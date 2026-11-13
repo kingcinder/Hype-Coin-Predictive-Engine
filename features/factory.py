@@ -592,6 +592,10 @@ class FeatureFactory:
                         missing_flag=value.missing,
                         source_refs=value.source_refs,
                     )
+                # Per-asset commit: building features for the whole universe in a
+                # single transaction held SQLite's write lock for the entire pass
+                # and starved the engine's write queue.
+                session.commit()
         return output
 
     def _holder_features(

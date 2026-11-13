@@ -352,6 +352,9 @@ def score_batch(
     ).all()
     for snap in snapshots:
         scores.append(score_market_snapshot(session, snap, decision_ts))
+    # One commit per scored batch: the next batch starts its own transaction so a
+    # long pass never holds SQLite's single write lock across the whole run.
+    session.commit()
 
     # Score recent social mentions
     mentions = session.scalars(
@@ -362,6 +365,7 @@ def score_batch(
     ).all()
     for mention in mentions:
         scores.append(score_social_mention(session, mention, decision_ts))
+    session.commit()
 
     # Score recent ignition events
     ignition_cutoff = decision_ts - timedelta(hours=24)
@@ -373,6 +377,7 @@ def score_batch(
     ).all()
     for event in events:
         scores.append(score_ignition_event(session, event, decision_ts))
+    session.commit()
 
     # Sort by signal strength
     scores.sort(key=lambda s: s.signal_score, reverse=True)

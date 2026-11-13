@@ -882,3 +882,30 @@ the new ingestion timestamp fix does not rewrite that history.
   `list[dict[str, int | str | None]]` and list invariance rejected it. Fixed with
   an explicit `list[dict[str, object]]` annotation — mypy is now clean on both
   2.0.52 and 2.1.8 — rather than capping the dependency.
+
+### 2026-11-13 — Same write-lock hold closed in the phases and in the scan's long stages (done)
+
+- **Measured, then fixed.** With the scan's stage commits in place, a probe against a
+  throwaway DB still showed two long holds in the scan (18s across the mempool RPC
+  calls, 35s across feature building + scoring) and, before this change, the whole
+  nightcrawler crawl loop (~44-70s) and the data-lake pass.
+- **Commits added at every bounded unit of work:** per source in
+  `NightcrawlerOrchestrator.run_all` (rollback first in the per-crawler failure
+  path), per scored batch (`score_batch`), per asset in `generate_dense_labels`,
+  per step and per webhook in `run_data_lake_pass` (the HTTP dispatch also flushes
+  before and after the call), plus the scan stages that were still long:
+  per chain in `run_evm_watch`, per asset in `run_solana_watch`, per asset in
+  `FeatureFactory.persist_for_assets` (the 35s hold — features for the whole
+  universe were persisted in one transaction) and per asset in
+  `ScoringEngine.score_assets`.
+- **Regression test extended** (`tests/test_engine_boot_writes.py`): it now enables
+  the nightcrawler phase, waits for one full cycle (`engine_nightcrawler_complete`
+  and `engine_data_lake_complete`), polls the write lock from an independent
+  connection throughout, and asserts (a) no `write_queue_task_failed` and no
+  `write_queue_heartbeat_failed` anywhere in that cycle and (b) no single hold of
+  the lock over 5s. Verified both ways: on the pre-fix code it fails with
+  `write_queue_task_failed` at 17:18:29 during the crawl; with the fixes it passes
+  in 227s. Full gate green afterwards (exit 0, coverage 78%).
+- **Left as is:** a hold remains bounded by one stage's own work — e.g. the RPC
+  pool probes and `build_and_persist_features`' per-asset build cost — but no
+  stage, crawl or batch now spans a network call inside an open transaction.

@@ -358,8 +358,12 @@ def run_evm_watch(session: Session, *, decision_ts: datetime | None = None) -> d
             finally:
                 watcher.close()
         except Exception as exc:  # noqa: BLE001 - preserve per-chain failure.
+            session.rollback()
             errors += 1
             log.warning("mempool_evm_failed", chain=chain_slug, error=str(exc))
+        # Per-chain commit: the next chain's watch() is network RPC and must not
+        # run inside this chain's open write transaction.
+        session.commit()
     state = "ok" if not errors else "yellow"
     record_health(
         session,

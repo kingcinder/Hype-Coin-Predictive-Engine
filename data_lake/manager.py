@@ -55,10 +55,15 @@ def run_data_lake_pass(
             "noise_count": signal_result.noise_count,
             "avg_signal": signal_result.avg_signal,
         }
+        # Each step is its own unit of work (defect: the pass used to leave one
+        # transaction open from the first score write until the caller committed,
+        # holding SQLite's write lock for the whole pass).
+        session.commit()
 
         # 2. Label densification
         label_counts = generate_dense_labels(session, decision_ts=decision_ts)
         result["labels"] = label_counts
+        session.commit()
 
         # 3. Label generation progress
         progress = label_generation_progress(session)
@@ -72,6 +77,7 @@ def run_data_lake_pass(
             "successful": sum(1 for r in webhook_results if r.success),
             "failed": sum(1 for r in webhook_results if not r.success),
         }
+        session.commit()
 
         # 5. Record data lake health
         duration = monotonic() - started
@@ -102,6 +108,9 @@ def run_data_lake_pass(
 
     except Exception as exc:
         duration = monotonic() - started
+        # Completed steps are already committed; drop only the failed step's
+        # partial writes so the red health row below can be persisted.
+        session.rollback()
         record_health(
             session,
             component="data_lake",
@@ -159,7 +168,11 @@ def _dispatch_high_signal_webhooks(
                             chain = session.get(models.Chain, asset.chain_id)
 
             payload = build_payload("high_signal_scan", None, asset, chain, extra)
+            # Flush before and after the HTTP call: the round-trip must never run
+            # inside an open write transaction.
+            session.commit()
             result = dispatch_webhook(session, webhook, "high_signal_scan", payload)
+            session.commit()
             results.append(result)
 
     # Also dispatch for lifecycle transition alerts
@@ -179,7 +192,9 @@ def _dispatch_high_signal_webhooks(
                 continue
 
             payload = build_payload("lifecycle_transition", alert, asset, chain)
+            session.commit()
             result = dispatch_webhook(session, webhook, "lifecycle_transition", payload)
+            session.commit()
             results.append(result)
 
     return results
