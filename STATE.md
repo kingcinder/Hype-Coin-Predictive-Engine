@@ -935,94 +935,60 @@ the new ingestion timestamp fix does not rewrite that history.
 - **Cause:** `test_api_fail_closed_when_token_unset` unset the environment variable
   and expected the fail-closed 403, but `common/config.py` builds
   `Settings(env_file=".env")` and this checkout has a provisioned
-  `ENGINE_API_TOKEN` there (1 line; no `ENGINE_API_AUTH_BYPASS`), so the API still
-  saw a token and answered 401. The test was measuring the repo tree, not the
-  deployment it describes — and the runbook had grown an `.env`-aside/restore step
-  with a checksum to work around it.
-- **Fix:** the test now isolates its own settings — it patches the module-level
-  `get_settings` name that `api/main.py` resolves through with
-  `Settings(_env_file=None)`, so the file source is off while real environment
-  variables still apply. Proven both ways on this checkout with `.env` present:
-  the previous test body fails (`1 failed, 24 passed`), the fixed one passes
-  (`25 passed`).
-- **Full gate with `.env` in place:** exit 0 — ruff, format, mypy, both lint
-  scans, pytest, coverage 78.33% (floor 75.7). No aside, no restore.
-- **Workaround removed:** the gate runner (then `finish.sh`, now `start-engine.sh --gate`)
-  runs `make gate` against the checkout
-  as-is (it still checksums `.env` before/after to prove the run did not touch it),
-  and both STATE.md entries that described the aside/restore dance were rewritten.
-  The `.env.gate-aside` line came out of `.gitignore` too, since nothing creates
-  that file any more.
+  `ENGINE_API_TOKEN` there, so the API still saw a token and answered 401 — the test
+  measured the repo tree, not the deployment it describes. The runbook had grown an
+  `.env`-aside/restore dance to work around it.
+- **Fix:** the test patches the module-level `get_settings` that `api/main.py`
+  resolves through with `Settings(_env_file=None)`, so the file source is off while
+  real environment variables still apply. Proven both ways with `.env` present: the
+  old body fails, the new one passes; full `make gate` exit 0, coverage 78.33%. The
+  aside workaround is gone from the gate runner, `STATE.md` and `.gitignore`.
 
-### 2026-11-13 — Nightcrawler holds, responsive shutdown, and a clean-stop test (done)
+### 2026-11-13 — Write-lock holds across network work, and a responsive stop (done)
 
-- **What was actually holding the lock.** The per-source and per-batch commits were
-  in place, so the phases themselves were fine; the holds came from *health writes
-  left uncommitted across network work*. Instrumenting every SQLite transaction on a
-  copy of the real DB (`sqlite3.set_trace_callback`, probe kept outside the repo)
-  named two: `INSERT INTO system_health ... 'source:evm_mempool'` held 16.3s (the
-  next stage's liquidity RPC ran inside it) and `'source:reddit_public'` held 11.7s
-  (the next narrative source's fetch ran inside it). That is the ~2 dropped
-  `system_health` writes per cycle: a ~16s hold against a 5s busy timeout.
-- **Fixed:** `mempool/evm.py` and `mempool/solana.py` commit their summary health row
-  before returning; `narrative/engine.py` commits after every per-source health write
-  (success, red, and all-endpoints-down paths, social and RSS);
-  `radar/liquidity.py` commits per chain and after its summary row.
-- **Second hold, found on the way:** a single `raw_evidence_items` transaction sat
-  for 9.8s because `resolve_asset_by_symbol` re-selected the whole asset table and
-  recompiled every symbol pattern *per mention* (40 mentions x ~1.8k assets). The
-  crawl loops now preload the asset list once and pass it, and
-  `_symbol_match_pattern` is `lru_cache`d. Same scan, same DB copy, worst remaining
-  hold **3.6s** (label densification), everything else under 3s.
-- **Resilience:** `crawlers/pipeline.run_nightcrawler_pipeline` also commits at its
-  step boundaries (after the crawl, after scoring, after heuristics) and returns an
-  `interrupted` result when a stop lands between sources, recording a yellow
-  `nightcrawler_pipeline` row instead of a red failure.
-- **Shutdown is now responsive mid-work.** The engine's stop event is threaded into
-  `ingestion.worker.run_once`, `IngestionService.run_once` (a `ScanInterrupted` is
-  raised at each stage boundary, after the stage's commit, so completed stages stay
-  and only the in-flight one is discarded), `NightCrawlerOrchestrator.run_all`
-  (checked between sources) and `run_data_lake_pass` (checked between steps). The
-  scan now logs `ingestion_scan_interrupted` instead of finishing out its remaining
-  stages — the reason the runbooks had escalated to SIGKILL.
-- **Tests** (`tests/test_engine_boot_writes.py`): the full-phase-cycle test still
-  passes unchanged (229s: crawl + data-lake complete, no write-queue losses, no hold
-  over the 10s budget), plus a new `test_engine_stops_cleanly_on_sigint_mid_scan`: it
-  waits until a scan is provably in flight, sends SIGINT, and requires exit status 0,
-  the `engine_stopped` epilogue, a logged `ingestion_scan_interrupted` (so the scan
-  was genuinely cut short, not merely finished), no `ingestion_scan_failed`, and a
-  released write lock — all within a bounded stop budget.
-- **Gate with a real `.env` present:** exit 0 — ruff, format, mypy (164 files), both
-  lint scans, the full pytest suite (including both boot tests), coverage 78.21%.
+- **What held the lock.** Per-source and per-batch commits were already in place;
+  the holds were *health rows left uncommitted across network work*. Instrumenting
+  every SQLite transaction on a copy of the real DB (`sqlite3.set_trace_callback`,
+  probe outside the repo) named `source:evm_mempool` at 16.3s (the liquidity RPC ran
+  inside it) and `source:reddit_public` at 11.7s (the next narrative fetch ran inside
+  it) — a ~16s hold against a 5s busy timeout, i.e. the dropped `system_health`
+  writes. `mempool/evm.py`, `mempool/solana.py`, `narrative/engine.py` (every
+  per-source path, social and RSS) and `radar/liquidity.py` now commit those rows.
+- **Second hold, found the same way:** a `raw_evidence_items` transaction sat 9.8s
+  because `resolve_asset_by_symbol` re-selected the asset table and recompiled every
+  symbol pattern per mention. The crawl loops preload the asset list once and
+  `_symbol_match_pattern` is `lru_cache`d. Same scan, same DB copy: worst remaining
+  hold **3.6s** (label densification).
+- **Shutdown:** the stop event is threaded into `ingestion.worker.run_once` →
+  `IngestionService.run_once`, where each stage boundary raises `ScanInterrupted`
+  after its commit (completed stages stay, the in-flight one is discarded), into
+  `NightCrawlerOrchestrator.run_all` (between sources) and
+  `run_data_lake_pass` (between steps). The scan logs
+  `ingestion_scan_interrupted` instead of finishing its remaining stages — the reason
+  the runbooks had escalated to SIGKILL.
+- **Tests** (`tests/test_engine_boot_writes.py`): the phase-cycle test (crawl +
+  data-lake complete, no write-queue losses, no hold over the 10s budget) plus
+  `test_engine_stops_cleanly_on_sigint_mid_scan` — SIGINT with a scan provably in
+  flight must exit 0 with `engine_stopped`, `ingestion_scan_interrupted`, no
+  `ingestion_scan_failed` and a released write lock. Both share one `_boot_engine`
+  fixture. Gate: exit 0, coverage 78.21%.
 
 ### 2026-11-13 — One bring-up path: finish.sh folded into start-engine.sh (done)
 
-- `finish.sh` duplicated the shipped launcher, was referenced by no doc or script
-  (only by this ledger), and drifted from real entry points. Its useful parts moved
-  into `start-engine.sh`, which stays the one documented path:
-  - **single-writer guard** — refuses to start when an engine process is already
-    running, when the API/GUI ports (`SERPENT_API_PORT`/`SERPENT_UI_PORT`, default
-    8000/8501) are bound, or when a `--network host` container may hold them. The
-    process match is anchored to an executable path (`(^|/)[p]ython[0-9.]* -m engine`)
-    so a shell or log tail that merely mentions the command cannot trip it — the
-    first, looser pattern did exactly that and failed the launcher test.
-  - **verified DB backup** — `serpent.db` is snapshotted through SQLite's backup API
-    into `~/serpent-backups/serpent-<timestamp>.db` and the sha256 is printed; a
-    failed backup aborts the launch instead of starting over an unbacked DB.
-  - **gate** — `./start-engine.sh --gate` runs `make gate` (the CI suite) with its
-    log in `~/serpent-logs/gate.log` and refuses to start on failure. Opt-in, because
-    it takes ~10 minutes.
-  - **lock-respecting install** — a fresh `.venv` installs `requirements-dev.txt`
-    first and then `pip install -e . --no-deps`, so the editable install cannot pull
-    newer majors (SQLAlchemy 2.1 fails the mypy gate).
-- Dropped with `finish.sh`: the git fetch/checkout/ff-merge of `main`, the 180s
-  health loop plus 120s stability window, the GitHub CI poll, the SIGKILL stop and
-  its result report — all either duplicated by the launcher or by CI, and the SIGKILL
-  stop is obsolete now that shutdown is honoured at scan/phase boundaries.
-- **Docs:** `README.md`, `INSTALL.md`, `AGENTIC_INSTALL.md` and `docs/runbook.md`
-  describe `./start-engine.sh` (guard → backup → launch, plus `--gate`) as the single
-  bring-up path, with `python -m engine` kept as the plain-terminal equivalent.
-- **Verified:** `tests/test_start_engine_launcher.py` passes (8s); the engine guard
-  fires for both a bare `python -m engine` argv and a `.venv/bin/python -m engine`
-  path and exits 1; a held port 8000 exits 1 with the owner printed; the backup path
-  produced `serpent-<ts>.db` with the sha256 printed and the row count intact, exit 0.
+- `finish.sh` duplicated the shipped launcher and nothing referenced it. Its useful
+  parts are now in `start-engine.sh`: the **single-writer guard** (engine running,
+  `SERPENT_API_PORT`/`SERPENT_UI_PORT` bound, or a `--network host` container; the
+  process match is anchored to an executable path so a shell that merely mentions the
+  command cannot trip it), the **verified DB backup** (SQLite backup API into
+  `~/serpent-backups/`, sha256 printed, failure aborts the launch), an opt-in
+  **`--gate`** run, and the **lock-respecting install** (`requirements-dev.txt` then
+  `pip install -e . --no-deps`).
+- Dropped: the git fetch/ff-merge, the 180s health loop plus 120s stability window,
+  the GitHub CI poll, the SIGKILL stop and its report — duplicated by the launcher or
+  CI, and the SIGKILL stop is obsolete now that shutdown is honoured at scan and
+  phase boundaries. `README.md`, `INSTALL.md`, `AGENTIC_INSTALL.md` and
+  `docs/runbook.md` describe `./start-engine.sh` as the single path, keeping
+  `python -m engine` as the plain-terminal equivalent.
+- **Verified:** `tests/test_start_engine_launcher.py` passes; the guard exits 1 for
+  both `python -m engine` argv shapes and for a held port; the backup path writes
+  `serpent-<ts>.db`, prints its sha256 and preserves the rows.

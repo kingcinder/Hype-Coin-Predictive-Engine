@@ -47,10 +47,6 @@ def run_nightcrawler_pipeline(
         crawl_result = orchestrator.run_all(
             session, decision_ts=decision_ts, force=force, stop=stop
         )
-        # Close the tail of the fleet pass here rather than leaving it for the
-        # scoring step: the crawl's last source is committed per source, so this
-        # only picks up anything the orchestrator left behind (e.g. a stop).
-        session.commit()
         if stop is not None and stop.is_set():
             duration = time.monotonic() - started
             log.info("nightcrawler_pipeline_interrupted", stage="crawl")
@@ -67,13 +63,11 @@ def run_nightcrawler_pipeline(
                 "duration_sec": round(duration, 2),
             }
 
-        # 2. Score and archive collected items
+        # 2. Score and archive collected items (pure computation, no writes)
         pipeline_result = _score_and_archive(session, crawl_result, decision_ts)
-        session.commit()
 
-        # 3. Learn from outcomes
+        # 3. Learn from outcomes (reads scores, updates heuristics in memory)
         _update_heuristics(session, orchestrator.heuristics, decision_ts)
-        session.commit()
 
         duration = time.monotonic() - started
         record_health(

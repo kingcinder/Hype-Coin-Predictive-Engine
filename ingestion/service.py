@@ -180,12 +180,6 @@ class IngestionService:
             )
 
     @staticmethod
-    def _check_stop(stop: threading.Event | None) -> None:
-        """Abort the scan at a stage boundary when the engine is shutting down."""
-        if stop is not None and stop.is_set():
-            raise ScanInterrupted
-
-    @staticmethod
     def _commit_stage(session: Session, stop: threading.Event | None = None) -> None:
         """End the scan's current transaction so SQLite's write lock is released.
 
@@ -203,10 +197,11 @@ class IngestionService:
         intended trade-off; it is also what makes the scan survivable at all.
         """
         session.commit()
-        # Between stages is where a shutdown request can be honoured: the stage
-        # that just finished is already persisted, and the next one may sit in a
-        # network call for a minute or more.
-        IngestionService._check_stop(stop)
+        # Between stages is where a shutdown request is honoured: the stage that
+        # just finished is persisted, and the next one may sit in a network call
+        # for a minute or more.
+        if stop is not None and stop.is_set():
+            raise ScanInterrupted
 
     def run_once(
         self,
@@ -312,9 +307,9 @@ class IngestionService:
                     "the retention autopilot"
                 ),
             )
-            # Commit before the RPC pool probes below, which are network calls.
+            # Commit before the RPC pool probes below, which are network calls;
+            # the commit above already honours a pending stop.
             self._commit_stage(session, stop)
-            self._check_stop(stop)
             # Probe downed endpoints so the health rows reflect fresh state
             # (the background threads cover long-running workers; this covers
             # --once runs and makes recovery deterministic per scan).

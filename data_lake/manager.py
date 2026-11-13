@@ -64,7 +64,6 @@ def run_data_lake_pass(
 
         if stop is not None and stop.is_set():
             log.info("data_lake_pass_interrupted", stage="labels")
-            session.commit()
             return {**result, "interrupted": True}
 
         # 2. Label densification
@@ -79,7 +78,6 @@ def run_data_lake_pass(
 
         if stop is not None and stop.is_set():
             log.info("data_lake_pass_interrupted", stage="webhooks")
-            session.commit()
             return {**result, "interrupted": True}
 
         # 4. Dispatch webhooks for high-signal alerts
