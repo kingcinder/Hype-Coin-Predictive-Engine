@@ -633,7 +633,9 @@ in-flight work from other agents, still untouched.
 
 ### 2026-11-13 — Full prompt run under the amended criteria (failed: write queue wedged)
 
-- Ran `finish.sh` (the prompt's procedure with the five review amendments: install
+- Ran `finish.sh` (since deleted — its useful parts now live in `start-engine.sh`; see the
+  2026-11-13 consolidation entry at the end of this file) — the prompt's procedure with
+the five review amendments: install
   from `requirements-dev.txt` then `pip install -e . --no-deps`; gate against the
   checkout as-is; SIGKILL as the stop command; the relaxed "at most two boot lock
   warnings, no growth" criterion; a check that no host-network container holds
@@ -945,7 +947,8 @@ the new ingestion timestamp fix does not rewrite that history.
   (`25 passed`).
 - **Full gate with `.env` in place:** exit 0 — ruff, format, mypy, both lint
   scans, pytest, coverage 78.33% (floor 75.7). No aside, no restore.
-- **Workaround removed:** `finish.sh` now runs `make gate` against the checkout
+- **Workaround removed:** the gate runner (then `finish.sh`, now `start-engine.sh --gate`)
+  runs `make gate` against the checkout
   as-is (it still checksums `.env` before/after to prove the run did not touch it),
   and both STATE.md entries that described the aside/restore dance were rewritten.
   The `.env.gate-aside` line came out of `.gitignore` too, since nothing creates
@@ -991,3 +994,35 @@ the new ingestion timestamp fix does not rewrite that history.
   released write lock — all within a bounded stop budget.
 - **Gate with a real `.env` present:** exit 0 — ruff, format, mypy (164 files), both
   lint scans, the full pytest suite (including both boot tests), coverage 78.21%.
+
+### 2026-11-13 — One bring-up path: finish.sh folded into start-engine.sh (done)
+
+- `finish.sh` duplicated the shipped launcher, was referenced by no doc or script
+  (only by this ledger), and drifted from real entry points. Its useful parts moved
+  into `start-engine.sh`, which stays the one documented path:
+  - **single-writer guard** — refuses to start when an engine process is already
+    running, when the API/GUI ports (`SERPENT_API_PORT`/`SERPENT_UI_PORT`, default
+    8000/8501) are bound, or when a `--network host` container may hold them. The
+    process match is anchored to an executable path (`(^|/)[p]ython[0-9.]* -m engine`)
+    so a shell or log tail that merely mentions the command cannot trip it — the
+    first, looser pattern did exactly that and failed the launcher test.
+  - **verified DB backup** — `serpent.db` is snapshotted through SQLite's backup API
+    into `~/serpent-backups/serpent-<timestamp>.db` and the sha256 is printed; a
+    failed backup aborts the launch instead of starting over an unbacked DB.
+  - **gate** — `./start-engine.sh --gate` runs `make gate` (the CI suite) with its
+    log in `~/serpent-logs/gate.log` and refuses to start on failure. Opt-in, because
+    it takes ~10 minutes.
+  - **lock-respecting install** — a fresh `.venv` installs `requirements-dev.txt`
+    first and then `pip install -e . --no-deps`, so the editable install cannot pull
+    newer majors (SQLAlchemy 2.1 fails the mypy gate).
+- Dropped with `finish.sh`: the git fetch/checkout/ff-merge of `main`, the 180s
+  health loop plus 120s stability window, the GitHub CI poll, the SIGKILL stop and
+  its result report — all either duplicated by the launcher or by CI, and the SIGKILL
+  stop is obsolete now that shutdown is honoured at scan/phase boundaries.
+- **Docs:** `README.md`, `INSTALL.md`, `AGENTIC_INSTALL.md` and `docs/runbook.md`
+  describe `./start-engine.sh` (guard → backup → launch, plus `--gate`) as the single
+  bring-up path, with `python -m engine` kept as the plain-terminal equivalent.
+- **Verified:** `tests/test_start_engine_launcher.py` passes (8s); the engine guard
+  fires for both a bare `python -m engine` argv and a `.venv/bin/python -m engine`
+  path and exits 1; a held port 8000 exits 1 with the owner printed; the backup path
+  produced `serpent-<ts>.db` with the sha256 printed and the row count intact, exit 0.

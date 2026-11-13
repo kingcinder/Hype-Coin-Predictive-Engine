@@ -19,12 +19,20 @@ This is not an auto-trader, wallet, custody system, or guaranteed-profit bot.
 ## One-command startup
 
 ```bash
-python -m engine
+./start-engine.sh          # guard → DB backup → launch
+./start-engine.sh --gate   # same, but run the full check suite first
 ```
 
-This one process applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. On a fresh checkout with no `.env` or database URL override, `python -m engine` selects `ENV=local-single` and SQLite at `serpent.db`. To use PostgreSQL, set `ENV=local` and configure `DATABASE_URL` (the tracked `.env.example` shows the template). API and GUI listeners default to loopback. Non-loopback binds require `ENGINE_ALLOW_LAN=1`, a configured API token, and auth bypass disabled. Ctrl+C stops the worker, API, and GUI cleanly.
+`start-engine.sh` is the single documented bring-up path. Before launching it
+refuses a second writer (an engine already running, the shipped ports already
+bound, or a `--network host` container that may hold them), takes a verified
+snapshot of `serpent.db` through SQLite's backup API into `~/serpent-backups/`,
+and only then starts the engine. `--gate` additionally runs the same suite CI
+runs (lint, format, mypy, import/dependency scans, pytest with the coverage
+floor) and refuses to start on a failure.
 
-Equivalent Makefile target: `make engine`.
+`python -m engine` (or `make engine`) is the same process started by hand — it
+applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. On a fresh checkout with no `.env` or database URL override, `python -m engine` selects `ENV=local-single` and SQLite at `serpent.db`. To use PostgreSQL, set `ENV=local` and configure `DATABASE_URL` (the tracked `.env.example` shows the template). API and GUI listeners default to loopback. Non-loopback binds require `ENGINE_ALLOW_LAN=1`, a configured API token, and auth bypass disabled. Ctrl+C stops the worker, API, and GUI cleanly (the shutdown event is honoured at scan and phase boundaries, so it does not wait out a long pass).
 
 ## Architecture Overview
 

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# Serpent Circle Engine — One-Click Launcher
+# Serpent Circle Engine — One-Click Launcher (the single bring-up path)
 # Double-click the desktop shortcut or run this script directly.
+#
+#   ./start-engine.sh          guard → backup → launch
+#   ./start-engine.sh --gate   also run the full check suite first
+#
+# Before launching it refuses a second writer (an engine already running,
+# the shipped ports already bound, or a --network host container that may
+# hold them) and takes a verified copy of serpent.db through SQLite's
+# backup API. Ctrl+C stops the engine.
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -10,6 +18,25 @@ set -euo pipefail
 # with SERPENT_PROJECT_DIR if you keep the script elsewhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SERPENT_PROJECT_DIR:-$SCRIPT_DIR}"
+API_PORT="${SERPENT_API_PORT:-8000}"
+UI_PORT="${SERPENT_UI_PORT:-8501}"
+BACKUP_DIR="${SERPENT_BACKUP_DIR:-$HOME/serpent-backups}"
+LOG_DIR="${SERPENT_LOG_DIR:-$HOME/serpent-logs}"
+
+RUN_GATE=0
+for arg in "$@"; do
+    case "$arg" in
+        --gate) RUN_GATE=1 ;;
+        -h | --help)
+            sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown option: $arg (try --help)" >&2
+            exit 2
+            ;;
+    esac
+done
 
 # ── Step 1: Navigate to project ──────────────────────────────────────
 cd "$PROJECT_DIR" || {
@@ -18,25 +45,106 @@ cd "$PROJECT_DIR" || {
 }
 echo "📂 Project: $PROJECT_DIR"
 
-# ── Step 2: Ensure venv exists ───────────────────────────────────────
+# ── Step 2: Refuse to start a second writer ──────────────────────────
+# Two engines on one serpent.db wedge the loop: the second one's writes
+# collide with the first one's and the queue drops them. Check the process,
+# the shipped ports, and host-network containers (which can hold a port
+# without appearing in `docker ps`'s published-ports column).
+# The pattern is anchored to an executable path so it cannot match a shell
+# whose command line merely mentions "python -m engine" (a log tail, a test
+# harness, another launcher's arguments).
+ENGINE_PATTERN='(^|/)[p]ython[0-9.]* -m engine( |$)'
+if pgrep -f "$ENGINE_PATTERN" >/dev/null; then
+    echo "❌ An engine process is already running; do not start a second one:" >&2
+    pgrep -af "$ENGINE_PATTERN" >&2 || true
+    echo "   Stop it first (Ctrl+C in its terminal, or kill the PID above)." >&2
+    exit 1
+fi
+if command -v ss >/dev/null 2>&1 &&
+    ss -ltn 2>/dev/null | grep -Eq ":(${API_PORT}|${UI_PORT})[[:space:]]"; then
+    echo "❌ Port ${API_PORT} or ${UI_PORT} is already in use:" >&2
+    ss -ltnp 2>/dev/null | grep -E ":(${API_PORT}|${UI_PORT})[[:space:]]" >&2 || true
+    echo "   Free it (or set SERPENT_API_PORT/SERPENT_UI_PORT for this launch)." >&2
+    exit 1
+fi
+if command -v docker >/dev/null 2>&1; then
+    for container in $(docker ps --format '{{.Names}}' 2>/dev/null || true); do
+        if [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$container" 2>/dev/null)" = "host" ]; then
+            echo "❌ Container '$container' runs with --network host and may hold" \
+                "${API_PORT}/${UI_PORT}; stop it or remove --network host." >&2
+            exit 1
+        fi
+    done
+fi
+
+# ── Step 3: Verified backup of the existing database ─────────────────
+# SQLite's backup API copies a consistent snapshot even while another
+# process is writing; a plain `cp` of a live DB can capture a torn state.
+if [ -s serpent.db ]; then
+    mkdir -p "$BACKUP_DIR"
+    DB_BACKUP="$BACKUP_DIR/serpent-$(date +%Y%m%d-%H%M%S).db"
+    if DB_BACKUP="$DB_BACKUP" python3 - <<'PY'
+import os
+import sqlite3
+
+src = sqlite3.connect("file:serpent.db?mode=ro", uri=True)
+dst = sqlite3.connect(os.environ["DB_BACKUP"])
+try:
+    src.backup(dst)
+finally:
+    dst.close()
+    src.close()
+PY
+    then
+        echo "🗄️  DB backup: $DB_BACKUP"
+        echo "    sha256:     $(sha256sum "$DB_BACKUP" | awk '{print $1}')"
+    else
+        echo "❌ SQLite backup of serpent.db failed; not starting over an unbacked DB." >&2
+        exit 1
+    fi
+else
+    echo "🗄️  DB backup: none (no serpent.db yet — the engine will bootstrap it)"
+fi
+
+# ── Step 4: Ensure venv exists ───────────────────────────────────────
 if [ ! -d ".venv" ] || [ ! -f ".venv/bin/activate" ]; then
     echo "🔧 Creating virtual environment..."
     python3 -m venv .venv
-    echo "📦 Installing dependencies..."
-    .venv/bin/pip install -e ".[dev]"
+    echo "📦 Installing dependencies (lock first, then the project without deps)..."
+    # Installing the requirements lock first matters: an unpinned editable
+    # install resolves newer majors (SQLAlchemy 2.1 breaks the mypy gate).
+    .venv/bin/pip install -r requirements-dev.txt
+    .venv/bin/pip install -e . --no-deps
 fi
 
-# ── Step 3: Activate venv ────────────────────────────────────────────
+# ── Step 5: Activate venv ────────────────────────────────────────────
 source .venv/bin/activate
 echo "🐍 Python: $(which python) ($(python --version 2>&1))"
 
-# ── Step 4: Launch the engine ────────────────────────────────────────
+# ── Step 6: Optional full gate before launch ─────────────────────────
+# `--gate` runs the same suite CI runs (lint, format, mypy, import and
+# dependency scans, pytest with the coverage floor) and refuses to start
+# on a failure. It takes ~10 minutes, which is why it is opt-in.
+if [ "$RUN_GATE" = 1 ]; then
+    mkdir -p "$LOG_DIR"
+    echo "🧪 Running the gate (log: $LOG_DIR/gate.log)..."
+    export PATH="$PWD/.venv/bin:$PATH"
+    if ! make VENV=.venv gate >"$LOG_DIR/gate.log" 2>&1; then
+        grep -E '^(PASS|FAIL):' "$LOG_DIR/gate.log" >&2 || true
+        tail -25 "$LOG_DIR/gate.log" >&2 || true
+        echo "❌ make gate failed; not starting the engine." >&2
+        exit 1
+    fi
+    echo "✅ Gate passed: $(grep -E '^TOTAL' "$LOG_DIR/gate.log" | tail -1)"
+fi
+
+# ── Step 7: Launch the engine ────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════"
 echo "  🐍 Serpent Circle Hype-Coin Predictive Engine"
 echo "═══════════════════════════════════════════════════════════"
-echo "  API : http://localhost:8000"
-echo "  GUI : http://localhost:8501"
+echo "  API : http://localhost:${API_PORT}"
+echo "  GUI : http://localhost:${UI_PORT}"
 echo "  Ctrl+C to stop"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
@@ -49,21 +157,19 @@ probe_health() {
     if [ -z "$tok" ] && [ -f .env ]; then
         tok="$(sed -n 's/^ENGINE_API_TOKEN=//p' .env | tail -n 1 | tr -d "\"'" | tr -d '\r')"
     fi
-    printf 'header = "Authorization: Bearer %s"\n' "$tok" \
-        | curl -sf -K - "http://localhost:${port}/health" >/dev/null 2>&1
+    printf 'header = "Authorization: Bearer %s"\n' "$tok" |
+        curl -sf -K - "http://localhost:${port}/health" >/dev/null 2>&1
 }
 
 # Spawn a helper that surfaces the GUI as soon as the API is healthy,
 # then hands back to the engine (exec keeps Ctrl+C wired to the engine).
 (
-    API_PORT="${SERPENT_API_PORT:-8000}"
-    UI_PORT="${SERPENT_UI_PORT:-8501}"
     for _ in $(seq 1 90); do
         if probe_health "${API_PORT}"; then
             sleep 2  # let the Streamlit GUI settle before opening the browser
-            xdg-open "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
-                || sensible-browser "http://localhost:${UI_PORT}" >/dev/null 2>&1 \
-                || true
+            xdg-open "http://localhost:${UI_PORT}" >/dev/null 2>&1 ||
+                sensible-browser "http://localhost:${UI_PORT}" >/dev/null 2>&1 ||
+                true
             exit 0
         fi
         sleep 1

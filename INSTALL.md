@@ -21,8 +21,22 @@ The installer:
   http://localhost:8501 once the engine is healthy
 
 After install, double-click **Serpent Circle Engine** on your desktop (or run
-`./start-engine.sh`). The engine also runs from a plain terminal with
-`python -m engine`.
+`./start-engine.sh`). That launcher is the single bring-up path, and it guards
+the run before starting:
+
+- **One writer only.** It refuses to start when an engine is already running,
+  when port 8000/8501 is bound, or when a container with `--network host` may
+  hold those ports (override the ports with `SERPENT_API_PORT` /
+  `SERPENT_UI_PORT`).
+- **Verified database backup.** If `serpent.db` exists it is copied through
+  SQLite's backup API (a torn copy is impossible) into
+  `~/serpent-backups/serpent-<timestamp>.db` and the sha256 is printed.
+- **Optional gate.** `./start-engine.sh --gate` runs the full check suite
+  (`make gate`: lint, format, mypy, import/dependency scans, pytest with the
+  coverage floor) and refuses to start the engine if it fails.
+
+The engine also runs from a plain terminal with `python -m engine` (or
+`make engine`); that path does not include the guards or the backup.
 
 ## System Install (Ubuntu service)
 

@@ -135,10 +135,17 @@ PostgreSQL profile instead; do that only if the user wants PostgreSQL.
 Desktop install:
 
 ```bash
-./start-engine.sh
-# or, in a plain terminal:
+./start-engine.sh          # guard → verified DB backup → launch
+./start-engine.sh --gate   # same, plus `make gate` before starting
+# or, in a plain terminal (no guards, no backup):
 .venv/bin/python -m engine        # equivalent: make engine
 ```
+
+`start-engine.sh` is the one documented bring-up path. It refuses to start a
+second writer (engine already running, port 8000/8501 bound, or a container
+with `--network host`), snapshots `serpent.db` via SQLite's backup API into
+`~/serpent-backups/` and prints the sha256, and with `--gate` runs the full
+check suite first.
 
 One process runs everything: it applies migrations, then runs the
 ingestion worker loop, the REST API on http://localhost:8000, and the

@@ -166,6 +166,11 @@ discipline:
 - **Port-ownership fail-fast:** `python -m engine` refuses to boot when
   `API_PORT` (default `8000`) is already bound `(address already in use)`, the
   exact symptom that used to let a second engine keep running.
+- **Launcher pre-flight:** `./start-engine.sh` checks for a running engine, a
+  bound 8000/8501, and `--network host` containers *before* it starts, then
+  snapshots `serpent.db` (SQLite backup API, sha256 printed) into
+  `~/serpent-backups/`. This is the documented bring-up path; `--gate` runs the
+  full check suite first.
 - **Higher busy timeout:** inter-process contention is now prevented (above), so
   the remaining contention is intra-process (worker thread + API thread on one
   file). `SQLITE_BUSY_TIMEOUT_MS` (default `30000`) lets a genuine short
