@@ -98,6 +98,8 @@ def _session_isolate_database_url_env() -> Generator[None, None, None]:
     yield
     for name, value in saved.items():
         os.environ[name] = value
+
+
 # NOTE: pytest loads this file both as ``conftest`` (its own import) and as
 # ``tests.conftest`` (when a test imports TrackingScope) — two module objects,
 # which is harmless ONLY while this module has no import-time side effects.

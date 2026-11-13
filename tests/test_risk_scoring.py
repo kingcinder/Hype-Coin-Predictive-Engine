@@ -389,12 +389,23 @@ def test_band_from_collapse_probability_uses_ml_thresholds(session) -> None:
 
 def _collapse_features(prob: float) -> dict[str, float]:
     """Base feature set for testing the collapse-probability rule contribution."""
+    # PITFIX 2026-11-13: complete rule-input vector. A partial dict now
+    # (correctly) adds a missingness penalty, which would mask the collapse
+    # contribution these tests isolate. All other inputs are clean/present.
     return {
         "liquidity_depth": 200_000.0,
         "top_holder_concentration": 0.1,
         "pair_age_minutes": 120.0,
         "suspicious_contract_flags": 0.0,
         "collapse_probability_24h": prob,
+        "spread_estimate": 5.0,
+        "buy_sell_ratio": 1.0,
+        "holder_count": 500.0,
+        "volatility": 5.0,
+        "liquidity_withdrawal_signal": 0.0,
+        "lp_removal_signal": 0.0,
+        "recidivism_score": 0.0,
+        "lifecycle_phase": 1.0,
     }
 
 

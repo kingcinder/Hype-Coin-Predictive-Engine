@@ -169,6 +169,7 @@ def session_scope() -> Generator[Session, None, None]:
     a phase holds the write lock across network I/O or heavy per-item work.
     """
     import time as _time
+
     budget_seconds = getattr(get_settings(), "SESSION_SCOPE_BUDGET_SECONDS", 10.0)
     started = _time.monotonic()
     with SessionLocal() as session:

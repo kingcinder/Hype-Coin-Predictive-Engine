@@ -12,6 +12,15 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## PITFIX 2026-11-13 (Wren, user-directed, uncommitted)
+
+- Backup: `serpent.db.pre-pitfix-2026-11-13` (61M, pre-fix copy of the -main DB). Live DB is the -main copy; the non-main repo has no serpent.db.
+- Leak fix (data): `suspicious_contract_flags` / `deployer_history_available` were stored 0.0 non-missing for 3,445 rows each where no contract was PIT-known at decision_ts. Recomputed PIT-correctly with `FeatureFactory._contract_flag_count` / `_deployer_history`; those 6,890 rows are now missing_flag=True. No other feature values changed in that pass.
+- Code fix: `risk_engine/rules.py assess_risk()` — missing `liquidity_depth` no longer hard-rejects to BLACK (+10 unknown-liquidity points instead; explicit 0/low liquidity still hard-rejects), missing `pair_age_minutes` skips that rule, and a continuous missingness penalty (+2 per missing rule input, capped 20) replaces a hard floor. `scoring/formulas.py compute_scores()` now strips missing keys before `assess_risk()` so missing tracking works live, not just in rescore. Two collapse-probability tests updated to use a complete feature vector.
+- Rescore applied with `scripts/rescore.py --yes`: 4,859 scores updated, 0 errors. Risk scores: 422 distinct values, mean 40.35, std 22.12, range 8-100. Score bands: YELLOW 2,866 / BLACK 1,490 / GREEN 485 / ORANGE 18 (was BLACK 4,357 / GREEN 458).
+- Fresh validation `reports/validation-2026-11-13-pitfix.json` (2026-11-13 15:02 PST, self-test passed): feature_leakage 0.0, no suspected features (was 2 features, concordance 0.9719), suspicious 4 -> 2 (risk_score/exit_risk concordance 0.9719 only). BUT RiskBand ordinal distance 2.202 and BLACK precision 0.0884 are UNCHANGED — rescore updates Score, not RiskOutcome, so those cells still evaluate the old BLACK predictions. Confidence calibration REGRESSED: 0.3761 vs 0.0798 before, worse_than_baseline — YELLOW confidence ~50-72% vs ~11% observed survival in evaluated outcomes; the fallback band-confidence table (92/72/48/22/5) is not calibrated to this corpus, and band calibration cannot validate because GREEN/ORANGE/RED have no evaluated outcomes. Risk_score concordance remains suspicious-good at 0.9719.
+- Next step (not done, needs a decision): sync RiskOutcome.risk_band to the rescored Score bands, or re-derive band confidence from evaluated outcomes per band, before claiming any RiskBand/confidence improvement. Do not tune confidence to the eval set silently.
+
 ## Ground truth (re-audited 2026-10-25)
 
 - Read-only validation on a SQLite snapshot of the available local DB: RiskBand

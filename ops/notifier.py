@@ -23,11 +23,13 @@ _PUSH_PROFILE: dict[str, tuple[int, str]] = {
     "liquidity_withdrawal_warning": (5, "skull"),
     "syndicate_recidivism": (4, "police_car"),
     "lifecycle_transition": (5, "collision"),
+    "phase_wedge_timeout": (4, "alert"),
 }
 
 _RPC_PUSH_PROFILE: dict[str, tuple[int, str]] = {
     "zero_healthy_endpoints": (5, "rotating_light"),
     "endpoint_down_cooldown": (4, "warning"),
+    "phase_wedge_timeout": (4, "alert"),
 }
 
 

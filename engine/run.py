@@ -21,8 +21,12 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+
+import storage.models as models
+from storage.database import SessionLocal
 
 if TYPE_CHECKING:
     from common.config import Settings
@@ -200,6 +204,25 @@ def _run_watchdog_phase(
         )
         log.error("engine_stage_watchdog_timeout", stage=stage, timeout_seconds=timeout_seconds)
         _record(message)
+        # Queue ntfy push for phase watchdog timeout (cooldown-gated via notified_at)
+        from sqlalchemy import select
+
+        from storage.models import Alert as ModelsAlert
+
+        try:
+            with SessionLocal() as ns:
+                asset_id = session.scalar(select(models.Asset.id).limit(1)) or 1
+                alert = ModelsAlert(
+                    asset_id=int(asset_id),
+                    alert_type="phase_wedge_timeout",
+                    state="open",
+                    message=message,
+                    created_at=datetime.now(UTC),
+                )
+                ns.add(alert)
+                ns.commit()
+        except Exception as exc:
+            log.warning("phase_wedge_timeout_ntfy_alert_failed", stage=stage, error=str(exc))
         return outcome
 
     if not outcome.skipped:

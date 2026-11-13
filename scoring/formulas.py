@@ -73,7 +73,14 @@ def compute_scores(
     session: Session | None = None,
 ) -> ScoreResult:
     missing_features = missing_features or []
-    risk_assessment = assess_risk(features, session=session)
+    # PITFIX 2026-11-13: assess_risk tracks missing inputs via _feature()
+    # defaults, but the live path passed every key (missing ones as 0.0), so
+    # missing was invisible to it and missing liquidity read as 0 liquidity
+    # -> hard BLACK. Strip missing keys here so missing is missing, live
+    # and in rescore alike. compute_scores still uses the full dict below
+    # for its own components, which handle 0.0 defaults explicitly.
+    _assess_features = {k: v for k, v in features.items() if k not in set(missing_features)}
+    risk_assessment = assess_risk(_assess_features, session=session)
     # E1: the honest coverage set is the union of factory-flagged missing
     # features and the inputs that silently hit their rule-engine default
     # (e.g. collapse_probability_24h after mask_unreliable_forecast pops it).

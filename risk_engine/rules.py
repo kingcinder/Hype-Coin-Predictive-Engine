@@ -232,7 +232,16 @@ def assess_risk(
         risk_points += pts
         reasons.append("Lifecycle state machine reached saturation phase")
 
-    if liquidity <= 0 or liquidity < settings.black_min_liquidity_usd:
+    # PITFIX 2026-11-13: a missing liquidity_depth reads as 0.0 via _feature,
+    # and 0.0 used to hard-reject every token with no liquidity evidence into
+    # BLACK (4183/4224 outcomes were BLACK). Missing is unknown, not zero
+    # liquidity: add a bounded unknown-liquidity penalty, do NOT hard-reject.
+    # An explicitly-observed 0 / low liquidity still hard-rejects as before.
+    if "liquidity_depth" in defaulted:
+        pts = _apply_reason_weights(10.0, "Liquidity unknown", reason_weights)
+        risk_points += pts
+        reasons.append("Liquidity depth unknown (missing, not zero)")
+    elif liquidity <= 0 or liquidity < settings.black_min_liquidity_usd:
         hard_reject = True
         # Proportional: 45 points at zero, ramping down toward the threshold
         liquidity_ratio = (
@@ -324,7 +333,12 @@ def assess_risk(
         risk_points += pts
         reasons.append(f"High top-holder concentration: {concentration:.2%}")
 
-    if pair_age < 10 and liquidity < settings.min_validated_liquidity_usd:
+    # PITFIX 2026-11-13: same missing-vs-zero rule for pair_age. A missing
+    # pair_age defaults to 0.0, which used to hard-reject with low liquidity.
+    # Skip the rule entirely when pair_age is missing.
+    if "pair_age_minutes" in defaulted:
+        pass
+    elif pair_age < 10 and liquidity < settings.min_validated_liquidity_usd:
         hard_reject = True
         # Proportional: 25 points at age=0, decreasing to 0 at age=10
         age_ratio = pair_age / 10.0
@@ -360,6 +374,22 @@ def assess_risk(
         risk_points += pts
         reasons.append(f"Extreme short-window volatility: {volatility:.2f}")
 
+    # PITFIX 2026-11-13: insufficient evidence cannot be GREEN. A token with
+    # many rule inputs missing was previously scored GREEN (10 pts from the
+    # unknown-liquidity penalty alone) once the missing-liquidity hard-reject
+    # was removed. Add a continuous missingness penalty instead of a hard
+    # floor (a floor would spike 59% of tokens at exactly 25.0): +2 pts per
+    # missing rule input, capped at 20, so unknown reads as riskier in
+    # proportion to how much is unknown, without creating a new degenerate
+    # value. Explicit evidence still drives the band above this.
+    if defaulted:
+        missing_penalty = min(20.0, len(defaulted) * 2.0)
+        risk_points += missing_penalty
+        reasons.append(
+            "Insufficient evidence: "
+            f"{len(defaulted)} rule inputs missing"
+            f" (+{missing_penalty:.0f} risk points)"
+        )
     score = max(0.0, min(100.0, risk_points))
     if hard_reject:
         # Hard reject forces BLACK band. The score is floored at 40.0 so
