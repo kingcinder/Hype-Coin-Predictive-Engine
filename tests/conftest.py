@@ -70,6 +70,34 @@ def _isolate_watchdog_inflight() -> Generator[None, None, None]:
     _reset()
 
 
+# Session-level env isolation for Settings independence.
+# This runs once at session start and once at session end,
+# ensuring the entire test suite runs with a clean env
+# regardless of the developer's local .env file.
+pytest_plugins = []  # noqa: F811 - allow conftest reloading
+
+
+# Note: this is separate from the function-level _isolate_database_url_env
+# which runs before/after each individual test.
+@pytest.fixture(scope="session", autouse=True)
+def _session_isolate_database_url_env() -> Generator[None, None, None]:
+    """Session-level isolation of DB-override env vars.
+
+    Ensures the entire test suite runs with SERPENT_DB_PATH and DATABASE_URL
+    unset, so no test can silently pass or fail based on a developer's
+    local .env file. The function-level _isolate_database_url_env below
+    provides per-test isolation in addition to this session-level guard.
+    """
+    saved = {
+        name: os.environ.get(name)
+        for name in ("SERPENT_DB_PATH", "DATABASE_URL")
+        if name in os.environ
+    }
+    for name in saved:
+        os.environ.pop(name, None)
+    yield
+    for name, value in saved.items():
+        os.environ[name] = value
 # NOTE: pytest loads this file both as ``conftest`` (its own import) and as
 # ``tests.conftest`` (when a test imports TrackingScope) — two module objects,
 # which is harmless ONLY while this module has no import-time side effects.

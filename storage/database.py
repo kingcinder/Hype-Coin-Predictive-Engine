@@ -162,9 +162,24 @@ def session_scope() -> Generator[Session, None, None]:
     ``TypeError: '_GeneratorContextManager' object is not an iterator``).
     Non-FastAPI code that wants ``with`` syntax must use this dedicated
     context manager instead of wrapping ``get_session``.
+
+    Lightweight runtime guard: logs a warning if the session (and hence
+    any in-progress SQLite write transaction) is held open beyond
+    ``SESSION_SCOPE_BUDGET_SECONDS``. This catches future regressions where
+    a phase holds the write lock across network I/O or heavy per-item work.
     """
+    import time as _time
+    budget_seconds = getattr(get_settings(), "SESSION_SCOPE_BUDGET_SECONDS", 10.0)
+    started = _time.monotonic()
     with SessionLocal() as session:
         yield session
+    elapsed = _time.monotonic() - started
+    if elapsed > budget_seconds:
+        log.warning(
+            "session_scope held write lock for %.1fs (budget %.1fs)",
+            elapsed,
+            budget_seconds,
+        )
 
 
 def get_session() -> Generator[Session, None, None]:

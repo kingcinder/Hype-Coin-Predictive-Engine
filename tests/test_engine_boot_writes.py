@@ -192,15 +192,29 @@ def _can_take_write_lock(db_path: Path, timeout: float = 1.0) -> bool:
 def _wait_for_phase_cycle(db_path: Path, log_path: Path) -> float:
     """Watch one phase cycle; return the longest continuous lock hold (seconds).
 
+    The budget clock starts after scan completion (``engine_scan_complete``),
+    not from the first health row. This prevents a slow scan on a loaded runner
+    from eating the phase window and turning the test red by timing alone.
+
     Polls an independent writer while the engine runs its post-scan phases, which
     finishes when the data-lake pass logs ``engine_data_lake_complete``. Every
     failed attempt is a moment the engine (or its write queue) held the write lock,
     so consecutive failures measure how long one transaction stayed open.
     """
-    deadline = time.monotonic() + PHASE_CYCLE_TIMEOUT_SECONDS
+    # First, wait for scan completion so the budget starts from a known point
+    log_text = log_path.read_text(errors="replace")
+    if "engine_scan_complete" not in log_text:
+        # Wait for scan to complete
+        deadline = time.monotonic() + PHASE_CYCLE_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if "engine_scan_complete" in log_path.read_text(errors="replace"):
+                break
+            time.sleep(0.25)
+    # Now measure lock holds from scan completion onward
     longest = 0.0
     blocked_since: float | None = None
-    while time.monotonic() < deadline:
+    cycle_deadline = time.monotonic() + PHASE_CYCLE_TIMEOUT_SECONDS
+    while time.monotonic() < cycle_deadline:
         if "engine_data_lake_complete" in log_path.read_text(errors="replace"):
             break
         now = time.monotonic()
