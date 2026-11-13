@@ -493,7 +493,11 @@ def search_assets(
         .order_by(models.Asset.symbol, models.Chain.slug)
         .limit(limit)
     ).all()
-    results = [
+    # Annotated because the row unpacking's inferred value types differ between
+    # SQLAlchemy minors (2.1 types the joined column instead of Any), and the
+    # narrower `dict[str, int | str | None]` cannot satisfy the declared return
+    # of `list[dict[str, object]]` under list invariance.
+    results: list[dict[str, object]] = [
         {
             "asset_id": asset.id,
             "chain": chain,
