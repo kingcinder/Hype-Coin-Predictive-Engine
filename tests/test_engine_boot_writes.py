@@ -160,6 +160,38 @@ def _wait_for_phase_cycle(db_path: Path, log_path: Path) -> float:
     return longest
 
 
+def _markers(log_text: str) -> str:
+    """Compact list of the engine lifecycle events seen, for failure reports."""
+    interesting = (
+        "engine_bootstrapped",
+        "engine_scan_complete",
+        "engine_scan_failed",
+        "engine_forecast_training_complete",
+        "engine_nightcrawler_complete",
+        "engine_data_lake_complete",
+        "engine_phase_skipped_still_wedged",
+        "engine_nightcrawler_failed",
+        "engine_data_lake_failed",
+        "write_queue_task_failed",
+        "write_queue_heartbeat_failed",
+        "nightcrawler_start",
+    )
+    seen = [name for name in interesting if name in log_text]
+    return f"events={seen}; nightcrawler_starts={log_text.count('nightcrawler_start')}"
+
+
+def _fail(message: str, log_path: Path) -> None:
+    """Fail with a GitHub annotation: the job log is unreadable from the API.
+
+    The annotation carries a compact reason (engine exit state and lifecycle
+    events) instead of a multi-megabyte log tail, so a CI-only failure is
+    diagnosable from the check-run without repository admin rights.
+    """
+    detail = _markers(log_path.read_text(errors="replace"))
+    print(f"::error title=boot-writes-regression::{message} | {detail}", flush=True)
+    raise AssertionError(f"{message}\n{detail}")
+
+
 def _terminate_group(proc: subprocess.Popen[bytes]) -> None:
     """Stop the engine and its Streamlit child (its own session/process group)."""
     if proc.poll() is None:
@@ -223,18 +255,13 @@ def test_engine_keeps_writing_after_boot(tmp_path: Path) -> None:
                     break
                 time.sleep(1.0)
 
-            log_tail = engine_log.read_text(errors="replace")[-4000:]
-            assert rows > 0, (
-                "the engine wrote no system_health rows after boot: writes are "
-                "still wedged behind an open scan transaction.\n"
-                f"rows={rows} lock_free={lock_free}\n"
-                f"log tail:\n{log_tail}"
-            )
-            assert lock_free, (
-                "an independent connection could not take the write lock while the "
-                "engine ran: a scan transaction is still held open.\n"
-                f"rows={rows}\nlog tail:\n{log_tail}"
-            )
+            if rows <= 0 or not lock_free:
+                _fail(
+                    "no writes landed after boot (rows="
+                    f"{rows}, lock_free={lock_free}) - a transaction is still held "
+                    f"open; engine_poll={proc.poll()}",
+                    engine_log,
+                )
             assert db_path.stat().st_mtime >= started_at - 1, (
                 "the database was never written during this run"
             )
@@ -245,32 +272,36 @@ def test_engine_keeps_writing_after_boot(tmp_path: Path) -> None:
             # stay open until the phase returned.
             longest_hold = _wait_for_phase_cycle(db_path, engine_log)
             phase_log = engine_log.read_text(errors="replace")
-            tail = phase_log[-6000:]
 
-            assert "engine_data_lake_complete" in phase_log, (
-                "the post-scan phase cycle never reached the data-lake pass within "
-                f"{PHASE_CYCLE_TIMEOUT_SECONDS:.0f}s, so no full cycle was observed.\n"
-                f"log tail:\n{tail}"
-            )
-            assert "engine_nightcrawler_complete" in phase_log, (
-                "the nightcrawler phase did not complete, so the per-source commit "
-                f"path was not exercised.\nlog tail:\n{tail}"
-            )
-            assert "write_queue_task_failed" not in phase_log, (
-                "the write queue lost work during the phase cycle: a phase is still "
-                "holding SQLite's write lock long enough to time out an insert.\n"
-                f"longest observed hold={longest_hold:.1f}s\nlog tail:\n{tail}"
-            )
-            assert "write_queue_heartbeat_failed" not in phase_log, (
-                "the write-queue heartbeat could not write during the phase cycle, "
-                "which means the lock was held across it.\n"
-                f"longest observed hold={longest_hold:.1f}s\nlog tail:\n{tail}"
-            )
-            assert longest_hold < MAX_PHASE_LOCK_HOLD_SECONDS, (
-                f"a phase held the write lock for {longest_hold:.1f}s "
-                f"(budget {MAX_PHASE_LOCK_HOLD_SECONDS:.0f}s): commit per source in "
-                "the crawl and per batch in the data-lake pass.\n"
-                f"log tail:\n{tail}"
-            )
+            if "engine_data_lake_complete" not in phase_log:
+                _fail(
+                    "the post-scan phase cycle never reached the data-lake pass "
+                    f"within {PHASE_CYCLE_TIMEOUT_SECONDS:.0f}s; engine_poll={proc.poll()}",
+                    engine_log,
+                )
+            if "engine_nightcrawler_complete" not in phase_log:
+                _fail(
+                    "the nightcrawler phase did not complete, so the per-source "
+                    "commit path was not exercised",
+                    engine_log,
+                )
+            if "write_queue_task_failed" in phase_log:
+                _fail(
+                    "the write queue lost work during the phase cycle; longest "
+                    f"observed hold={longest_hold:.1f}s",
+                    engine_log,
+                )
+            if "write_queue_heartbeat_failed" in phase_log:
+                _fail(
+                    "the write-queue heartbeat could not write during the phase "
+                    f"cycle; longest observed hold={longest_hold:.1f}s",
+                    engine_log,
+                )
+            if longest_hold >= MAX_PHASE_LOCK_HOLD_SECONDS:
+                _fail(
+                    f"a phase held the write lock for {longest_hold:.1f}s "
+                    f"(budget {MAX_PHASE_LOCK_HOLD_SECONDS:.0f}s)",
+                    engine_log,
+                )
         finally:
             _terminate_group(proc)
