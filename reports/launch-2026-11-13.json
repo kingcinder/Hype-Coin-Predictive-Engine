@@ -1,0 +1,42 @@
+{
+  "status": "online",
+  "exit_code": 0,
+  "checkout": "/media/cody/Data/DOCUMENTS_PROJECT_FILES/Hype-Coin-Predictive-Engine-main",
+  "head": "f44ddbd",
+  "python": "Python 3.12.3",
+  "db_backup": "/home/cody/serpent-backups/serpent-20261113-025801.db (52858880 bytes, sha256 e795936896a339542d9411ce27212cbd1fc916fb6e13b482eef3a6434c3c6e8a)",
+  "gate": "pass",
+  "health": {
+    "authenticated_status": 200,
+    "body": "condensed from the live /health body: {\"status\":\"ok\",\"database\":\"ok\",\"components\":\"29 entries; ok: archive, catalyst_timetable, data_lake, disk, fingerprint, fingerprint_learn, fixture_seed, forecast_calibration, forecast_drift, forecast_labels, forecast_labels_bootstrap, lifecycle, narrative_clusters, nightcrawler:coingecko, nightcrawler:coinpaprika, nightcrawler:defillama, nightcrawler:dexscreener_trends; yellow: forecast (train/test split too small; model not trained), lake (last retention pass 415.3h ago), lake_backlog (backlog=1036), lake_stale_warning (stale lake warning: 17 cycles), lp_removal_watcher (0 new removal events), nightcrawler:coinmarketcap, nightcrawler:explorer, nightcrawler:farcaster, risk_confidence_calibration (fallback active: fallback_insufficient_time_split)\"}",
+    "unauthenticated_status": 401
+  },
+  "gui_status": 200,
+  "engine_pid": 860738,
+  "log_tracebacks": 0,
+  "log_lock_errors": 1,
+  "github_ci_main": "Archive and parity@f44ddbd=failure (2026-11-10, 2026-11-11, 2026-11-12); Coverage history@403740e=success",
+  "optional_phases_run": [],
+  "failures": [
+    "Acceptance criterion 'zero lock errors in the log' not met: one write_queue_task_failed warning at boot -- (sqlite3.OperationalError) database is locked on INSERT INTO system_health for source:dexscreener_profiles (earlier runs also failed source:dexscreener_pairs), after the 30s sqlite_busy_timeout_ms expired. Reads and other writes continue; no traceback. Reproduced on every boot (1-2 warnings); not fixed here because it is a behavior change.",
+    "SIGINT does not stop the engine on this revision: engine_shutdown_signal is logged, then system_health inserts keep failing with 'database is locked' and the process stays up past 60s (reproduced twice). Required SIGKILL to stop. This also makes the documented stop command insufficient.",
+    "Gate requires no root .env: tests/test_api_auth_webhooks.py::test_api_fail_closed_when_token_unset expects 403 when ENGINE_API_TOKEN is unset, but common/config.py reads env_file='.env' from the checkout root and the local .env supplies a real token (401). The gate was therefore run with .env temporarily moved aside and restored unchanged (sha256 verified); this matches the clean-clone state recorded in STATE.md.",
+    "Port 8000 was already bound at session start by a host-network MobSF container (opensecurity/mobile-security-framework-mobsf). Stopped with explicit user approval so the shipped API port could bind; left stopped (docker start mobsf restores it).",
+    "GitHub Actions on origin/main is already red before this task: 'Archive and parity' failed on f44ddbd for three consecutive schedule runs."
+  ],
+  "limitations_acknowledged": true,
+  "how_to_stop": "kill -INT $(cat ~/serpent-logs/engine.pid) is documented but does not complete on f44ddbd; use kill -KILL $(cat ~/serpent-logs/engine.pid) until the shutdown wedge is fixed",
+  "how_to_start": "cd /media/cody/Data/DOCUMENTS_PROJECT_FILES/Hype-Coin-Predictive-Engine-main && .venv/bin/python -m engine",
+  "environment_repairs": [
+    "The checkout's .venv had been created at /home/cody/Documents/Hype-Coin-Predictive-Engine-main and the folder was later moved, leaving every Python console script (mypy, pytest, streamlit) with a dead shebang. Moved aside to /home/cody/serpent-backups/.venv.old-1794567534 (never deleted) and rebuilt with python3 -m venv on 3.12.3.",
+    "The fresh, unpinned 'pip install -e .[dev]' resolved newer majors than the repository's own lock (mypy 2.4.1, duckdb 2.0.0, web3 8.0.0, fastapi 0.162.5, starlette 1.10.0, pandas 3.1.1); mypy 2.4.1 then failed api/main.py:508. Installed the shipped requirements-dev.txt lock instead (mypy 2.3.1, duckdb 1.5.5, web3 7.16.0, fastapi 0.141.1, starlette 1.6.0, pandas 3.0.5) and reinstalled the engine editable with --no-deps."
+  ],
+  "gate_detail": "ruff check pass; ruff format --check pass (278 files); mypy pass (164 files); check_broken_imports pass (257 files); check_declared_deps pass (29 roots / 257 files); pytest pass; coverage TOTAL 78% against fail_under=75.7",
+  "logs": {
+    "gate": "~/serpent-logs/gate.log",
+    "engine": "~/serpent-logs/engine.log",
+    "engine_run1_killed": "~/serpent-logs/engine-run1.log",
+    "engine_run2_killed": "~/serpent-logs/engine-run2.log",
+    "engine_pid_file": "~/serpent-logs/engine.pid"
+  }
+}

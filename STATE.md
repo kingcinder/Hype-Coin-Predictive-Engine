@@ -580,6 +580,53 @@ in-flight work from other agents, still untouched.
   pass. The DB validation report is versioned at
   `reports/validation-2026-10-25-source-availability.json`.
 
+### 2026-11-13 — Operational bring-up on codypc (engine online; shutdown wedge found)
+
+- Fast-forwarded `main` from `40a3f00` to `origin/main` `f44ddbd` (24 commits
+  behind, 0 ahead); no divergence and no history rewrite.
+- Two environment gaps repaired, both reported: the checkout's `.venv` had been
+  created at `~/Documents/Hype-Coin-Predictive-Engine-main` and the folder was
+  later moved, so the `mypy`/`pytest`/`streamlit` console scripts had dead
+  shebangs — moved aside to `~/serpent-backups/.venv.old-1794567534` (not
+  deleted) and rebuilt on 3.12.3; and an unpinned `pip install -e ".[dev]"`
+  resolved newer majors than the shipped lock (mypy 2.4.1 then failed
+  `api/main.py:508`), so `requirements-dev.txt` was installed instead
+  (mypy 2.3.1, duckdb 1.5.5, web3 7.16.0, fastapi 0.141.1, starlette 1.6.0).
+- `make gate` passed after both repairs: Ruff and formatting, mypy (164 files),
+  broken-import scan (257 files), declared-deps scan (29 roots / 257 files),
+  pytest, coverage 78% against the unchanged 75.7 floor. The gate only passes
+  without a root `.env`: `test_api_fail_closed_when_token_unset` expects 403,
+  but `common/config.py` reads `env_file=".env"` and the local token turns that
+  into 401. The gate ran with `.env` briefly aside and restored byte-identical
+  (sha256 verified), matching the clean-clone state recorded 2026-10-25.
+- `serpent.db` was backed up before any run through the SQLite backup API
+  (`~/serpent-backups/serpent-20261113-025801.db`, sha256 `e7959368…`); the
+  engine then applied its pending migrations and wrote normally.
+- Engine online on loopback only (`127.0.0.1:8000`, `127.0.0.1:8501`):
+  authenticated `/health` 200 with `database: ok`, unauthenticated 401, GUI 200,
+  alive through the stability window, zero tracebacks. Forecast, lake,
+  `lp_removal_watcher` and confidence calibration report `yellow` exactly as the
+  known limitations describe.
+- Two acceptance criteria are **not** met on this revision, both reproduced:
+  1. Boot logs one or two `write_queue_task_failed` warnings —
+     `(sqlite3.OperationalError) database is locked` on `INSERT INTO
+     system_health` for the DexScreener sources after `sqlite_busy_timeout_ms`
+     (30s). Reads and later writes continue; the filesystem is native ext4, so
+     this is in-process write contention, not a mount limitation.
+  2. SIGINT logs `engine_shutdown_signal` and then hangs: further
+     `system_health` inserts keep failing and the process must be SIGKILLed
+     (60s+ observed twice). The documented `kill -INT` stop command is
+     therefore insufficient until the wedge is fixed.
+  Both are behavior changes and were deliberately left unfixed in this
+  operational task; details are in `reports/launch-2026-11-13.json`.
+- Port 8000 was held at session start by a host-network MobSF container
+  (`opensecurity/mobile-security-framework-mobsf`). It was stopped with explicit
+  user approval to let the shipped API port bind and left stopped;
+  `docker start mobsf` restores it.
+- GitHub Actions on `origin/main` was already red before this task: the
+  "Archive and parity" workflow failed on `f44ddbd` for the 2026-11-10, 11-11 and
+  11-12 scheduled runs.
+
 ## Branch ledger merged in during reconciliation (2026-11-07)
 
 The `fix/functional-pass` branch carried its own short STATE.md tracking the reviewed fix list. Its one unique record, preserved verbatim:
