@@ -589,9 +589,13 @@ in-flight work from other agents, still untouched.
   later moved, so the `mypy`/`pytest`/`streamlit` console scripts had dead
   shebangs — moved aside to `~/serpent-backups/.venv.old-1794567534` (not
   deleted) and rebuilt on 3.12.3; and an unpinned `pip install -e ".[dev]"`
-  resolved newer majors than the shipped lock (mypy 2.4.1 then failed
-  `api/main.py:508`), so `requirements-dev.txt` was installed instead
-  (mypy 2.3.1, duckdb 1.5.5, web3 7.16.0, fastapi 0.141.1, starlette 1.6.0).
+  resolved newer majors than the shipped lock — SQLAlchemy 2.1.8 instead of the
+  locked 2.0.52 — which makes `mypy api/main.py:508` fail. Isolated later: mypy
+  2.4.1 with SQLAlchemy 2.0.52 is clean, and SQLAlchemy 2.1.8 alone reproduces
+  the error, so the trigger is the dependency, not the type checker. The shipped
+  `requirements-dev.txt` was installed instead (mypy 2.3.1, SQLAlchemy 2.0.52,
+  duckdb 1.5.5, web3 7.16.0, fastapi 0.141.1, starlette 1.6.0), then the engine
+  editable with `--no-deps`.
 - `make gate` passed after both repairs: Ruff and formatting, mypy (164 files),
   broken-import scan (257 files), declared-deps scan (29 roots / 257 files),
   pytest, coverage 78% against the unchanged 75.7 floor. The gate only passes
