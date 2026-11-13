@@ -7,7 +7,8 @@ optional extra, a transitive install (``fastapi`` -> ``pydantic``,
 ``uvicorn[standard]`` -> ``websockets``), or ``KNOWN_VENV_ABSENT``. But that
 audit was a one-off hand check: a package pulled in manually
 (``pip install foo``) or transitively would silently drift back in, resolve
-on a developer machine, and only break a fresh ``pip install -e ".[dev]"``
+on a developer machine, and only break a fresh dev install
+(``scripts/install_dev_deps.sh``)
 later (in the Tests job, or worse, production). This script automates the
 audit so the drift is impossible to re-introduce silently.
 

@@ -992,3 +992,31 @@ the new ingestion timestamp fix does not rewrite that history.
 - **Verified:** `tests/test_start_engine_launcher.py` passes; the guard exits 1 for
   both `python -m engine` argv shapes and for a held port; the backup path writes
   `serpent-<ts>.db`, prints its sha256 and preserves the rows.
+
+### 2026-11-13 — Dev/test installs are pinned to the verified lock (done)
+
+- **Cause:** every CI job installed `pip install -e ".[dev]"`, which resolves the
+  `pyproject.toml` floors. A SQLAlchemy 2.1 release therefore arrived unannounced,
+  changed ORM typing, and turned the type-check job red. `requirements-dev.txt`
+  already pinned the verified set (SQLAlchemy 2.0.52, mypy 2.3.1), but nothing
+  installed from it.
+- **One install path:** `scripts/install_dev_deps.sh` installs the lock with `-r`,
+  then the project editable with `--no-deps`, then runs `pip check`. CI (all four
+  install steps), `make setup`, `packaging/install-local.sh`, `scripts/dev.sh`
+  (`install`/`update-dev`/smoke clone) and `start-engine.sh` all use it; there is no
+  remaining bare `-e ".[dev]"` install in the tree. The lock header now says the file
+  is authoritative and must only be regenerated from a clean venv that already holds
+  these versions — never from a venv resolved from the floors.
+- **Floor bound:** `pyproject.toml` declares `sqlalchemy>=2.0,<2.1`, so even a
+  non-lock install (`pip install .`, the systemd installer) cannot pick 2.1. Raise it
+  deliberately, together with the lock, once the code is clean against 3.x/2.1.
+- **Gap the switch exposed:** the lock was missing `defusedxml`, a declared
+  dependency — invisible while CI resolved from pyproject, fatal once it did not.
+  It is now pinned (`defusedxml==0.7.1`) and the installer's `pip check` fails the
+  install when a declared dependency is absent, so an incomplete lock cannot pass
+  silently.
+- **Verified in a brand-new venv:** `bash scripts/install_dev_deps.sh /tmp/lockvenv/bin/pip`
+  installed SQLAlchemy 2.0.52 / mypy 2.3.1 / pytest 9.1.1 / ruff 0.16.4,
+  `pip check` reported no broken requirements, and mypy was clean over the 164
+  configured files. `make setup` in the repo venv produced the same versions with
+  `pip check` clean, and `sqlalchemy>=2.0,<2.1` resolves to 2.0.57 (not 2.1).

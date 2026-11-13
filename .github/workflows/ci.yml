@@ -52,7 +52,9 @@ jobs:
             pyproject.toml
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+        run: |
+          python -m venv .venv
+          bash scripts/install_dev_deps.sh .venv/bin/pip
       - name: Ruff format check
         run: .venv/bin/ruff format --check .
       - name: Ruff lint check
@@ -71,7 +73,7 @@ jobs:
       # ([project.dependencies] or an optional-dependencies group) or
       # registered in KNOWN_VENV_ABSENT — a manually- or transitively-
       # installed package can no longer drift silently into the tree, only to
-      # break a fresh `pip install -e ".[dev]"` in the Tests job later.
+      # break a fresh dev install (`scripts/install_dev_deps.sh`) later.
       - name: Dependency-declaration scan
         run: .venv/bin/python scripts/check_declared_deps.py
 
@@ -88,7 +90,10 @@ jobs:
             pyproject.toml
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
+        # The pinned lock (requirements-dev.txt) is authoritative for the
+        # dev/test path; the pyproject floors alone once resolved SQLAlchemy
+        # 2.1 and failed the type check.
+        run: bash scripts/install_dev_deps.sh
       - name: Run mypy
         run: make -s typecheck
 
@@ -105,7 +110,10 @@ jobs:
             pyproject.toml
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
+        # The pinned lock (requirements-dev.txt) is authoritative for the
+        # dev/test path; the pyproject floors alone once resolved SQLAlchemy
+        # 2.1 and failed the type check.
+        run: bash scripts/install_dev_deps.sh
       - name: Run pytest with coverage
         run: |
           # pipefail so a failing pytest is never masked by the tee.
@@ -151,7 +159,9 @@ jobs:
             pyproject.toml
             requirements-dev.txt
       - name: Install dependencies
-        run: python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+        run: |
+          python -m venv .venv
+          bash scripts/install_dev_deps.sh .venv/bin/pip
       - name: Bootstrap + seed throwaway DB
         env:
           ENV: local-single

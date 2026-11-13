@@ -36,8 +36,7 @@ else
     echo "  ℹ️  Virtual environment already exists"
 fi
 echo "  Installing/updating dependencies (this may take a few minutes)..."
-"$PROJECT_DIR/.venv/bin/pip" install --upgrade pip -q 2>/dev/null || true
-"$PROJECT_DIR/.venv/bin/pip" install -e "${PROJECT_DIR}[dev]" -q
+bash "$PROJECT_DIR/scripts/install_dev_deps.sh" "$PROJECT_DIR/.venv/bin/pip"
 echo "  ✅ Dependencies installed"
 
 # ── Step 2: database bootstrap ──────────────────────────────────────────────

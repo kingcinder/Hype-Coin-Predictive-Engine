@@ -356,8 +356,9 @@ suites parametrize guard-the-guard tests over it, so a new member is covered
 automatically and a dead one fails loudly.
 
 ```bash
-# Install dev dependencies (pinned dev lock included)
-python -m pip install -e ".[dev]"
+# Install dev dependencies from the pinned lock (requirements-dev.txt) —
+# this is the path CI and `make setup` use
+bash scripts/install_dev_deps.sh
 
 # Run engine (all-in-one)
 python -m engine

@@ -72,13 +72,14 @@ bash packaging/install-local.sh
 
 The installer does three things:
 
-1. Creates the project virtualenv (`.venv`) and installs the package with
-   its declared dependencies: `pip install -e ".[dev]"`. This installs
-   **every** dependency declared in `pyproject.toml`
-   (`[project.dependencies]`), including ones a partial manual install can
-   miss — e.g. `defusedxml>=0.7.1`. Do not hand-pick a subset of packages;
-   an incomplete venv fails later in confusing ways (test collection and
-   some import paths need the full declared set).
+1. Creates the project virtualenv (`.venv`) and installs the package via
+   `scripts/install_dev_deps.sh`: the pinned lock `requirements-dev.txt`
+   first, then this project editable with `--no-deps`. The lock is
+   authoritative, so pip never re-resolves the `pyproject.toml` floors —
+   that is how SQLAlchemy 2.1 once arrived and failed the mypy gate. It
+   still installs **every** dependency the project needs, including ones a
+   partial manual install can miss (e.g. `defusedxml`); do not hand-pick a
+   subset of packages.
 2. Bootstraps the SQLite database via `scripts/bootstrap_local.py`
    (skipped automatically if `serpent.db` already exists).
 3. Installs a **Serpent Circle Engine** desktop shortcut that starts the
@@ -89,8 +90,7 @@ reproduce it by hand:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e ".[dev]"
+bash scripts/install_dev_deps.sh .venv/bin/pip
 .venv/bin/python scripts/bootstrap_local.py
 ```
 
@@ -194,7 +194,7 @@ Tell the user, in this shape:
 
 - Which install path was used (desktop / system), and the checkout path.
 - Python version and that `.venv` was created from the declared
-  dependencies (`pip install -e ".[dev]"`).
+  dependencies from the pinned lock (`scripts/install_dev_deps.sh`).
 - Whether the database was bootstrapped fresh or already existed.
 - The exact `/health` result (HTTP status + response body) and the
   dashboard check result — not just "it works."

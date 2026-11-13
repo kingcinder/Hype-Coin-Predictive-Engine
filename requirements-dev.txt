@@ -1,8 +1,14 @@
-# Serpent Circle dev-dependency lock — recreate from the active venv with:
-#   .venv/bin/pip freeze | grep -v '^-e ' > requirements-dev.txt
-# The engine itself is installed editable (pip install -e '.[dev]') and is
-# excluded below.  The lock is used as the CI pip-cache key and to verify the
-# dependency set pins reproducibly.
+# Serpent Circle dev-dependency lock. This file is authoritative for the
+# dev/test install path (scripts/install_dev_deps.sh: `-r` this file, then
+# `pip install -e . --no-deps`), so a new upstream release cannot change what
+# the gate runs against. Recreate it only from a clean venv that already has
+# these versions:
+#   python3 -m venv /tmp/lock-venv
+#   /tmp/lock-venv/bin/pip install -r requirements-dev.txt
+#   /tmp/lock-venv/bin/pip freeze | grep -v '^-e ' > requirements-dev.txt
+# Never regenerate it with `pip freeze` from a venv whose deps were resolved
+# from the pyproject floors. The engine itself is installed editable and is
+# excluded below; the lock is also the CI pip-cache key.
 
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
@@ -30,6 +36,7 @@ coverage==7.15.4
 croniter==6.2.4
 cryptography==50.0.0
 cytoolz==1.1.0
+defusedxml==0.7.1
 distlib==0.4.3
 duckdb==1.5.5
 eth-account==0.14.0

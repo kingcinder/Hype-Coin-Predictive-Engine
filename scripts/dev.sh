@@ -112,9 +112,8 @@ cmd_install() {
 }
 
 cmd_install_dev() {
-    echo "Installing project with dev dependencies..."
-    python -m pip install --upgrade pip
-    python -m pip install -e ".[dev]"
+    echo "Installing project with dev dependencies (pinned lock)..."
+    bash "$ROOT/scripts/install_dev_deps.sh"
     echo "✓ Project installed with dev dependencies"
 }
 
@@ -135,9 +134,8 @@ cmd_update() {
 }
 
 cmd_update_dev() {
-    echo "Updating dev dependencies..."
-    python -m pip install --upgrade pip
-    python -m pip install --upgrade -e ".[dev]"
+    echo "Updating dev dependencies (pinned lock)..."
+    bash "$ROOT/scripts/install_dev_deps.sh"
     echo "✓ Dev dependencies updated"
 }
 
@@ -241,7 +239,7 @@ cmd_smoke() {
     (
         cd "$clone"
         python3.12 -m venv .venv
-        .venv/bin/pip install -q -e ".[dev]"
+        bash scripts/install_dev_deps.sh .venv/bin/pip >/dev/null
         ENV=local-single SERPENT_DB_PATH="$clone/serpent.db" \
             .venv/bin/python scripts/seed_fixtures.py
         ENV=local-single SERPENT_DB_PATH="$clone/serpent.db" \

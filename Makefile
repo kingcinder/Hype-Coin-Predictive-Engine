@@ -5,9 +5,11 @@
 # Single source of truth for mypy coverage: `make lint` and CI both use it.
 MYPY_PACKAGES = api backtest catalyst common crawlers data_lake engine features fingerprint forecast ingestion llm mempool narrative ops pump_physics radar risk_engine scoring storage ui validation
 
+# Dev/test install: the pinned lock first, then this project editable with
+# --no-deps, so pip never re-resolves the pyproject floors (which is how
+# SQLAlchemy 2.1 slipped in and broke `make typecheck`).
 setup:
-	python -m pip install --upgrade pip
-	python -m pip install -e ".[dev]"
+	bash scripts/install_dev_deps.sh
 
 # Wire this checkout for desktop use (venv + DB bootstrap + desktop shortcut),
 # no root required. See packaging/install-local.sh.
