@@ -15,8 +15,9 @@ import pytest
 from fastapi.testclient import TestClient
 from fastapi.websockets import WebSocketDisconnect
 
+import api.main as api_main
 from api.main import app
-from common.config import get_settings
+from common.config import Settings, get_settings
 from data_lake import webhooks as webhook_mod
 from data_lake.webhooks import (
     WebhookURLError,
@@ -88,9 +89,19 @@ def test_api_rejects_on_mutating_endpoints_without_token() -> None:
 
 
 def test_api_fail_closed_when_token_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ENGINE_API_TOKEN and no bypass -> 403 on every request, even valid ones."""
+    """No ENGINE_API_TOKEN and no bypass -> 403 on every request, even valid ones.
+
+    ``Settings`` reads ``env_file=".env"``, so in a checkout with a provisioned
+    token (the normal local setup, and what ``engine`` first-run provisioning
+    writes) unsetting the variable alone still answered 401 — the test was
+    measuring the repo tree instead of the deployment it describes. Build the
+    settings with the file source disabled so this asserts the intended state.
+    """
     monkeypatch.delenv("ENGINE_API_TOKEN", raising=False)
     monkeypatch.delenv("ENGINE_API_AUTH_BYPASS", raising=False)
+    # The API resolves settings through this module-level name, so patching it
+    # here is what the request path actually consults.
+    monkeypatch.setattr(api_main, "get_settings", lambda: Settings(_env_file=None))
     get_settings.cache_clear()
     try:
         client = TestClient(app)

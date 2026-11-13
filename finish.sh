@@ -2,7 +2,8 @@
 # Serpent Circle Hype-Coin engine bring-up.
 # Prompt: HYPE_COIN_FINISH_AND_LAUNCH.md, with the amendments from the run review:
 #   - install from requirements-dev.txt then `pip install -e . --no-deps`
-#   - run the gate with any root .env moved aside and restored with a checksum
+#   - run the gate against the checkout as-is (the auth test isolates itself from
+#     the root .env, so no aside/restore dance is needed)
 #   - stop the engine with SIGKILL (SIGINT wedges on this revision)
 #   - lock-error criterion relaxed to "at most two boot warnings, no growth afterwards"
 #   - refuse to start if another container holds the shipped API/GUI ports
@@ -89,19 +90,17 @@ fi
   || die "declared dependencies not importable after install" 15
 echo "SQLALCHEMY=$(.venv/bin/python -c 'import sqlalchemy; print(sqlalchemy.__version__)')"
 
-# ── S5: required gates, with the root .env set aside and restored ──────
-restore_env() { [ -f "$ROOT/.env.gate-aside" ] && mv -f "$ROOT/.env.gate-aside" "$ROOT/.env"; }
-trap restore_env EXIT INT TERM HUP
+# ── S5: required gates, run against the checkout as-is ────────────────
+# The gate used to need the root .env moved aside (the auth test read the
+# provisioned token out of env_file=".env" and answered 401 where it expected
+# 403). That test now isolates its Settings from the file, so the gate must pass
+# with a real .env in place — which is also what CI sees with no file at all.
 ENV_SHA_BEFORE="$(sha256sum .env 2>/dev/null | awk '{print $1}')"
-[ -f .env ] && mv .env .env.gate-aside
 export PATH="$ROOT/.venv/bin:$PATH"
 make VENV=.venv gate > "$LOG_DIR/gate.log" 2>&1
 GATE_STATUS=$?
-restore_env
-trap - EXIT INT TERM HUP
 ENV_SHA_AFTER="$(sha256sum .env 2>/dev/null | awk '{print $1}')"
-[ "$ENV_SHA_BEFORE" = "$ENV_SHA_AFTER" ] || die ".env was not restored byte-identical" 16
-echo "ENV_SHA_MATCH=yes"
+[ "$ENV_SHA_BEFORE" = "$ENV_SHA_AFTER" ] || die ".env changed while the gate ran" 16
 if [ "$GATE_STATUS" != 0 ]; then
   grep -E '^(PASS|FAIL):' "$LOG_DIR/gate.log" >&2 || true
   tail -25 "$LOG_DIR/gate.log" >&2 || true

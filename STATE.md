@@ -598,11 +598,11 @@ in-flight work from other agents, still untouched.
   editable with `--no-deps`.
 - `make gate` passed after both repairs: Ruff and formatting, mypy (164 files),
   broken-import scan (257 files), declared-deps scan (29 roots / 257 files),
-  pytest, coverage 78% against the unchanged 75.7 floor. The gate only passes
-  without a root `.env`: `test_api_fail_closed_when_token_unset` expects 403,
-  but `common/config.py` reads `env_file=".env"` and the local token turns that
-  into 401. The gate ran with `.env` briefly aside and restored byte-identical
-  (sha256 verified), matching the clean-clone state recorded 2026-10-25.
+  pytest, coverage 78% against the unchanged 75.7 floor. At the time the gate
+  only passed without a root `.env` and was run with the file briefly aside;
+  that workaround is gone — the auth test now isolates its own Settings from
+  `env_file=".env"` and the gate runs against the checkout as-is (see the
+  2026-11-13 entry on the `.env`-aside removal).
 - `serpent.db` was backed up before any run through the SQLite backup API
   (`~/serpent-backups/serpent-20261113-025801.db`, sha256 `e7959368…`); the
   engine then applied its pending migrations and wrote normally.
@@ -634,10 +634,10 @@ in-flight work from other agents, still untouched.
 ### 2026-11-13 — Full prompt run under the amended criteria (failed: write queue wedged)
 
 - Ran `finish.sh` (the prompt's procedure with the five review amendments: install
-  from `requirements-dev.txt` then `pip install -e . --no-deps`; gate with the root
-  `.env` set aside and a before/after checksum; SIGKILL as the stop command; the
-  relaxed "at most two boot lock warnings, no growth" criterion; a check that no
-  host-network container holds 8000/8501) end to end from a clean slate
+  from `requirements-dev.txt` then `pip install -e . --no-deps`; gate against the
+  checkout as-is; SIGKILL as the stop command; the relaxed "at most two boot lock
+  warnings, no growth" criterion; a check that no host-network container holds
+  8000/8501) end to end from a clean slate
   (`a2bda63`, no engine, no listeners).
 - Passed: fast-forward sync, backup `~/serpent-backups/serpent-20261113-071046.db`
   (sha256 `3fe3742…`), locked install (`SQLALCHEMY=2.0.52`, imports OK), `make gate`
@@ -927,3 +927,26 @@ the new ingestion timestamp fix does not rewrite that history.
 - The failure was only visible after `gh` was re-authenticated from the PAT already
   stored in `~/.git-credentials` (gh's own token was missing) — job logs then read
   fine and showed the engine events directly.
+
+### 2026-11-13 — The gate no longer needs the root .env moved aside (done)
+
+- **Cause:** `test_api_fail_closed_when_token_unset` unset the environment variable
+  and expected the fail-closed 403, but `common/config.py` builds
+  `Settings(env_file=".env")` and this checkout has a provisioned
+  `ENGINE_API_TOKEN` there (1 line; no `ENGINE_API_AUTH_BYPASS`), so the API still
+  saw a token and answered 401. The test was measuring the repo tree, not the
+  deployment it describes — and the runbook had grown an `.env`-aside/restore step
+  with a checksum to work around it.
+- **Fix:** the test now isolates its own settings — it patches the module-level
+  `get_settings` name that `api/main.py` resolves through with
+  `Settings(_env_file=None)`, so the file source is off while real environment
+  variables still apply. Proven both ways on this checkout with `.env` present:
+  the previous test body fails (`1 failed, 24 passed`), the fixed one passes
+  (`25 passed`).
+- **Full gate with `.env` in place:** exit 0 — ruff, format, mypy, both lint
+  scans, pytest, coverage 78.33% (floor 75.7). No aside, no restore.
+- **Workaround removed:** `finish.sh` now runs `make gate` against the checkout
+  as-is (it still checksums `.env` before/after to prove the run did not touch it),
+  and both STATE.md entries that described the aside/restore dance were rewritten.
+  The `.env.gate-aside` line came out of `.gitignore` too, since nothing creates
+  that file any more.
