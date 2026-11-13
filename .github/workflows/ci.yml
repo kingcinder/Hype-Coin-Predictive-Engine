@@ -107,7 +107,30 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e ".[dev]"
       - name: Run pytest with coverage
-        run: python -m pytest tests/ -x -q --cov=. --cov-report=term-missing --cov-report=xml
+        run: |
+          # pipefail so a failing pytest is never masked by the tee.
+          set -o pipefail
+          python -m pytest tests/ -x -q --cov=. --cov-report=term-missing --cov-report=xml \
+            2>&1 | tee /tmp/pytest.log
+      - name: Publish failing test output
+        # The job log needs repository admin rights to read through the API;
+        # the step summary is rendered on the run page, so a failure here is
+        # diagnosable without it. Includes the engine log the boot test writes.
+        if: failure()
+        run: |
+          {
+            echo '### pytest output (tail)'
+            echo '```'
+            tail -n 150 /tmp/pytest.log 2>/dev/null || echo '(no pytest log)'
+            echo '```'
+            for f in /tmp/pytest-of-runner/pytest-*/test_engine_keeps_writing*/engine.log; do
+              [ -f "$f" ] || continue
+              echo "### engine log: $f (tail)"
+              echo '```'
+              tail -n 120 "$f"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
