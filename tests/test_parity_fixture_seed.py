@@ -9,7 +9,7 @@ from common.config import Settings
 from common.time import ensure_utc
 from ops.archive import run_archive
 from ops.parity import require_compared, run_parity
-from scripts.seed_fixtures import seed_parity_window
+from scripts.seed_fixtures import diverge_parity_window, seed_parity_window
 from storage import models
 
 
@@ -58,3 +58,33 @@ def test_seeded_parity_window_archives_and_compares(session, tmp_path) -> None:
 def test_require_compared_rejects_a_vacuous_run() -> None:
     with pytest.raises(SystemExit):
         require_compared({"status": "ok", "mismatches": 0, "compared_assets": 0})
+
+
+def test_diverged_row_is_caught_by_the_parity_guard(session, tmp_path) -> None:
+    """A row the lake cannot reconstruct must make parity fail.
+
+    The seeded window proves the agreement path; this proves the guard: a single
+    SQL-only holder at the decision hour has no archived RPC evidence, so the SQL
+    holder series and the lake's reconstruction disagree and
+    ``--strict --require-compared`` must exit non-zero — on a real mismatch, not
+    on an empty comparison.
+    """
+    settings = _settings(tmp_path)
+    summary = seed_parity_window(session=session, settings=settings)
+    decision_ts = datetime.fromisoformat(str(summary["decision_ts"]))
+    run_archive(session, settings=settings)
+    session.commit()
+
+    clean = run_parity(session, decision_ts=decision_ts, settings=settings)
+    assert clean["mismatches"] == 0, clean
+
+    diverge = diverge_parity_window(session=session, settings=settings)
+    assert diverge["inserted"] is True
+
+    caught = run_parity(session, decision_ts=decision_ts, settings=settings)
+    # Not a vacuous failure: assets were compared, and one of them diverged.
+    assert caught["compared_assets"] > 0, caught
+    require_compared(caught)
+    assert caught["mismatches"] >= 1, caught
+    assert caught["status"] in ("red", "yellow"), caught
+    assert caught["examples"], caught

@@ -181,6 +181,13 @@ def _seed_in_session(session: Session) -> None:
     session.commit()
 
 
+# The archive/parity CI fixture's identity, shared by the window seeder and the
+# divergence probe that proves the parity guard fails on a real mismatch.
+_PARITY_ADDRESS = "TokenParity11111111111111111111111111111111"
+_PARITY_PAIR_ADDRESS = "PairParity1111111111111111111111111111111111"
+_PARITY_DIVERGED_WALLET = "wallet-diverged"
+
+
 def _pool_payload(
     *,
     pair_address: str,
@@ -285,8 +292,8 @@ def _seed_parity_in_session(session: Session, decision_ts: datetime) -> dict[str
     analysis_source = get_or_create_source(
         session, name="contract_analysis", source_type="chain_rpc", tier="chain", base_url=None
     )
-    address = "TokenParity11111111111111111111111111111111"
-    pair_address = "PairParity1111111111111111111111111111111111"
+    address = _PARITY_ADDRESS
+    pair_address = _PARITY_PAIR_ADDRESS
     created = decision_ts - timedelta(hours=6)
     asset = upsert_asset(
         session,
@@ -491,6 +498,65 @@ def _seed_parity_in_session(session: Session, decision_ts: datetime) -> dict[str
     }
 
 
+def diverge_parity_window(
+    *, session: Session | None = None, settings: Settings | None = None
+) -> dict[str, object]:
+    """Add one row the lake cannot account for, so parity must report a mismatch.
+
+    The seed above produces agreement, which only proves the happy path. CI runs
+    this after a clean parity pass and then requires ``ops.parity --strict
+    --require-compared`` to fail: a holder row written to SQL with no archived RPC
+    evidence behind it makes the SQL holder series disagree with the lake's
+    reconstruction, which is exactly the class of divergence parity exists to
+    catch.
+    """
+    from ops.parity import parity_decision_ts
+
+    settings = settings or get_settings()
+    decision_ts = parity_decision_ts(settings, utc_now())
+    if session is not None:
+        summary = _diverge_in_session(session, decision_ts)
+    else:
+        with session_scope() as active:
+            summary = _diverge_in_session(active, decision_ts)
+    summary["decision_ts"] = decision_ts.isoformat()
+    return summary
+
+
+def _diverge_in_session(session: Session, decision_ts: datetime) -> dict[str, object]:
+    asset = session.scalar(select(models.Asset).where(models.Asset.address == _PARITY_ADDRESS))
+    if asset is None:
+        raise SystemExit(f"no parity fixture asset ({_PARITY_ADDRESS}); run --parity-window first")
+    source = session.scalar(select(models.Source).where(models.Source.name == "solana_rpc"))
+    if source is None:
+        raise SystemExit("no solana_rpc source; run --parity-window first")
+    existing = session.scalar(
+        select(models.Holder.id).where(
+            models.Holder.asset_id == asset.id,
+            models.Holder.wallet_address == _PARITY_DIVERGED_WALLET,
+        )
+    )
+    if existing is None:
+        session.add(
+            models.Holder(
+                asset_id=asset.id,
+                wallet_address=_PARITY_DIVERGED_WALLET,
+                source_id=source.id,
+                ts=decision_ts,
+                observed_at=decision_ts,
+                balance=900.0,
+                pct_supply=0.09,
+            )
+        )
+    session.commit()
+    return {
+        "asset": asset.symbol,
+        "wallet": _PARITY_DIVERGED_WALLET,
+        "inserted": existing is None,
+        "note": "SQL-only holder at the decision hour: no archived RPC evidence behind it",
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Seed the Serpent Circle fixture data")
     parser.add_argument(
@@ -501,8 +567,18 @@ if __name__ == "__main__":
             "(the archive/parity CI fixture) instead of the demo fleet"
         ),
     )
+    parser.add_argument(
+        "--diverge-parity",
+        action="store_true",
+        help=(
+            "insert a SQL-only holder row at the parity decision hour, so the next "
+            "ops.parity run must report a mismatch (CI proves the guard fails)"
+        ),
+    )
     args = parser.parse_args()
-    if args.parity_window:
+    if args.diverge_parity:
+        print(json.dumps(diverge_parity_window(), indent=2, default=str))
+    elif args.parity_window:
         print(json.dumps(seed_parity_window(), indent=2, default=str))
     else:
         seed_fixture_data()

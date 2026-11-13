@@ -1078,3 +1078,24 @@ the new ingestion timestamp fix does not rewrite that history.
   `tests/test_label_bootstrap.py::test_dense_labels_commit_per_batch` (72-hour
   price grid, `commit_every=5` → commits inside the grid plus the per-asset
   commit). Existing phase, data-lake and signal-linking suites still pass.
+
+### 2026-11-13 — The archive/parity smoke also proves the guard catches a divergence (done)
+
+- **Gap:** the smoke seeded an agreeing fixture and required parity to pass, so it
+  proved only the agreement path. A `--strict --require-compared` that never fails
+  would have looked identical.
+- **Divergence probe:** `scripts/seed_fixtures.py --diverge-parity` inserts one
+  `Holder` row (`wallet-diverged`, balance 900) at the parity decision hour with no
+  archived RPC evidence behind it. The SQL holder series then disagrees with the
+  lake's reconstruction — the same mechanism `tests/test_parity.py::
+  _add_sql_only_holder` uses.
+- **Workflow:** after the clean parity step, the Docker job runs the probe and then
+  requires `ops.parity --once --strict --require-compared` to exit non-zero AND to
+  report `"mismatches": <n≥1>`. The second check matters: a decision-hour rollover
+  would also make parity fail, but vacuously, and that must not count as the guard
+  working.
+- **Tests:** `tests/test_parity_fixture_seed.py::
+  test_diverged_row_is_caught_by_the_parity_guard` seeds the window, archives
+  (clean run: 0 mismatches), diverges, and asserts the next run has
+  `compared_assets > 0`, `mismatches >= 1`, `status` red/yellow and populated
+  `examples` — a real caught mismatch, not an empty comparison.

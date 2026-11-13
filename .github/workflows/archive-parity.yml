@@ -85,6 +85,28 @@ jobs:
         # --strict fails on a mismatch; --require-compared fails when nothing
         # was compared at all (the vacuous pass this smoke used to allow).
         run: docker compose -f docker-compose.ci.yml run --rm worker python -m ops.parity --once --strict --require-compared
+      - name: Verify the parity guard fails on a deliberate divergence
+        # The run above only proves the agreement path. This writes one holder
+        # row with no archived evidence behind it and requires the same command
+        # to fail — and to fail on a real mismatch, not on an empty comparison
+        # (a decision-hour rollover would also fail, just for the wrong reason).
+        run: |
+          docker compose -f docker-compose.ci.yml run --rm \
+            -v ./scripts:/app/scripts:ro worker python scripts/seed_fixtures.py --diverge-parity
+          set +e
+          output=$(docker compose -f docker-compose.ci.yml run --rm worker \
+            python -m ops.parity --once --strict --require-compared 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::ops.parity passed on a deliberately diverged row: the guard does not catch a real mismatch"
+            exit 1
+          fi
+          if ! echo "$output" | grep -Eq '"mismatches": [1-9]'; then
+            echo "::error::ops.parity failed without recording a mismatch: the comparison was vacuous, not a caught divergence"
+            exit 1
+          fi
       - name: Show dependency logs on failure
         if: failure()
         run: docker compose -f docker-compose.ci.yml logs --no-color minio postgres migrate

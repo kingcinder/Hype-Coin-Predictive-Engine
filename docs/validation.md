@@ -353,7 +353,11 @@ there is a due partition and a non-empty lake — executes a live `ops.archive
 --once --require-partitions` smoke, and runs `ops.parity --once --strict
 --require-compared` against the S3 lake. The two guards matter: an empty lake
 used to report `status: ok` with `compared_assets: 0` and pass, which proved
-the wiring rather than the comparison.
+the wiring rather than the comparison. The job then proves the guard itself:
+`scripts/seed_fixtures.py --diverge-parity` writes one SQL-only holder row at the
+decision hour with no archived RPC evidence behind it, and the same parity command
+is required to exit non-zero **with** a non-zero `mismatches` count — so a caught
+divergence cannot be confused with a vacuous zero-comparison failure.
 The S3 backend must also be covered **without a live MinIO container** via
 moto (`tests/test_archive_s3.py`): `object_exists` (missing vs present),
 `list_objects` (prefix narrowing, parquet-only, missing prefix), `download_to`
