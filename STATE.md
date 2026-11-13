@@ -851,3 +851,34 @@ the new ingestion timestamp fix does not rewrite that history.
   token-gated everywhere it is referenced, install examples point at the
   canonical `Hype-Coin-Predictive-Engine` checkout name, and the stated
   Python requirement is 3.12+ per `pyproject.toml`.
+
+### 2026-11-13 — CI: the archive/parity gate died at image pull, and mypy drifted with SQLAlchemy (done)
+
+- **"Archive and parity" was never a test failure.** Run 43454039519 (and every run
+  back to 2026-11-10) failed in `docker-minio-parity` at the very first step,
+  "Pull dependency images (retried)": all five attempts failed. Moto S3 passed
+  every time. Cause: MinIO stopped publishing community images, so the pinned
+  `quay.io/minio/minio:RELEASE.2025-09-07…` and `quay.io/minio/mc:RELEASE.2025-08-13…`
+  no longer resolve. `docker manifest inspect` confirms both are gone
+  ("no such manifest"), and `minio/minio` on Docker Hub now answers
+  "authentication required". No `mc`, no server — the job could never start.
+- **Fix:** the MinIO server now comes from Bitnami's frozen public mirror
+  (`bitnamilegacy/minio`, the same `minio server` binary behind the same
+  `/minio/health/live` probe and the same `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`
+  contract), pinned by digest; the bucket bootstrap uses the public
+  `amazon/aws-cli` image instead of the retired `mc`. `docker-compose.yml` had the
+  same dead tags and is fixed with it. The Bitnami entrypoint owns the server
+  command and `/bitnami/minio/data`, so those are deliberately not overridden.
+- **Verified by running the whole job locally**, step for step (pull, up, MinIO
+  health, migrations, fixture seed, `ops.archive --once`, `ops.parity --once`):
+  every step exits 0, bucket `raw-evidence` created by the new bootstrap. Note the
+  smoke itself is thin — archive reported 0 due partitions and parity 0 compared
+  assets on the seed data, so it proves wiring, not parity behaviour.
+- **Second, unrelated red job in "CI":** `Type Check (mypy)` has been failing on
+  `api/main.py:508` since CI started resolving SQLAlchemy 2.1 (`pyproject.toml`
+  has a floor of `>=2.0`, while the local venv is pinned to 2.0.52). Reproduced
+  exactly by running mypy with 2.1.8 on `PYTHONPATH`; SQLAlchemy 2.1 types the
+  joined column instead of `Any`, so the search results inferred as
+  `list[dict[str, int | str | None]]` and list invariance rejected it. Fixed with
+  an explicit `list[dict[str, object]]` annotation — mypy is now clean on both
+  2.0.52 and 2.1.8 — rather than capping the dependency.

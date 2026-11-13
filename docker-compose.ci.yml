@@ -39,15 +39,24 @@ services:
       retries: 10
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+    # MinIO stopped publishing community images to quay.io and Docker Hub, so the
+    # pinned quay.io tags this file used (RELEASE.2025-09-07…, mc RELEASE.2025-08-13…)
+    # now fail to pull and took the whole job down at its first step. Bitnami's
+    # frozen public mirror ships the same MinIO server (same S3 API, same
+    # /minio/health/live probe); pin it by digest to keep the gate reproducible.
+    #
+    # Its entrypoint already runs `minio server /bitnami/minio/data
+    # --console-address :9001` as UID 1001, so the command and data path must be
+    # left to the image — overriding them with `server /data` would fail on
+    # permissions.
+    image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     ports:
       - "9000:9000"
     volumes:
-      - ci-minio-data:/data
+      - ci-minio-data:/bitnami/minio/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
@@ -56,20 +65,38 @@ services:
       retries: 10
 
   # One-shot: create the archive bucket before anything writes to it.
+  # `mc` came from the retired quay.io/minio/mc image; the AWS CLI talks to the
+  # same endpoint and is public, so the bootstrap no longer depends on MinIO's
+  # publishing.
   createbuckets:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: amazon/aws-cli@sha256:acc32af784911165a8e78b63950625d174ba79b800a66a436c974689c87cd755
     depends_on:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      AWS_DEFAULT_REGION: us-east-1
       MINIO_BUCKET: ${MINIO_BUCKET:-raw-evidence}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        mc alias set local http://minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
-        mc mb --ignore-existing "local/$${MINIO_BUCKET}"
+        set -e
+        endpoint=http://minio:9000
+        for attempt in $$(seq 1 30); do
+          if aws --endpoint-url "$$endpoint" s3api head-bucket --bucket "$${MINIO_BUCKET}" 2>/dev/null; then
+            echo "bucket $${MINIO_BUCKET} already exists"
+            exit 0
+          fi
+          if aws --endpoint-url "$$endpoint" s3api create-bucket --bucket "$${MINIO_BUCKET}" --no-cli-pager >/dev/null 2>&1; then
+            echo "created bucket $${MINIO_BUCKET}"
+            exit 0
+          fi
+          echo "waiting for bucket create (attempt $${attempt}/30)"
+          sleep 2
+        done
+        echo "could not create bucket $${MINIO_BUCKET}" >&2
+        exit 1
 
   migrate:
     build: .
