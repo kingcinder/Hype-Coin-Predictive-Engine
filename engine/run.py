@@ -389,7 +389,14 @@ def run_engine_phases(
         if settings.nightcrawler_enabled and not stop.is_set():
             nc_interval_sec = settings.nightcrawler_interval_minutes * 60
             now_mono = time.monotonic()
-            if (now_mono - last_nc_run_monotonic) >= nc_interval_sec:
+            # ``0.0`` is the "never run" sentinel. ``monotonic()`` is host uptime,
+            # so comparing uptime against a zero start would silently skip the
+            # first crawler pass on any host or container that booted less than
+            # one interval ago (fresh CI runners boot in well under 30 minutes).
+            if (
+                last_nc_run_monotonic <= 0.0
+                or (now_mono - last_nc_run_monotonic) >= nc_interval_sec
+            ):
                 nc_result = _run_watchdog_phase(
                     stage="nightcrawler",
                     component="nightcrawler",

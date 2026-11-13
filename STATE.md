@@ -909,3 +909,21 @@ the new ingestion timestamp fix does not rewrite that history.
 - **Left as is:** a hold remains bounded by one stage's own work — e.g. the RPC
   pool probes and `build_and_persist_features`' per-asset build cost — but no
   stage, crawl or batch now spans a network call inside an open transaction.
+
+### 2026-11-13 — CI red on the new phase test: the crawl was silently skipped on fresh hosts (done)
+
+- **The failure was a real engine bug, not a test artifact.** The annotation read
+  `nightcrawler_starts=0` with no skip or timeout event: the phase block simply
+  never entered. Cause: the gate is
+  `(time.monotonic() - last_nc_run_monotonic) >= interval`, with the "never run"
+  sentinel `0.0`. `monotonic()` is host uptime, so on any host or container that
+  booted less than one interval (30 min) ago, the first crawl pass was skipped
+  silently for that whole window — exactly what happens on a fresh CI runner, and
+  why it ran on this workstation (uptime ~9 h).
+- **Fix:** the sentinel is now explicit — `last_nc_run_monotonic <= 0.0` means
+  "never run" and always runs the first pass; the ordinary interval gate is
+  unchanged. `tests/test_engine_phases.py::test_first_nightcrawler_pass_runs_on_a_freshly_booted_host`
+  pins the clock at 5 s uptime and fails on the previous code.
+- The failure was only visible after `gh` was re-authenticated from the PAT already
+  stored in `~/.git-credentials` (gh's own token was missing) — job logs then read
+  fine and showed the engine events directly.

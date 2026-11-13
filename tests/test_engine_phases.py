@@ -432,3 +432,64 @@ def test_realerts_stop_after_max_alerts_until_recovery(session, monkeypatch) -> 
     for component in WATCHDOG_COMPONENTS:
         comp_rows = [r for r in _red_rows(session) if r.component == component]
         assert len(comp_rows) == 3  # 1 timeout + 2 re-alerts, then silent
+
+
+def test_first_nightcrawler_pass_runs_on_a_freshly_booted_host(session, monkeypatch) -> None:
+    """The first crawl pass must not depend on how long the host has been up.
+
+    ``time.monotonic()`` is host uptime, and the phase gate compared it against
+    the ``0.0`` "never run" sentinel. On a host — or a CI runner — that booted
+    less than one interval ago, that comparison was false, so the crawl was
+    skipped silently for the whole first interval: no start event, no health
+    row, nothing to notice.
+    """
+    import itertools
+
+    import engine.run as engine_run
+
+    settings = _phase_settings(nightcrawler_interval_minutes=30)  # 1800s interval
+    calls: list[int] = []
+
+    def _nc() -> dict[str, object]:
+        calls.append(1)
+        return {"crawlers_run": 0}
+
+    def _skip() -> dict[str, object]:
+        return {"skipped": True}
+
+    # A clock that reads 5s uptime and advances, so watchdog deadlines still pass.
+    clock = itertools.count(5.0, 0.01)
+    monkeypatch.setattr(engine_run.time, "monotonic", lambda: next(clock))
+
+    run_engine_phases(
+        settings=settings,
+        iteration=1,
+        stop=threading.Event(),
+        last_nc_run_monotonic=0.0,
+        system_state=_FakeEngineState(),
+        alarm_session=session,
+        forecast_fn=_skip,
+        retention_fn=_skip,
+        parity_fn=_skip,
+        nightcrawler_fn=_nc,
+        data_lake_fn=_skip,
+        score_drift_fn=_skip,
+    )
+    assert calls == [1], "the first crawl pass must run regardless of host uptime"
+
+    # A pass inside the interval is still deferred (the gate itself is intact).
+    run_engine_phases(
+        settings=settings,
+        iteration=2,
+        stop=threading.Event(),
+        last_nc_run_monotonic=next(clock) - 1.0,
+        system_state=_FakeEngineState(),
+        alarm_session=session,
+        forecast_fn=_skip,
+        retention_fn=_skip,
+        parity_fn=_skip,
+        nightcrawler_fn=_nc,
+        data_lake_fn=_skip,
+        score_drift_fn=_skip,
+    )
+    assert calls == [1], "a recent pass must still defer the next one"
