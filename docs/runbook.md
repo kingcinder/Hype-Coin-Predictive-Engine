@@ -150,6 +150,21 @@ blocking the loop forever:
    a phase that is stuck *right now* — before the next persisted alarm — is
    visible immediately.
 
+### Shutdown and write-lock hardening (this release)
+
+**Bounded drain:** `stop_write_queue(timeout=15s)` in `engine/run.py:681` limits how
+long Ctrl+C waits for the write queue to drain before logging
+`engine_write_queue_drain_timeout` and proceeding. A wedged writer thread cannot
+keep the process alive indefinitely.
+
+**Second-signal escape:** `_handle_stop` (`engine/run.py:523`) detects a repeat SIGINT/SIGTERM
+and forces `os._exit(130)` instead of requiring SIGKILL from the operator.
+
+**Streamlit process-group kill:** the Streamlit child launches with
+`start_new_session=True`; engine shutdown signals the whole process group
+(`killpg` SIGTERM→SIGKILL) so its children cannot linger on the UI port after
+the engine exits.
+
 ### Prevention
 
 The code now **enforces** a single writer instead of relying on operator
