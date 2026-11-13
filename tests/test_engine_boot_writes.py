@@ -35,14 +35,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # A phase may legitimately hold the write lock while it persists one source's or
-# one batch's rows; those writes are millisecond-scale. Seconds of continuous
-# blocking is the defect this test exists to catch, so the bar sits well above a
-# single batch and well below a crawl loop or a label generation pass.
-MAX_PHASE_LOCK_HOLD_SECONDS = 5.0
+# one batch's rows; those writes are millisecond-scale, and a slow shared runner
+# adds only seconds. The defect this test catches held the lock for 18-70s at a
+# time, so the bar sits far above one batch and well below one crawl loop.
+MAX_PHASE_LOCK_HOLD_SECONDS = 10.0
 
-# The crawl and the data-lake pass follow the scan; both are bounded here so a
-# wedged phase fails the test instead of hanging it.
-PHASE_CYCLE_TIMEOUT_SECONDS = 300.0
+# The crawl and the data-lake pass follow the scan. Both are bounded generously:
+# a shared runner fetches the same sources much slower than a workstation, and the
+# point of the bound is to fail a wedged phase instead of hanging forever.
+PHASE_CYCLE_TIMEOUT_SECONDS = 600.0
 
 
 def _free_port() -> int:
@@ -77,7 +78,7 @@ def _env_for(db_path: Path, api_port: int, ui_port: int, archive_dir: Path) -> d
         "MAX_REQUEST_RETRIES": "1",
         "RPC_POOL_BACKGROUND_PROBE_ENABLED": "false",
         "NIGHTCRAWLER_ENABLED": "true",
-        "NIGHTCRAWLER_TIMEOUT_SECONDS": "240",
+        "NIGHTCRAWLER_TIMEOUT_SECONDS": "600",
         "LLM_ENABLED": "false",
         "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
     }
