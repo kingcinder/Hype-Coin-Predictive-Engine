@@ -43,3 +43,4 @@ serpent.db.pre-rescore*-shm
 .freebuff/
 coverage/history.json.new
 serpent.db.lock
+.env.gate-aside
