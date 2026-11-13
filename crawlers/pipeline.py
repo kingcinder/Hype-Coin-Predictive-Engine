@@ -81,6 +81,10 @@ def run_nightcrawler_pipeline(
                 f"duration={duration:.1f}s"
             ),
         )
+        # The phase owns its transaction boundary: the crawl committed per
+        # source and per link batch, so only the health row is left to persist
+        # here instead of waiting for the caller's commit.
+        session.commit()
 
         return {
             "crawlers": crawl_result,
@@ -98,6 +102,7 @@ def run_nightcrawler_pipeline(
             message=str(exc),
             error_count=1,
         )
+        session.commit()
         return {"error": str(exc), "duration_sec": round(duration, 2)}
 
 

@@ -28,6 +28,12 @@ from storage import models
 
 log = get_logger(__name__)
 
+# Commit every N hourly decision points. One asset's grid is up to 168 hours ×
+# two labels, each an upsert, and the per-hour forward-price scan is the slowest
+# work in the pass: writing all of it in one transaction held SQLite's single
+# write lock for the asset's whole grid and starved the engine's write queue.
+_LABEL_COMMIT_EVERY = 24
+
 LABEL_IGNITION = "ignition"
 LABEL_COLLAPSE = "collapse"
 
@@ -82,6 +88,7 @@ def generate_dense_labels(
     forward_hours: int | None = None,
     ignition_threshold: float | None = None,
     collapse_threshold: float | None = None,
+    commit_every: int = _LABEL_COMMIT_EVERY,
 ) -> dict[str, int]:
     """Generate labels using ALL historical snapshot pairs.
 
@@ -211,6 +218,10 @@ def generate_dense_labels(
 
             current += timedelta(hours=1)
             hour_count += 1
+            if commit_every and hour_count % commit_every == 0:
+                # Per-label batch: release the write lock mid-grid so a long
+                # history never blocks the queue for the whole asset.
+                session.commit()
 
         # Per-asset batch commit: one asset's hourly grid is a bounded unit of
         # work, and the next asset must not extend the same write transaction.

@@ -37,6 +37,13 @@ _MIN_SYMBOL_LEN = 2
 # market snapshot could otherwise fan out to every asset on the chain).
 _MAX_ASSETS_PER_ITEM = 3
 
+# Commit every N links. A large source's fan-out is hundreds of upserts, each a
+# dedup SELECT plus an INSERT; one transaction for all of them held SQLite's
+# single write lock for the length of that source and starved the engine's write
+# queue. Links are additive and idempotent (the dedup key makes a re-link a
+# no-op), so committing mid-batch is safe.
+_LINK_COMMIT_EVERY = 100
+
 
 @dataclass
 class AssetIndex:
@@ -71,11 +78,14 @@ def link_crawler_items(
     source: models.Source,
     items: list[dict[str, Any]],
     observed_at: datetime,
+    commit_every: int = _LINK_COMMIT_EVERY,
 ) -> int:
     """Resolve crawler items to known assets and write SocialMention links.
 
     Returns the number of (item → asset) links created.  Never raises —
-    linking is additive and a failure must not abort the crawl pass.
+    linking is additive and a failure must not abort the crawl pass. Commits
+    every ``commit_every`` links so one source's fan-out cannot hold the write
+    lock for the whole crawl; ``0`` keeps the whole batch in one transaction.
     """
     if not items:
         return 0
@@ -101,6 +111,8 @@ def link_crawler_items(
                         raw_ref=_raw_ref(item, source.id),
                     )
                     linked += 1
+                    if commit_every and linked % commit_every == 0:
+                        session.commit()
                 except Exception:  # noqa: BLE001 - one bad item must not block the batch
                     log.debug("signal_link_failed", item=item.get("title"))
         return linked

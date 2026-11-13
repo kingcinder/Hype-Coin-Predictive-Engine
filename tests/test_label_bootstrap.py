@@ -369,3 +369,37 @@ def test_dense_labels_never_overwrite_real_labels(session) -> None:
     )
     assert row2.label_value == "1"
     assert row2.label_source == "forecast:gbm-hist-v1"
+
+
+def test_dense_labels_commit_per_batch(session, monkeypatch) -> None:
+    """A long hourly grid must release the write lock mid-asset.
+
+    Each hourly decision point upserts two labels after scanning the forward
+    window; one transaction for the whole grid held SQLite's write lock for the
+    asset and starved the engine's write queue during the data-lake phase."""
+    from data_lake.labels import generate_dense_labels
+
+    asset = _seed_asset_with_features_and_snapshots(
+        session,
+        symbol="BATCH",
+        prices=[1.0 + 0.01 * hour for hour in range(72)],
+        feature_hours=[10],
+    )
+    session.commit()
+
+    commits: list[float] = []
+    real_commit = session.commit
+
+    def _counting_commit(*args, **kwargs):
+        commits.append(1.0)
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(session, "commit", _counting_commit)
+
+    decision = T0 + timedelta(hours=71)
+    counts = generate_dense_labels(session, decision_ts=decision, forward_hours=24, commit_every=5)
+
+    assert counts["total_decision_points"] > 10
+    # Per-label batch inside the grid plus the per-asset commit at the end.
+    assert len(commits) >= 3
+    assert session.scalar(select(models.Label.id).where(models.Label.asset_id == asset.id))

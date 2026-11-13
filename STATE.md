@@ -1048,3 +1048,33 @@ the new ingestion timestamp fix does not rewrite that history.
   `mismatches: 0`, `compared_assets: 2`; it also asserts `require_compared` raises on a
   zero-comparison result. The Docker/MinIO job itself still has to run in CI to confirm the
   S3 path.
+
+### 2026-11-13 — Night Crawler and data-lake phases keep their transactions small (done)
+
+- **What was measured.** On a 63 MB copy of the real DB (SQLite backup API,
+  probe outside the repo, SQLAlchemy engine `begin`→`commit` durations): the
+  Night Crawler phase ran 40 s wall clock with **15 transactions, longest 0.07 s**
+  (the time goes into crawler HTTP, which happens *between* the per-source
+  commits), and the data-lake pass ran 6.2 s with **162 transactions, longest
+  0.30 s**. Neither phase holds one transaction for its whole run on this tree —
+  the 90 s whole-run holds were the pre-fix revision in
+  `reports/launch-2026-11-13*.json`. What remained were two loops whose single
+  transaction grows with data volume, plus health rows left for the caller.
+- **Linking per item batch:** `link_crawler_items` commits every
+  `_LINK_COMMIT_EVERY = 100` links (`commit_every` parameter). A source's fan-out
+  is hundreds of upserts (dedup SELECT + INSERT each); links are additive and
+  idempotent, so a mid-batch commit is safe.
+- **Labels per hour batch:** `generate_dense_labels` commits every
+  `_LABEL_COMMIT_EVERY = 24` decision points inside an asset's hourly grid, on top
+  of the existing per-asset commit. The grid is up to 168 hours × two label
+  upserts, and the forward-price scan per hour makes it the slowest part of the
+  pass.
+- **Phase-owned transaction boundaries:** `run_nightcrawler_pipeline` and
+  `run_data_lake_pass` now commit after their final `record_health` row (and in
+  their error paths), so a phase ends with nothing open for the caller to
+  persist.
+- **Tests:** `tests/test_signal_links.py::test_linking_commits_per_item_batch`
+  (6 items, `commit_every=2` → exactly 3 commits, all 6 links persisted) and
+  `tests/test_label_bootstrap.py::test_dense_labels_commit_per_batch` (72-hour
+  price grid, `commit_every=5` → commits inside the grid plus the per-asset
+  commit). Existing phase, data-lake and signal-linking suites still pass.

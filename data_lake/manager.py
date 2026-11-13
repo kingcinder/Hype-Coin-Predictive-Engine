@@ -105,6 +105,9 @@ def run_data_lake_pass(
                 f"duration={duration:.1f}s"
             ),
         )
+        # The pass owns its transaction boundary: every step above committed its
+        # own batch, so only this health row is left open here.
+        session.commit()
 
         log.info(
             "data_lake_pass_complete",
@@ -128,6 +131,7 @@ def run_data_lake_pass(
             message=str(exc),
             error_count=1,
         )
+        session.commit()
         log.exception("data_lake_pass_failed", error=str(exc))
         result["error"] = str(exc)
 

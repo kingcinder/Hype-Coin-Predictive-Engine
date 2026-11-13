@@ -192,3 +192,34 @@ def test_single_crawler_source_no_boost_yet(session) -> None:
     result = fuse_signals(session, asset.id)
     assert result.source_count == 1
     assert result.confidence_boost == 0.0
+
+
+def test_linking_commits_per_item_batch(session, monkeypatch) -> None:
+    """A source's fan-out must release the write lock in batches.
+
+    Every link is an upsert inside one transaction; before the batch commit a
+    large source held SQLite's single write lock for its whole fan-out, so the
+    engine's write queue timed out. The commit count here proves the batch
+    boundary exists (and that the links still land)."""
+    asset = seed_market_asset(session)
+    source = _crawler_source(session)
+    items = [
+        {"title": f"${asset.symbol} mention {i}", "url": f"https://example.org/{i}"}
+        for i in range(6)
+    ]
+    commits: list[float] = []
+    real_commit = session.commit
+
+    def _counting_commit(*args, **kwargs):
+        commits.append(1.0)
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(session, "commit", _counting_commit)
+
+    linked = link_crawler_items(
+        session, source=source, items=items, observed_at=NOW, commit_every=2
+    )
+
+    assert linked == 6
+    assert len(commits) == 3  # one per two links
+    assert _mention_count(session, asset.id, source.id) == 6
