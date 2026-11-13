@@ -1099,3 +1099,31 @@ the new ingestion timestamp fix does not rewrite that history.
   (clean run: 0 mismatches), diverges, and asserts the next run has
   `compared_assets > 0`, `mismatches >= 1`, `status` red/yellow and populated
   `examples` — a real caught mismatch, not an empty comparison.
+
+### 2026-11-13 — A lock-sync guard keeps requirements-dev.txt honest (done)
+
+- **Gap:** `requirements-dev.txt` is authoritative for every dev/test install
+  (`scripts/install_dev_deps.sh` installs it with `-r`, then the project with
+  `--no-deps`), which is exactly why SQLAlchemy 2.1 cannot reach the gate. The
+  cost was that a dependency added to `pyproject.toml` without a pin — or a pin
+  edited outside its declared range — was invisible until install time (`pip
+  check`, or the first import), far from the edit.
+- **`scripts/check_lock_sync.py`** (stdlib-only, like the other guards, so it runs
+  before `make setup`): reads `[project.dependencies]` and the `dev` extra
+  (`--extra` to widen), parses the lock's `name==version` pins (rejecting unpinned
+  and duplicate lines), and fails when a declaration has no pin or when its pin
+  does not satisfy the declared specifier. PEP 440 support is a documented subset
+  — release-segment comparison for `==`/`===`/`!=`/`<`/`<=`/`>`/`>=`/`~=`; a
+  wildcard, epoch or unparseable version is reported as *uncheckable* rather than
+  passed silently, so the guard never claims a bound it did not check.
+- **Same suite as the other guards:** `make lint` and `make gate` run it right
+  after `check_declared_deps.py`; a new `make check-lock` target mirrors it
+  locally; the CI lint job has a `Dependency-lock sync scan` step; and a
+  pre-commit hook (`check-lock-sync`) fires on `pyproject.toml` or
+  `requirements-dev.txt` changes.
+- **Verified:** `tests/test_check_lock_sync.py` (11 tests) covers a clean lock,
+  a missing pin, the `dev` extra, a pin below a floor, a pin above a declared
+  ceiling (`SQLAlchemy==2.1.8` vs `sqlalchemy>=2.0,<2.1`), `~=` semantics,
+  unpinned and duplicate lock lines, an unsupported wildcard specifier, the CLI
+  exit codes/messages, and the committed repo files themselves being in sync
+  (39 declared requirements against 141 pins).

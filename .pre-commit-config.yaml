@@ -43,6 +43,16 @@ repos:
         language: python
         files: '(\.py$|pyproject\.toml$)'
         pass_filenames: false
+      # Lock-sync guard: fails when pyproject.toml declares a dependency the
+      # lock does not pin, or when a pin no longer satisfies its declared range.
+      # Fires on either file and scans the pair (pass_filenames: false).
+      - id: check-lock-sync
+        name: check dependency lock sync
+        description: Fail when requirements-dev.txt drifts from pyproject.toml
+        entry: python scripts/check_lock_sync.py
+        language: python
+        files: '(pyproject\.toml$|requirements-dev\.txt$)'
+        pass_filenames: false
       # History-divergence guard (pre-push only): fails any push that would
       # rewrite origin/main — the remote tip must be an ancestor of the local
       # tip (fast-forward). A diverged remote is the signature of a pending

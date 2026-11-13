@@ -76,6 +76,12 @@ jobs:
       # break a fresh dev install (`scripts/install_dev_deps.sh`) later.
       - name: Dependency-declaration scan
         run: .venv/bin/python scripts/check_declared_deps.py
+      # Lock-sync guard: requirements-dev.txt is authoritative for the dev/test
+      # install (pip never re-resolves from the pyproject floors), so a
+      # dependency added to pyproject.toml without a pin — or a pin that drifted
+      # outside its declared range — must fail here instead of at install time.
+      - name: Dependency-lock sync scan
+        run: .venv/bin/python scripts/check_lock_sync.py
 
   typecheck:
     name: Type Check (mypy)

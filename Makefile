@@ -131,6 +131,7 @@ lint:
 	$(MAKE) typecheck
 	python3 scripts/check_broken_imports.py $(if $(VENV),--venv $(VENV),)
 	python3 scripts/check_declared_deps.py
+	python3 scripts/check_lock_sync.py
 
 typecheck:
 	mypy $(MYPY_PACKAGES)
@@ -143,6 +144,7 @@ gate:
 	run 'make typecheck' $(MAKE) -s typecheck; \
 	run 'scripts/check_broken_imports.py' python3 scripts/check_broken_imports.py $(if $(VENV),--venv $(VENV),--venv .venv); \
 	run 'scripts/check_declared_deps.py' python3 scripts/check_declared_deps.py; \
+	run 'scripts/check_lock_sync.py' python3 scripts/check_lock_sync.py; \
 	run 'pytest' python -m pytest tests/ -x -q --cov=. --cov-report=term-missing --cov-report=xml
 
 # Collection guard: fail fast on dangling repo-local imports (see CI lint job).
@@ -160,6 +162,13 @@ check-imports:
 # so it also runs pre-`make setup`; see the CI lint job + pre-commit hook.
 check-deps:
 	python3 scripts/check_declared_deps.py
+
+# Lock-sync guard: every dependency declared in pyproject.toml
+# ([project.dependencies] + the dev extra) must be pinned in
+# requirements-dev.txt, and each pin must satisfy its declared range. Stdlib-only
+# (tomllib), so it also runs pre-`make setup`; see the CI lint job + pre-commit.
+check-lock:
+	python3 scripts/check_lock_sync.py
 
 format:
 	ruff format .

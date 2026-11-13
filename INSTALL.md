@@ -266,9 +266,9 @@ sudo apt install python3.12 python3.12-venv python3.12-dev git
 
 ## Import lint gates (CI & local)
 
-For contributors: two stdlib-only guards run in the CI lint job and as
-pre-commit hooks, so a broken or undeclared import fails lint before it can
-break the Tests job or a fresh install:
+For contributors: three stdlib-only guards run in the CI lint job and as
+pre-commit hooks, so a broken import, an undeclared dependency or a stale lock
+fails lint before it can break the Tests job or a fresh install:
 
 - `scripts/check_broken_imports.py` — fails on imports that would break
   `pytest` collection; with `--venv PATH` it also verifies third-party roots
@@ -276,6 +276,10 @@ break the Tests job or a fresh install:
 - `scripts/check_declared_deps.py` — fails on third-party imports not
   declared in `pyproject.toml` (`[project.dependencies]` or an
   optional-dependencies group) or registered in `KNOWN_VENV_ABSENT`.
+- `scripts/check_lock_sync.py` — fails when `requirements-dev.txt` (the
+  authoritative dev/test install input) is missing a pin for a declared
+  dependency, or when a pin falls outside its declared range — otherwise a
+  forgotten lock update only surfaces at install time.
 
 CI runs the collection guard with `--venv .venv` against the lint job's own
 install venv and runs the declaration scan right after. Reproduce that full
@@ -284,6 +288,7 @@ coverage locally:
 ```bash
 make check-imports VENV=.venv   # collection guard + venv resolution
 make check-deps                 # dependency-declaration guard
+make check-lock                 # lock-sync guard (pyproject ⇄ requirements-dev.txt)
 ```
 
 (`make check-imports` without `VENV` uses bare `python3` — the script is

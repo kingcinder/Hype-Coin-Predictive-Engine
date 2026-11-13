@@ -317,8 +317,8 @@ See **[INSTALL.md](INSTALL.md)** for full instructions, configuration, troublesh
 
 ### Import & dependency guards
 
-Two stdlib-only lint scripts enforce the import contract in CI (lint job) and
-as pre-commit hooks:
+Three stdlib-only lint scripts enforce the import and lock contract in CI (lint
+job) and as pre-commit hooks:
 
 - **Collection guard** — `scripts/check_broken_imports.py`: fails on imports
   that would break `pytest` collection (dangling repo-local paths, e.g. the
@@ -331,6 +331,11 @@ as pre-commit hooks:
   (`[project.dependencies]` or an optional-dependencies group) or registered
   in `KNOWN_VENV_ABSENT`, so a manually- or transitively-installed package
   can never drift silently into the tree.
+- **Lock-sync guard** — `scripts/check_lock_sync.py`: `requirements-dev.txt` is
+  what the dev/test install actually resolves from, so every dependency
+  declared in `pyproject.toml` (`[project.dependencies]` plus the `dev` extra)
+  must be pinned there, and each pin must satisfy its declared range. A
+  forgotten lock update now fails the lint job instead of an install.
 
 The CI lint job runs the collection guard against its own install venv
 (`.venv/bin/python scripts/check_broken_imports.py --venv .venv`) plus the
@@ -343,6 +348,7 @@ Locally:
 make check-imports              # collection guard, bare python3 (works pre-setup)
 make check-imports VENV=.venv   # full coverage: also verify third-party roots vs the venv
 make check-deps                 # dependency-declaration guard
+make check-lock                 # lock-sync guard (pyproject ⇄ requirements-dev.txt)
 make lint                       # ruff + mypy + both guards
 ```
 
