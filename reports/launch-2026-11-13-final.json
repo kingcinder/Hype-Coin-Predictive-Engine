@@ -1,0 +1,42 @@
+{
+  "status": "failed",
+  "exit_code": 20,
+  "checkout": "/media/cody/Data/DOCUMENTS_PROJECT_FILES/Hype-Coin-Predictive-Engine-main",
+  "head": "a2bda63",
+  "python": "Python 3.12.3",
+  "db_backup": "/home/cody/serpent-backups/serpent-20261113-071046.db (sha256 3fe3742423d66c54a3ec2b08e8db146f1321a2838b5461d073b9b1490dfd2273)",
+  "gate": "pass",
+  "health": {
+    "authenticated_status": 200,
+    "body": "{\"status\":\"ok\",\"database\":\"ok\",...} — served from the stored component rows; no new health rows are being written",
+    "unauthenticated_status": 401
+  },
+  "gui_status": 200,
+  "engine_pid": 1773713,
+  "log_tracebacks": 0,
+  "log_lock_errors": 8,
+  "github_ci_main": "Archive and parity@f44ddbd=failure (2026-11-10, 2026-11-11, 2026-11-12); Coverage history@403740e=success",
+  "optional_phases_run": [],
+  "failures": [
+    "Stability criterion failed and stopped the run (exit 20): the write queue never recovers. finish.sh measured lock warnings growing 1 -> 3 inside its 120s window and reported 'STOP: lock warnings grew past two: early=1 late=3'. A manual re-run sampled 1 at t=40s, 3 at t=100s, 5 at t=160s, 7 at t=220s, 8 shortly after - one write_queue_task_failed every 30s (the sqlite_busy_timeout_ms), i.e. every queued write waits its full timeout and is dropped.",
+    "The engine is serving reads but cannot persist anything: while it runs, an independent process cannot take the write lock either ('BEGIN IMMEDIATE' -> database is locked, rolled back immediately), and the newest system_health row is stuck at the boot timestamp 2026-11-13 15:29:43. Failing writes name source:dexscreener_profiles, source:dexscreener_pairs, source:geckoterminal_new_pools and source:birdeye. A write transaction opened during boot is never committed or released; nothing after boot is stored.",
+    "SIGINT does not stop the engine on this revision (reproduced on three separate instances): it logs engine_shutdown_signal, keeps failing health inserts and stays up past 60s, so SIGKILL is the only working stop. The finish.sh amendment uses SIGKILL.",
+    "Gate requires the root .env to be set aside: test_api_fail_closed_when_token_unset expects 403, but common/config.py reads env_file='.env' and the local token makes it 401. finish.sh moved .env aside and restored it; the sha256 before/after comparison passed.",
+    "GitHub Actions on origin/main was already red before this task: 'Archive and parity' failed on f44ddbd across the 2026-11-10, 11-11 and 11-12 scheduled runs."
+  ],
+  "limitations_acknowledged": true,
+  "how_to_stop": "kill -KILL $(cat ~/serpent-logs/engine.pid)  (SIGINT wedges; the process may leave an orphan Streamlit on 8501 - check with ss -ltn and kill it too)",
+  "how_to_start": "cd /media/cody/Data/DOCUMENTS_PROJECT_FILES/Hype-Coin-Predictive-Engine-main && .venv/bin/python -m engine",
+  "environment_repairs": [
+    "The checkout's .venv had been created at /home/cody/Documents/Hype-Coin-Predictive-Engine-main before the folder moved, so its console scripts had dead shebangs. It was rebuilt on 3.12.3 and the old one kept aside at /home/cody/serpent-backups/.venv.old-1794567534.",
+    "The unpinned editable install resolves newer majors than the repository lock; SQLAlchemy 2.1.8 (vs locked 2.0.52) makes mypy fail api/main.py:508. Verified in isolation: mypy 2.4.1 with SQLAlchemy 2.0.52 passes all 164 files, SQLAlchemy 2.1.8 alone reproduces the exact error. finish.sh now installs requirements-dev.txt first, then pip install -e . --no-deps."
+  ],
+  "gate_detail": "ruff check pass; ruff format --check pass; mypy pass; check_broken_imports pass (257 files); check_declared_deps pass (29 roots); pytest pass; coverage TOTAL 78% against fail_under=75.7; SQLALCHEMY=2.0.52",
+  "logs": {
+    "gate": "~/serpent-logs/gate.log",
+    "engine_superseded_run": "~/serpent-logs/engine-failed-run.log",
+    "engine": "~/serpent-logs/engine.log",
+    "engine_pid_file": "~/serpent-logs/engine.pid",
+    "finish_script_console": "~/serpent-logs/ (finish.sh ran from the checkout root; console output captured by the runner)"
+  }
+}

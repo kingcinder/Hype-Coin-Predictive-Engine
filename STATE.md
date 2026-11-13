@@ -631,6 +631,36 @@ in-flight work from other agents, still untouched.
   "Archive and parity" workflow failed on `f44ddbd` for the 2026-11-10, 11-11 and
   11-12 scheduled runs.
 
+### 2026-11-13 — Full prompt run under the amended criteria (failed: write queue wedged)
+
+- Ran `finish.sh` (the prompt's procedure with the five review amendments: install
+  from `requirements-dev.txt` then `pip install -e . --no-deps`; gate with the root
+  `.env` set aside and a before/after checksum; SIGKILL as the stop command; the
+  relaxed "at most two boot lock warnings, no growth" criterion; a check that no
+  host-network container holds 8000/8501) end to end from a clean slate
+  (`a2bda63`, no engine, no listeners).
+- Passed: fast-forward sync, backup `~/serpent-backups/serpent-20261113-071046.db`
+  (sha256 `3fe3742…`), locked install (`SQLALCHEMY=2.0.52`, imports OK), `make gate`
+  (78% coverage, all six checks), authenticated `/health` 200, unauthenticated 401,
+  GUI 200, `.env` restored byte-identical, zero tracebacks.
+- **Failed the stability criterion** and the script stopped itself with exit 20:
+  `STOP: lock warnings grew past two: early=1 late=3`. A manual re-run sampled the
+  same growth: 1 at t=40s, 3 at t=100s, 5 at t=160s, 7 at t=220s, 8 shortly after —
+  one `write_queue_task_failed` every 30s, i.e. every queued write waits out
+  `sqlite_busy_timeout_ms` and is discarded.
+- The engine serves reads but persists nothing: while it runs, an independent
+  process cannot take the write lock either (`BEGIN IMMEDIATE` → database is
+  locked), and `system_health` is frozen at the boot timestamp. Failing writes name
+  `source:dexscreener_profiles`, `source:dexscreener_pairs`,
+  `source:geckoterminal_new_pools` and `source:birdeye`. A write transaction opened
+  during boot is never committed or released.
+- Not fixed in this operational task (behavior change out of scope). The engine was
+  left running for read/API/GUI access; `kill -KILL` is the only working stop, and
+  killing it can orphan a Streamlit child on 8501. Full result:
+  `reports/launch-2026-11-13-final.json`, which supersedes the earlier
+  "online" report from the same day (that one recorded a single boot warning and did
+  not sample the warning count over time).
+
 ## Branch ledger merged in during reconciliation (2026-11-07)
 
 The `fix/functional-pass` branch carried its own short STATE.md tracking the reviewed fix list. Its one unique record, preserved verbatim:
