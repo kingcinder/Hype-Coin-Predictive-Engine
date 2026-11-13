@@ -31,6 +31,11 @@ the run before starting:
 - **Verified database backup.** If `serpent.db` exists it is copied through
   SQLite's backup API (a torn copy is impossible) into
   `~/serpent-backups/serpent-<timestamp>.db` and the sha256 is printed.
+- **Backup retention.** Every launch adds a snapshot, so the launcher keeps the
+  newest **10** per database and deletes older ones with
+  `scripts/prune_backups.py` (it matches only `serpent-YYYYmmdd-HHMMSS.db`).
+  Change the count with `SERPENT_BACKUP_KEEP=<N>` (positive integer, default
+  10); move the directory with `SERPENT_BACKUP_DIR`.
 - **Optional gate.** `./start-engine.sh --gate` runs the full check suite
   (`make gate`: lint, format, mypy, import/dependency scans, pytest with the
   coverage floor) and refuses to start the engine if it fails.

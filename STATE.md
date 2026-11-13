@@ -1127,3 +1127,32 @@ the new ingestion timestamp fix does not rewrite that history.
   unpinned and duplicate lock lines, an unsupported wildcard specifier, the CLI
   exit codes/messages, and the committed repo files themselves being in sync
   (39 declared requirements against 141 pins).
+
+### 2026-11-13 — The launcher's DB backups have a retention bound (done)
+
+- **Gap:** `start-engine.sh` writes a verified `serpent.db` snapshot on every
+  launch, so `~/serpent-backups/` grew without bound (~60 MB per start).
+- **`scripts/prune_backups.py`** (stdlib-only — it runs before the venv exists,
+  with the same system `python3` the backup itself uses) keeps the newest
+  `--keep` snapshots per database and deletes the rest. It only matches the names
+  the launcher writes (`<stem>-YYYYmmdd-HHMMSS.db`), so a hand-copied dump, a
+  `-wal` sidecar, `serpent.db` itself or an old `.venv.old-*` are never touched,
+  and a missing backup directory is not an error.
+- **Launcher wiring:** `BACKUP_KEEP="${SERPENT_BACKUP_KEEP:-10}"` (default 10),
+  validated as a positive integer before any work (`exit 2` with a clear message
+  on `0`/non-numeric), and the prune runs right after a successful backup. A
+  prune failure is a warning, not a refusal — the backup already succeeded.
+- **Docs:** README (bring-up section), INSTALL (launcher bullets),
+  AGENTIC_INSTALL, `docs/runbook.md` all now say the step lives in
+  `scripts/prune_backups.py`, that it keeps the newest 10 per database by
+  default, and that `SERPENT_BACKUP_KEEP=<N>` changes it
+  (`SERPENT_BACKUP_DIR` moves the directory; the script also runs by hand with
+  `--dir`/`--keep`).
+- **Verified:** `tests/test_prune_backups.py` (10 tests: newest-N, keep > count,
+  unrelated files untouched, missing directory, per-database scoping, name
+  pattern, CLI keep flag, env default, `--keep 0` and non-numeric env rejected)
+  plus two launcher tests in `tests/test_start_engine_launcher.py` — one drives
+  the real `start-engine.sh` with three old snapshots and
+  `SERPENT_BACKUP_KEEP=2`, asserting exactly two remain (the new one plus the
+  newest old one) and that the log reports `kept 2 newest of 4`; the other
+  asserts a non-numeric keep exits 2.

@@ -3,13 +3,15 @@
 # Serpent Circle Engine — One-Click Launcher (the single bring-up path)
 # Double-click the desktop shortcut or run this script directly.
 #
-#   ./start-engine.sh          guard → backup → launch
+#   ./start-engine.sh          guard → backup (+ prune) → launch
 #   ./start-engine.sh --gate   also run the full check suite first
 #
 # Before launching it refuses a second writer (an engine already running,
 # the shipped ports already bound, or a --network host container that may
 # hold them) and takes a verified copy of serpent.db through SQLite's
-# backup API. Ctrl+C stops the engine.
+# backup API. Each launch writes a new snapshot, so the newest
+# SERPENT_BACKUP_KEEP (default 10) are kept per database and older ones are
+# pruned (scripts/prune_backups.py). Ctrl+C stops the engine.
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -21,6 +23,10 @@ PROJECT_DIR="${SERPENT_PROJECT_DIR:-$SCRIPT_DIR}"
 API_PORT="${SERPENT_API_PORT:-8000}"
 UI_PORT="${SERPENT_UI_PORT:-8501}"
 BACKUP_DIR="${SERPENT_BACKUP_DIR:-$HOME/serpent-backups}"
+# How many verified snapshots of each database to keep. Every launch writes a
+# new one, so without a bound the backup directory grows forever; the newest N
+# are kept and the rest pruned after each successful backup.
+BACKUP_KEEP="${SERPENT_BACKUP_KEEP:-10}"
 LOG_DIR="${SERPENT_LOG_DIR:-$HOME/serpent-logs}"
 
 RUN_GATE=0
@@ -28,7 +34,7 @@ for arg in "$@"; do
     case "$arg" in
         --gate) RUN_GATE=1 ;;
         -h | --help)
-            sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -37,6 +43,13 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+case "$BACKUP_KEEP" in
+    '' | *[!0-9]* | 0)
+        echo "❌ SERPENT_BACKUP_KEEP must be a positive integer (got '$BACKUP_KEEP')." >&2
+        exit 2
+        ;;
+esac
 
 # ── Step 1: Navigate to project ──────────────────────────────────────
 cd "$PROJECT_DIR" || {
@@ -98,6 +111,14 @@ PY
     then
         echo "🗄️  DB backup: $DB_BACKUP"
         echo "    sha256:     $(sha256sum "$DB_BACKUP" | awk '{print $1}')"
+        # Retention: keep the newest SERPENT_BACKUP_KEEP snapshots of this
+        # database and delete the older ones. A prune failure is a warning, not
+        # a reason to refuse a launch whose backup already succeeded.
+        if ! python3 scripts/prune_backups.py \
+            --dir "$BACKUP_DIR" --database serpent.db --keep "$BACKUP_KEEP"; then
+            echo "⚠️  Could not prune old backups in $BACKUP_DIR (keep=$BACKUP_KEEP);" \
+                "they will keep accumulating." >&2
+        fi
     else
         echo "❌ SQLite backup of serpent.db failed; not starting over an unbacked DB." >&2
         exit 1

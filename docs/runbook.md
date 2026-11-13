@@ -169,8 +169,10 @@ discipline:
 - **Launcher pre-flight:** `./start-engine.sh` checks for a running engine, a
   bound 8000/8501, and `--network host` containers *before* it starts, then
   snapshots `serpent.db` (SQLite backup API, sha256 printed) into
-  `~/serpent-backups/`. This is the documented bring-up path; `--gate` runs the
-  full check suite first.
+  `~/serpent-backups/`, then prunes all but the newest `SERPENT_BACKUP_KEEP`
+  snapshots per database (default 10, via `scripts/prune_backups.py`). This is
+  the documented bring-up path; `--gate` runs the full check suite first. To keep
+  more or fewer, export `SERPENT_BACKUP_KEEP=<N>` before launching.
 - **Higher busy timeout:** inter-process contention is now prevented (above), so
   the remaining contention is intra-process (worker thread + API thread on one
   file). `SQLITE_BUSY_TIMEOUT_MS` (default `30000`) lets a genuine short

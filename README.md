@@ -31,6 +31,14 @@ and only then starts the engine. `--gate` additionally runs the same suite CI
 runs (lint, format, mypy, import/dependency scans, pytest with the coverage
 floor) and refuses to start on a failure.
 
+Each launch writes a new snapshot, so the launcher keeps only the newest **10**
+per database and prunes the rest: the retention step is
+`scripts/prune_backups.py`, called by `start-engine.sh` right after a successful
+backup (it only ever deletes files it wrote — `serpent-YYYYmmdd-HHMMSS.db`). Set
+`SERPENT_BACKUP_KEEP=5` (any positive integer) before launching to change how
+many are kept, and `SERPENT_BACKUP_DIR` to move the directory; the same script
+runs by hand as `python3 scripts/prune_backups.py --dir ~/serpent-backups --keep 5`.
+
 `python -m engine` (or `make engine`) is the same process started by hand — it
 applies migrations to the configured database, then runs the ingestion worker loop, the REST API on http://localhost:8000, and the Streamlit GUI on http://localhost:8501 together. On a fresh checkout with no `.env` or database URL override, `python -m engine` selects `ENV=local-single` and SQLite at `serpent.db`. To use PostgreSQL, set `ENV=local` and configure `DATABASE_URL` (the tracked `.env.example` shows the template). API and GUI listeners default to loopback. Non-loopback binds require `ENGINE_ALLOW_LAN=1`, a configured API token, and auth bypass disabled. Ctrl+C stops the worker, API, and GUI cleanly (the shutdown event is honoured at scan and phase boundaries, so it does not wait out a long pass).
 

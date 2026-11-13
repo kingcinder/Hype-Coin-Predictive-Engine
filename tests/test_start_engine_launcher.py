@@ -79,3 +79,85 @@ def test_gui_opens_after_authenticated_health_probe(tmp_path: Path) -> None:
     assert f'header = "Authorization: Bearer {TOKEN}"' in seen_cfg.read_text(encoding="utf-8")
     # ... and the token never appeared in curl's argv (the process list).
     assert TOKEN not in seen.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_launcher_prunes_old_backups_to_the_configured_keep(tmp_path: Path) -> None:
+    """A launch keeps the newest SERPENT_BACKUP_KEEP snapshots and drops the rest.
+
+    Every launch writes a fresh snapshot, so an unbounded backup directory was a
+    slow disk leak. This drives the real launcher (externals stubbed) with three
+    pre-existing snapshots and ``SERPENT_BACKUP_KEEP=2``: the new backup plus one
+    old snapshot must survive, the other two must be gone.
+    """
+    import sqlite3
+
+    project = tmp_path / "project"
+    (project / ".venv" / "bin").mkdir(parents=True)
+    (project / ".venv" / "bin" / "activate").write_text("", encoding="utf-8")
+    (project / ".env").write_text("", encoding="utf-8")
+    (project / "scripts").mkdir()
+    shutil.copy(REPO / "start-engine.sh", project / "start-engine.sh")
+    shutil.copy(REPO / "scripts" / "prune_backups.py", project / "scripts" / "prune_backups.py")
+    (project / "serpent.db").write_bytes(b"")
+    with sqlite3.connect(project / "serpent.db") as con:
+        con.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+        con.execute("INSERT INTO marker (id) VALUES (1)")
+
+    backups = tmp_path / "backups"
+    backups.mkdir()
+    for day in (1, 2, 3):
+        (backups / f"serpent-2026010{day}-010000.db").write_bytes(b"old")
+
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    _stub(stubs / "curl", "exit 0\n")
+    _stub(stubs / "xdg-open", "exit 0\n")
+    _stub(stubs / "python", "exit 0\n")
+
+    env = {
+        **os.environ,
+        "PATH": f"{stubs}:{os.environ['PATH']}",
+        "SERPENT_PROJECT_DIR": str(project),
+        "SERPENT_BACKUP_DIR": str(backups),
+        "SERPENT_BACKUP_KEEP": "2",
+        "SERPENT_LOG_DIR": str(tmp_path / "logs"),
+    }
+    result = subprocess.run(
+        ["bash", str(project / "start-engine.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    remaining = sorted(path.name for path in backups.iterdir())
+    # Four snapshots existed once this launch wrote its own; the newest two are
+    # the new backup and the newest pre-existing one.
+    assert remaining == ["serpent-20260103-010000.db", remaining[-1]], remaining
+    assert len(remaining) == 2, remaining
+    assert remaining[-1] not in {"serpent-20260101-010000.db", "serpent-20260102-010000.db"}
+    assert "backups: kept 2 newest of 4" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_launcher_rejects_a_non_numeric_keep(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    shutil.copy(REPO / "start-engine.sh", project / "start-engine.sh")
+
+    env = {
+        **os.environ,
+        "SERPENT_PROJECT_DIR": str(project),
+        "SERPENT_BACKUP_KEEP": "lots",
+    }
+    result = subprocess.run(
+        ["bash", str(project / "start-engine.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 2
+    assert "SERPENT_BACKUP_KEEP must be a positive integer" in result.stderr

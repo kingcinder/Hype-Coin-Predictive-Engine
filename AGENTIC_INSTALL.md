@@ -144,8 +144,9 @@ Desktop install:
 `start-engine.sh` is the one documented bring-up path. It refuses to start a
 second writer (engine already running, port 8000/8501 bound, or a container
 with `--network host`), snapshots `serpent.db` via SQLite's backup API into
-`~/serpent-backups/` and prints the sha256, and with `--gate` runs the full
-check suite first.
+`~/serpent-backups/` and prints the sha256, keeps only the newest
+`SERPENT_BACKUP_KEEP` snapshots per database (default 10; pruned by
+`scripts/prune_backups.py`), and with `--gate` runs the full check suite first.
 
 One process runs everything: it applies migrations, then runs the
 ingestion worker loop, the REST API on http://localhost:8000, and the
