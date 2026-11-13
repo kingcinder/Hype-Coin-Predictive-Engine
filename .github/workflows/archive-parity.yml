@@ -18,9 +18,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install development dependencies
-        run: python -m pip install -e ".[dev]"
+        # Same install path as the main CI job: the pinned lock is authoritative,
+        # so a dependency published with a breaking change (SQLAlchemy 2.1)
+        # cannot fail this job while the gate stays green.
+        run: |
+          python -m venv .venv
+          bash scripts/install_dev_deps.sh .venv/bin/pip
       - name: Run moto S3 tests
-        run: python -m pytest tests/test_archive_s3.py -q
+        run: .venv/bin/python -m pytest tests/test_archive_s3.py -q
 
   docker-minio-parity:
     name: Docker MinIO archive and parity smoke
@@ -65,14 +70,21 @@ jobs:
       - name: Run migrations
         run: docker compose -f docker-compose.ci.yml run --rm migrate
       - name: Seed Docker profile fixture data
+        # `--parity-window` seeds one fully evidence-backed asset at the same
+        # hour parity compares, so this smoke exercises parity behaviour
+        # instead of finding an empty lake and comparing nothing.
         # scripts/ is excluded from the Docker image by .dockerignore (keeps
         # the runtime image lean), so mount it read-only for this one-shot.
-        run: docker compose -f docker-compose.ci.yml run --rm -v ./scripts:/app/scripts:ro worker python scripts/seed_fixtures.py
+        run: docker compose -f docker-compose.ci.yml run --rm -v ./scripts:/app/scripts:ro worker python scripts/seed_fixtures.py --parity-window
       - name: Run live MinIO archive smoke
+        # --require-partitions fails the step when the seeded evidence was not
+        # due, so an empty lake can never look like a passing archive pass.
         run: |
-          docker compose -f docker-compose.ci.yml run --rm worker python -m ops.archive --once
+          docker compose -f docker-compose.ci.yml run --rm worker python -m ops.archive --once --require-partitions
       - name: Run parity against Docker MinIO profile
-        run: docker compose -f docker-compose.ci.yml run --rm worker python -m ops.parity --once
+        # --strict fails on a mismatch; --require-compared fails when nothing
+        # was compared at all (the vacuous pass this smoke used to allow).
+        run: docker compose -f docker-compose.ci.yml run --rm worker python -m ops.parity --once --strict --require-compared
       - name: Show dependency logs on failure
         if: failure()
         run: docker compose -f docker-compose.ci.yml logs --no-color minio postgres migrate

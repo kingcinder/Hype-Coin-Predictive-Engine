@@ -36,10 +36,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -506,6 +507,23 @@ def latest_parity(session: Session, *, settings: Settings | None = None) -> Pari
     }
 
 
+def require_compared(result: Mapping[str, Any]) -> None:
+    """Exit non-zero when a parity run compared zero assets.
+
+    An empty lake still reports ``status: ok`` with ``mismatches: 0``, which
+    proves the plumbing is wired rather than that the two read paths agree.
+    CI calls this after ``run_parity`` so a fixture that stops producing
+    comparable data fails the step instead of passing vacuously.
+    """
+    if result.get("compared_assets"):
+        return
+    raise SystemExit(
+        "::error::parity compared 0 assets "
+        f"(status={result.get('status')!r}) — nothing was compared, so this run "
+        "proves wiring rather than parity behaviour"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Serpent Circle lake-vs-SQL parity CI: compare the DuckDB "
@@ -516,6 +534,14 @@ def main() -> None:
         "--strict",
         action="store_true",
         help="exit non-zero when a mismatch is detected (CI integration)",
+    )
+    parser.add_argument(
+        "--require-compared",
+        action="store_true",
+        help=(
+            "exit non-zero when the run compared zero assets (an empty lake is "
+            "not evidence that the two read paths agree)"
+        ),
     )
     args = parser.parse_args()
 
@@ -535,6 +561,8 @@ def main() -> None:
         print(json.dumps(result, default=str))
         if args.strict and result.get("status") in ("red", "yellow"):
             raise SystemExit(1)
+        if args.require_compared:
+            require_compared(result)
         return
 
     parser.print_help()

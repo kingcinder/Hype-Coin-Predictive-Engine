@@ -824,6 +824,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Serpent Circle archive & retention jobs")
     parser.add_argument("--once", action="store_true", help="run compaction + prune once")
     parser.add_argument(
+        "--require-partitions",
+        action="store_true",
+        help=(
+            "exit non-zero when the pass compacted zero partitions (the seeded "
+            "evidence was not due, so the lake would stay empty)"
+        ),
+    )
+    parser.add_argument(
         "--query",
         metavar="SQL",
         help="run a DuckDB SQL query over the archived Parquet lake",
@@ -849,6 +857,11 @@ def main() -> None:
             result = run_archive(session)
             session.commit()
         print(json.dumps(result, default=str))
+        if args.require_partitions and not result.get("partitions"):
+            raise SystemExit(
+                "::error::archive compacted 0 partitions — no evidence was due, "
+                "so the lake stays empty"
+            )
         return
 
     parser.print_help()

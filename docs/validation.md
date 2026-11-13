@@ -347,8 +347,13 @@ Inspect `GET /archive/manifests` (API) or the **Archive & Retention** UI view.
 CI must run both archive modes: the `moto-s3` job executes
 `tests/test_archive_s3.py` without a live service, while the
 `docker-minio-parity` job starts the Docker profile's real MinIO/Postgres/
-Redis services, runs migrations and fixture seeding, executes a live
-`ops.archive --once` smoke, and runs `ops.parity --once` against the S3 lake.
+Redis services, runs migrations, seeds with `scripts/seed_fixtures.py
+--parity-window` — one evidence-backed asset at the parity decision hour, so
+there is a due partition and a non-empty lake — executes a live `ops.archive
+--once --require-partitions` smoke, and runs `ops.parity --once --strict
+--require-compared` against the S3 lake. The two guards matter: an empty lake
+used to report `status: ok` with `compared_assets: 0` and pass, which proved
+the wiring rather than the comparison.
 The S3 backend must also be covered **without a live MinIO container** via
 moto (`tests/test_archive_s3.py`): `object_exists` (missing vs present),
 `list_objects` (prefix narrowing, parquet-only, missing prefix), `download_to`

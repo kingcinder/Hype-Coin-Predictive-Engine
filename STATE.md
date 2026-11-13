@@ -1020,3 +1020,31 @@ the new ingestion timestamp fix does not rewrite that history.
   `pip check` reported no broken requirements, and mypy was clean over the 164
   configured files. `make setup` in the repo venv produced the same versions with
   `pip check` clean, and `sqlalchemy>=2.0,<2.1` resolves to 2.0.57 (not 2.1).
+
+### 2026-11-13 — Archive/parity CI smoke now compares real data instead of nothing (done)
+
+- **The vacuous pass:** the "Archive and parity" workflow seeded `scripts/seed_fixtures.py`'s
+  demo fleet, which wrote no `RawEvidenceItem` rows at all. `ops.archive` therefore had no due
+  partition, the lake stayed empty, and `ops.parity` took its lake-empty branch —
+  `{"status": "ok", "compared_assets": 0}` — which exited 0 even under `--strict`. The step
+  proved the wiring, not that the two read paths agree.
+- **Seeded fixture data:** `scripts/seed_fixtures.py --parity-window` now seeds one fully
+  evidence-backed asset (`seed_parity_window`) anchored at the parity decision hour
+  (`parity_decision_ts` ≈ now − 97 h, older than the 72 h compaction cutoff). Every
+  normalized row carries the payload that produced it: hourly GeckoTerminal `new_pools`
+  evidence plus its market/liquidity snapshots, a sub-threshold scan with its `low_liquidity`
+  flag, a `contract_analysis` pass with one flag per finding, and two hours of holder
+  snapshots with their RPC evidence. The numbers in each payload are the numbers written to
+  SQL, so both read paths compare the same observations. The default (fixed-date) seed path
+  used by the unit tests is unchanged.
+- **Guards:** `ops/parity --require-compared` exits non-zero when `compared_assets == 0`
+  (`require_compared`), and `ops.archive --require-partitions` exits non-zero when nothing was
+  due. The workflow now runs seed `--parity-window`, archive `--once --require-partitions`,
+  parity `--once --strict --require-compared`, and its moto job installs through
+  `scripts/install_dev_deps.sh` like the main CI job (it was the last bare `-e ".[dev]"`).
+- **Verified:** `tests/test_parity_fixture_seed.py` seeds the window on SQLite + a local
+  archive store, asserts the evidence is at or before the decision hour, that the archive
+  pass compacts `partitions > 0` rows, and that parity reports `status: ok`,
+  `mismatches: 0`, `compared_assets: 2`; it also asserts `require_compared` raises on a
+  zero-comparison result. The Docker/MinIO job itself still has to run in CI to confirm the
+  S3 path.
