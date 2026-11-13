@@ -661,6 +661,43 @@ in-flight work from other agents, still untouched.
   "online" report from the same day (that one recorded a single boot warning and did
   not sample the warning count over time).
 
+### 2026-11-13 — Fix: the scan held one write transaction for its whole duration (done)
+
+- **Root cause.** `IngestionService.run_once` writes through a single session and
+  had exactly one `session.commit()` — at the very end (`ingestion/service.py`).
+  SQLite's write lock is held from a transaction's first write until COMMIT, so
+  from the scan's first upsert the database was locked for the entire scan. Every
+  other writer died behind it: the write queue's `system_health` inserts waited out
+  `sqlite_busy_timeout_ms` and were dropped, one warning every 30s, so
+  `system_health` froze at the boot rows. If a source hung, the transaction was
+  never committed at all — the "never commits" wedge.
+- **Measured, not inferred.** On a throwaway DB the scan ran 15:59:20 → 16:02:53;
+  the file was locked for that whole window (4 queue warnings, an independent
+  `BEGIN IMMEDIATE` refused) and became writable in the same second the scan
+  committed. Bisected with a step probe: `_bootstrap()` (migrations, `create_all`,
+  reference seed), `start_write_queue()` and its WAL check all leave the DB
+  writable, so the lock was never a bootstrap artifact.
+- **Fix.** New `IngestionService._commit_stage()` and a commit after every stage in
+  `run_once`, plus a per-item commit in the loops that interleave network I/O with
+  writes (`_run_contract_analysis`, Solana holder snapshots, Solana safety
+  snapshots, EVM holder snapshots). 21 call sites. Failed per-asset work rolls back
+  before its commit so one bad asset cannot poison the loop.
+- **Trade-off, stated plainly.** The scan is no longer one atomic transaction: a
+  later stage failing no longer rolls back earlier completed stages. The scan is a
+  collection of idempotent upserts, and with a single-writer SQLite file this is
+  the only way the scan and the write queue can coexist; it also means a hung
+  source can no longer pin the database.
+- **Regression test.** `tests/test_engine_boot_writes.py` boots the real
+  `python -m engine` against a temp SQLite file (`SERPENT_DB_PATH`, free ports,
+  trimmed network env), waits for the API, then requires that new
+  `system_health` rows appear after startup *and* that an independent connection
+  can `BEGIN IMMEDIATE`. Verified both ways: without the fix it fails with
+  `write_queue_task_failed ... database is locked`; with it, 1 passed in 35s.
+- **Live check on the real `serpent.db`:** 0 lock warnings across ~3 minutes (was
+  one every 30s), `system_health` 1854 → 1860 with the max timestamp advancing,
+  independent writers succeeding, 0 tracebacks, `/health` 200, unauthenticated 401,
+  GUI 200.
+
 ## Branch ledger merged in during reconciliation (2026-11-07)
 
 The `fix/functional-pass` branch carried its own short STATE.md tracking the reviewed fix list. Its one unique record, preserved verbatim:

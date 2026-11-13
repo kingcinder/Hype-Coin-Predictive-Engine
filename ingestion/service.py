@@ -174,10 +174,32 @@ class IngestionService:
                 session, name=name, source_type=source_type, tier="public_metadata"
             )
 
+    @staticmethod
+    def _commit_stage(session: Session) -> None:
+        """End the scan's current transaction so SQLite's write lock is released.
+
+        SQLite allows exactly one writer, and a transaction keeps that lock from
+        its first write until COMMIT/ROLLBACK. A scan mixes network I/O with DB
+        writes, so holding one transaction for the whole scan blocks every other
+        writer: the engine's write queue (``system_health`` rows for the sources)
+        waits out ``sqlite_busy_timeout_ms`` and drops each write with
+        ``database is locked``, and ``system_health`` effectively freezes at boot.
+        If a source hangs, the transaction is never committed at all.
+
+        Every stage (and every item of a network-bound loop) therefore ends its
+        own unit of work. The scan is a collection of idempotent upserts, so
+        persisting a completed stage without waiting for the whole scan is the
+        intended trade-off; it is also what makes the scan survivable at all.
+        """
+        session.commit()
+
     def run_once(
         self, session: Session, *, pre_scan_health: dict[str, object] | None = None
     ) -> dict[str, Any]:
         self.ensure_reference_data(session)
+        # Reference rows are written before the first network call; commit them
+        # so the scan never opens its write transaction during a slow fetch.
+        self._commit_stage(session)
         errors: list[str] = []
         result: dict[str, Any] = {
             "pairs": 0,
@@ -191,28 +213,38 @@ class IngestionService:
         try:
             decision_ts = utc_now()
             result["profiles"] = self._ingest_dexscreener_profiles(session)
+            self._commit_stage(session)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
+            self._commit_stage(session)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
+            self._commit_stage(session)
             result["holder_snapshots"] = self._ingest_solana_holder_snapshots(session)
             result["safety_snapshots"] = self._ingest_solana_safety_snapshots(session)
             result["holder_snapshots"] += self._ingest_evm_holder_snapshots(session)
+            self._commit_stage(session)
             result["mempool"] = run_mempool(session, decision_ts=decision_ts)
             result["lp_removals"] = LiquidityRemovalWatcher().scan(session, decision_ts=decision_ts)
             result["prelaunch"] = len(PrelaunchQueue().scan(session, decision_ts=decision_ts))
+            self._commit_stage(session)
             result["narrative"] = run_narrative(session, decision_ts=decision_ts)
             result["catalysts"] = extract_catalysts(session, decision_ts=decision_ts)
             result["catalyst_alerts"] = alert_upcoming_catalysts(session, decision_ts=decision_ts)
+            self._commit_stage(session)
             radar_result = IgnitionRadar().scan(session, decision_ts=decision_ts)
             result["ignition_events"] = sum(radar_result.values())
             fingerprint = FingerprintEngine()
             result["fingerprint_clusters"] = fingerprint.learn(session)
             result["fingerprints"] = len(fingerprint.assess(session))
+            self._commit_stage(session)
             result["lifecycle"] = run_lifecycle(session, decision_ts=decision_ts)
+            self._commit_stage(session)
             forecast_result = run_forecast_if_due(session, decision_ts=decision_ts)
             result["forecasts"] = forecast_result.get("forecasts", 0)
+            self._commit_stage(session)
             scores = score_current_assets(session, decision_ts=decision_ts)
             result["scores"] = len(scores)
+            self._commit_stage(session)
             # ── Risk calibration: learn from historical outcomes ─────────
             try:
                 from risk_engine.calibrator import run_calibration
@@ -225,7 +257,9 @@ class IngestionService:
                 }
             except Exception as cal_exc:  # noqa: BLE001
                 log.debug("risk_calibration_failed", error=str(cal_exc))
+            self._commit_stage(session)
             result["ntfy"] = run_notifier(session, decision_ts=decision_ts)
+            self._commit_stage(session)
             # Compaction is owned by the retention autopilot on its cadence
             # (RETENTION_CADENCE_HOURS), running on a per-partition schedule.
             # The scan never touches the archive; it just reports the stage as
@@ -238,6 +272,7 @@ class IngestionService:
             except Exception as qe:  # noqa: BLE001
                 log.debug("data_quality_check_failed", error=str(qe))
                 result["data_quality"] = {"error": str(qe)}
+            self._commit_stage(session)
             # ── Phase 1: Contract analysis for new assets ───────────────
             try:
                 contract_result = self._run_contract_analysis(session, decision_ts)
@@ -245,6 +280,7 @@ class IngestionService:
             except Exception as ce:  # noqa: BLE001
                 log.debug("contract_analysis_failed", error=str(ce))
                 result["contract_analysis"] = {"error": str(ce)}
+            self._commit_stage(session)
             record_health(
                 session,
                 component="worker",
@@ -255,6 +291,8 @@ class IngestionService:
                     "the retention autopilot"
                 ),
             )
+            # Commit before the RPC pool probes below, which are network calls.
+            self._commit_stage(session)
             # Probe downed endpoints so the health rows reflect fresh state
             # (the background threads cover long-running workers; this covers
             # --once runs and makes recovery deterministic per scan).
@@ -441,6 +479,9 @@ class IngestionService:
                     "reasons": analysis.reasons,
                 }
             )
+            # Each analysis is a network round-trip; commit so the next asset's
+            # fetch does not run while we still hold SQLite's write lock.
+            self._commit_stage(session)
         flagged = sum(1 for r in results if r["suspicious_flags"] > 0)
         return {"analyzed": len(results), "flagged": flagged}
 
@@ -689,7 +730,11 @@ class IngestionService:
                         count += 1
                     raw.raw_path = raw.raw_path or f"holder_snapshot:{asset.id}:{ts.isoformat()}"
                 except Exception as exc:  # noqa: BLE001 - preserve per-asset source failure.
+                    session.rollback()
                     errors.append(f"{asset.address}: {exc}")
+                # Per-asset commit: the RPC calls above are network I/O and must
+                # not run inside an open write transaction.
+                self._commit_stage(session)
                 sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
             state = "ok" if not errors else "yellow"
             message = f"{count} holder rows across {len(assets)} assets"
@@ -793,7 +838,9 @@ class IngestionService:
                             raw.raw_path or f"evm_holder_snapshot:{asset.id}:{ts.isoformat()}"
                         )
                     except Exception as exc:  # noqa: BLE001 - per-asset source failure.
+                        session.rollback()
                         errors.append(f"{chain_slug}:{asset.address}: {exc}")
+                    self._commit_stage(session)
                     sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
             finally:
                 client.close()
@@ -828,7 +875,9 @@ class IngestionService:
             try:
                 collect_asset_safety(session, asset, observed_at=observed_at)
             except Exception as exc:  # noqa: BLE001 - isolate malformed provider/account data.
+                session.rollback()
                 log.warning("solana_safety_snapshot_failed", asset_id=asset.id, error=str(exc))
+            self._commit_stage(session)
             sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
         record_health(
             session,
