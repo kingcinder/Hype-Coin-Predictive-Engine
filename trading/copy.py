@@ -26,6 +26,9 @@ from trading.wallets import load_wallets
 
 _APPROVAL_CLAIMED = "approval_claimed"
 _SUBMISSION_STARTED = "submission_started"
+# Refusals that can only follow a venue submission. The venue may have accepted
+# the order, so these must never release the claim for an automatic retry.
+_POST_SUBMIT_REFUSAL_REASONS = frozenset({"fill_unconfirmed"})
 
 
 def _log(
@@ -292,7 +295,7 @@ def approve_copy(
             why_entered=f"copy:{pending.wallet}",
         )
     except TradeRefused as exc:
-        if exc.reason == "fill_unconfirmed":
+        if exc.reason in _POST_SUBMIT_REFUSAL_REASONS:
             # The venue may have accepted the order even though the fill was
             # not confirmed. Keep the claim so no retry submits a second live
             # order; reconcile through the recovery endpoint instead.

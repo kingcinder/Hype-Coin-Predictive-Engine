@@ -430,8 +430,9 @@ def test_unexpected_failure_keeps_claim(session, queue, enabled, monkeypatch) ->
     assert _rows(session, models.LedgerOpenPosition) == []
 
 
-def test_unconfirmed_fill_keeps_claim_and_blocks_retry(
-    session, queue, enabled, monkeypatch
+@pytest.mark.parametrize("reason", sorted(copy._POST_SUBMIT_REFUSAL_REASONS))
+def test_post_submit_refusal_keeps_claim_and_blocks_retry(
+    session, queue, enabled, monkeypatch, reason
 ) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "live_trading_enabled", "1")
@@ -450,12 +451,12 @@ def test_unconfirmed_fill_keeps_claim_and_blocks_retry(
 
         def open_trade(self, *args, **kwargs) -> int:
             opened.append(1)
-            raise TradeRefused("fill_unconfirmed")
+            raise TradeRefused(reason)
 
     monkeypatch.setattr(copy, "get_candidate", lambda *args, **kwargs: {"mint": "M"})
     monkeypatch.setattr("trading.ledger.TradeEngine", FakeEngine)
 
-    with pytest.raises(TradeRefused, match="fill_unconfirmed"):
+    with pytest.raises(TradeRefused, match=reason):
         copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=60))
 
     held = _rows(session, models.CopyLog)[0]

@@ -129,6 +129,92 @@ def test_copy_signal_queues_pending_without_trading(client, session, monkeypatch
     assert session.scalars(select(models.LedgerOpenPosition)).all() == []
 
 
+def _approving_copy_log(session, *, detail: str, mint: str = "M") -> models.CopyLog:
+    log = models.CopyLog(
+        ts=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+        wallet="W",
+        mint=mint,
+        size_sol=Decimal("0.1"),
+        status="approving",
+        detail=detail,
+    )
+    session.add(log)
+    session.commit()
+    return log
+
+
+def test_recover_copy_releases_fresh_claim(client, session) -> None:
+    log = _approving_copy_log(session, detail="approval_claimed")
+
+    response = client.post(f"/trading/copy/{log.id}/recover")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "pending"
+    assert response.json()["log_id"] == log.id
+    assert response.json()["detail"] == "recovered; awaiting human approval"
+    session.expire_all()
+    recovered = session.get(models.CopyLog, log.id)
+    assert recovered is not None
+    assert recovered.status == "pending"
+
+
+def test_recover_copy_refuses_uncertain_claim_without_proof(client, session) -> None:
+    log = _approving_copy_log(session, detail="submission_started")
+
+    response = client.post(f"/trading/copy/{log.id}/recover", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "copy_approval_uncertain"
+    session.expire_all()
+    unchanged = session.get(models.CopyLog, log.id)
+    assert unchanged is not None
+    assert unchanged.status == "approving"
+    assert unchanged.detail == "submission_started"
+
+
+def test_recover_copy_uses_matching_position(client, session) -> None:
+    log = _approving_copy_log(session, detail="submission_started", mint="M-RECOVER")
+    opened_at = datetime(2026, 5, 1, 12, 1, tzinfo=UTC)
+    position = models.LedgerOpenPosition(
+        mode="live",
+        mint="M-RECOVER",
+        chain="solana",
+        source_signal="copy",
+        entry_quote_price=Decimal("1"),
+        entry_effective_price=Decimal("1"),
+        qty=Decimal("1"),
+        size_sol=Decimal("0.1"),
+        entry_fees_sol=Decimal("0"),
+        entry_slip_pct=Decimal("0"),
+        is_new_token=False,
+        stop_pct=Decimal("20"),
+        target_pct=Decimal("50"),
+        time_stop_minutes=None,
+        stop_price=Decimal("0.8"),
+        target_price=Decimal("1.5"),
+        time_stop_at=None,
+        opened_at=opened_at,
+        price_source="market_snapshot",
+        price_source_ts=opened_at,
+        candidate_evidence_ts=opened_at,
+        why_entered="copy recovery test",
+        rules_sha256="0" * 64,
+        created_at=opened_at,
+    )
+    session.add(position)
+    session.commit()
+
+    response = client.post(f"/trading/copy/{log.id}/recover", json={"position_id": position.id})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "executed"
+    assert response.json()["detail"] == f"position_id={position.id}"
+    session.expire_all()
+    recovered = session.get(models.CopyLog, log.id)
+    assert recovered is not None
+    assert recovered.status == "executed"
+
+
 def test_execute_default_settings_is_403(client) -> None:
     response = client.post(
         "/trading/execute",
