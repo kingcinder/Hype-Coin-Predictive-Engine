@@ -115,49 +115,78 @@ class LiquidityRemovalWatcher:
         return counts
 
     def _logs_for_pools(self, chain_slug: str, pool_addresses: list[str]) -> list[dict[str, Any]]:
-        rpc_url = get_rpc_url(chain_slug)
-        if not rpc_url:
+        primary = get_rpc_url(chain_slug)
+        if not primary:
             raise RuntimeError(f"no RPC URL for {chain_slug}")
         pool = rpc_pool_for(chain_slug)
-        try:
-            with HttpClient(base_url=rpc_url) as http:
-                latest_payload = http.post_json(
-                    "/",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "eth_blockNumber",
-                        "params": [],
-                    },
+        candidates = [primary]
+        if pool is not None:
+            for state in sorted(pool.snapshot(), key=lambda item: (item.down, -item.health)):
+                if state.url not in candidates:
+                    candidates.append(state.url)
+        # One public endpoint answering 403/429/525 must not leave the watcher
+        # red: try the next healthy endpoint in the same pass. Each failure is
+        # scored, so two consecutive failures take it down and later scans skip
+        # it instead of re-failing on the same dead endpoint.
+        last_error: Exception | None = None
+        for url in candidates[:3]:
+            try:
+                return self._logs_from_endpoint(url, chain_slug, pool, pool_addresses)
+            except Exception as exc:  # noqa: BLE001 - fail over to the next endpoint.
+                last_error = exc
+                if pool is not None:
+                    pool.mark_failure(url)
+                log.warning(
+                    "lp_removal_endpoint_failed",
+                    chain=chain_slug,
+                    url=url,
+                    error=str(exc),
                 )
-                latest = self._hex_int(latest_payload.get("result"))
-                if latest is None:
-                    raise RuntimeError(f"{chain_slug}: invalid eth_blockNumber response")
-                start = max(0, latest - max(1, self.settings.liquidity_removal_lookback_blocks))
-                payload = http.post_json(
-                    "/",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "eth_getLogs",
-                        "params": [
-                            {
-                                "fromBlock": hex(start),
-                                "toBlock": hex(latest),
-                                "address": pool_addresses,
-                                "topics": [[BURN_TOPIC, TRANSFER_TOPIC]],
-                            }
-                        ],
-                    },
-                )
-            if pool is not None:
-                pool.mark_success(rpc_url)
-            result = payload.get("result") if isinstance(payload, dict) else None
-            return result if isinstance(result, list) else []
-        except Exception:
-            if pool is not None:
-                pool.mark_failure(rpc_url)
-            raise
+        if last_error is None:
+            raise RuntimeError(f"no RPC endpoint available for {chain_slug}")
+        raise last_error
+
+    def _logs_from_endpoint(
+        self,
+        rpc_url: str,
+        chain_slug: str,
+        pool: Any,
+        pool_addresses: list[str],
+    ) -> list[dict[str, Any]]:
+        with HttpClient(base_url=rpc_url) as http:
+            latest_payload = http.post_json(
+                "/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_blockNumber",
+                    "params": [],
+                },
+            )
+            latest = self._hex_int(latest_payload.get("result"))
+            if latest is None:
+                raise RuntimeError(f"{chain_slug}: invalid eth_blockNumber response")
+            start = max(0, latest - max(1, self.settings.liquidity_removal_lookback_blocks))
+            payload = http.post_json(
+                "/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "eth_getLogs",
+                    "params": [
+                        {
+                            "fromBlock": hex(start),
+                            "toBlock": hex(latest),
+                            "address": pool_addresses,
+                            "topics": [[BURN_TOPIC, TRANSFER_TOPIC]],
+                        }
+                    ],
+                },
+            )
+        if pool is not None:
+            pool.mark_success(rpc_url)
+        result = payload.get("result") if isinstance(payload, dict) else None
+        return result if isinstance(result, list) else []
 
     @classmethod
     def _parse_log(

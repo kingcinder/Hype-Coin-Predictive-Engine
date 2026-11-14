@@ -97,25 +97,27 @@ class Settings(BaseSettings):
         validation_alias="TARGET_CHAINS",
     )
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
-    base_rpc_url: str = "https://mainnet.base.org"
-    ethereum_rpc_url: str = "https://ethereum-rpc.publicnode.com"
+    base_rpc_url: str = "https://base.meowrpc.com"
+    ethereum_rpc_url: str = "https://eth.meowrpc.com"
 
     # curated free RPC endpoint pools per chain (blueprint §2): health-scored
     # rotation and automatic failover when a public endpoint rate-limits or dies
     rpc_pool_enabled: bool = True
     solana_rpc_pool_csv: str = (
-        "https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com"
+        "https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com"
     )
     base_rpc_pool_csv: str = (
+        "https://base.meowrpc.com,"
+        "https://gateway.tenderly.co/public/base,"
+        "https://base-mainnet.public.blastapi.io,"
         "https://mainnet.base.org,"
-        "https://base-rpc.publicnode.com,"
-        "https://base.llamarpc.com,"
-        "https://base.drpc.org"
+        "https://base-rpc.publicnode.com"
     )
     ethereum_rpc_pool_csv: str = (
+        "https://eth.meowrpc.com,"
+        "https://rpc.mevblocker.io,"
         "https://ethereum-rpc.publicnode.com,"
         "https://eth.llamarpc.com,"
-        "https://rpc.ankr.com/eth,"
         "https://eth.drpc.org"
     )
     rpc_pool_failure_threshold: int = 2
