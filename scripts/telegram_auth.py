@@ -6,12 +6,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 
 
 async def main() -> None:
     settings = get_settings()
-    if not settings.telegram_api_id or not settings.telegram_api_hash:
+    api_hash = secret_value(settings.telegram_api_hash)
+    if not settings.telegram_api_id or not api_hash:
         print(
             "Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env first. "
             "Both are free: https://my.telegram.org -> API development tools."
@@ -26,7 +27,7 @@ async def main() -> None:
     client = TelegramClient(
         settings.telegram_session_file,
         settings.telegram_api_id,
-        settings.telegram_api_hash,
+        api_hash,
     )
     await client.start()
     me = await client.get_me()

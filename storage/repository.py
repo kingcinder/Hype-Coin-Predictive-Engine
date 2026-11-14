@@ -867,7 +867,7 @@ def _code_sha() -> str:
 # of the config fingerprint (C1): ``*_key``, ``*_secret``, ``*_token``,
 # ``*password*`` and ``*signer*`` cover the provider keys plus future additions
 # without maintaining a hand-written list.
-_SECRET_SETTING_NAME = re.compile(r"secret|key|token|password|signer", re.IGNORECASE)
+_SECRET_SETTING_NAME = re.compile(r"secret|key|token|password|signer|hash", re.IGNORECASE)
 
 
 def _config_fingerprint_input() -> str:

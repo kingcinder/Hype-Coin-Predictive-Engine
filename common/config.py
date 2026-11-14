@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Database URL override sources, highest precedence first. ``SERPENT_DB_PATH``
@@ -221,11 +221,23 @@ class Settings(BaseSettings):
     # telegram public-channel crawler (Telethon; free, one-time session login)
     telegram_enabled: bool = False
     telegram_api_id: int | None = None
-    telegram_api_hash: str | None = None
+    telegram_api_hash: SecretStr | None = None
     telegram_session_file: str = "telegram.session"
     telegram_channel_handles_csv: str = ""
     telegram_message_limit: int = 30
     telegram_rate_limit_pause_seconds: float = 2.0
+
+    @field_validator("telegram_api_id", mode="before")
+    @classmethod
+    def _blank_telegram_api_id(cls, value: object) -> object:
+        """Treat an empty ``TELEGRAM_API_ID=`` line as unset, not invalid.
+
+        ``.env.example`` ships the placeholder blank; pydantic would otherwise
+        raise a validation error and the whole engine would fail to start.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     # ntfy.sh push notifier (free, no account on ntfy.sh)
     ntfy_enabled: bool = False
