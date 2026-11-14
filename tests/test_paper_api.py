@@ -6,10 +6,12 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from api.main import app
 from common.config import get_settings
+from storage import models
 from storage.database import get_session
 from storage.write_queue import start_write_queue, stop_write_queue
 from tests.conftest import seed_market_asset
@@ -98,6 +100,33 @@ def test_missing_rules_is_409(client, session, monkeypatch, tmp_path) -> None:
     response = client.post(f"/paper/candidates/{asset.address}/trade", json={"why_entered": "x"})
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "rules_incomplete"
+
+
+def test_copy_signal_queues_pending_without_trading(client, session, monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "copy_trading_enabled", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    monkeypatch.setattr("trading.copy.load_wallets", lambda: [{"address": "W", "chain": "solana"}])
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    session.add(models.LiveGateState(ts=now, kind="armed", reason="test"))
+    seed_market_asset(session)
+    session.commit()
+
+    response = client.post(
+        "/trading/copy/signal",
+        json={"wallet": "W", "mint": "M", "size_sol": "1"},
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "pending"
+    assert response.json()["log_id"] is not None
+
+    session.expire_all()
+    row = session.scalars(select(models.CopyLog)).one()
+    assert row.status == "pending"
+    assert row.size_sol == Decimal("0.1")
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
 
 
 def test_execute_default_settings_is_403(client) -> None:

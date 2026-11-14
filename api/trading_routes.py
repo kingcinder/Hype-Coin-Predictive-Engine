@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from api.auth import DbSession
@@ -39,6 +39,12 @@ class AckBody(BaseModel):
 class CandidateTradeBody(BaseModel):
     why_entered: str
     mode: str = "paper"
+
+
+class CopySignalBody(BaseModel):
+    wallet: str = Field(min_length=1)
+    mint: str = Field(min_length=1)
+    size_sol: Decimal = Field(gt=0)
 
 
 def _json_value(value):
@@ -291,6 +297,17 @@ async def trading_kill(session: DbSession) -> dict:
         except Exception:  # noqa: BLE001 - kill must survive any executor failure.
             failed += 1
     return {"killed": True, "cancelled": cancelled, "failed": failed}
+
+
+@router.post("/trading/copy/signal", status_code=202)
+async def trading_copy_signal(body: CopySignalBody, session: DbSession) -> dict:
+    """Queue a tracked-wallet copy signal; approval remains a separate human step."""
+    from trading.copy import maybe_queue_copy
+
+    row = maybe_queue_copy(session, body.wallet, body.mint, body.size_sol)
+    if row is None:
+        raise HTTPException(422, {"error": "copy_not_queued"})
+    return {"status": row.status, "log_id": row.id, "detail": row.detail}
 
 
 @router.post("/trading/copy/{log_id}/approve")

@@ -172,6 +172,7 @@ def test_drawdown_requires_ack(session, queue, rules_file) -> None:
             size_sol=Decimal("1"),
             fees_sol=Decimal("0"),
             slippage_sol=Decimal("0"),
+            stop_pct=Decimal("0.1"),
             exit_price=Decimal("1"),
             pnl_sol=Decimal("-1.1"),
             why_entered="t",

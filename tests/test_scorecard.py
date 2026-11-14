@@ -21,6 +21,7 @@ def _trade(session, pnl: Decimal) -> None:
             size_sol=Decimal("1"),
             fees_sol=Decimal("0"),
             slippage_sol=Decimal("0"),
+            stop_pct=Decimal("0.1"),
             exit_price=Decimal("1"),
             pnl_sol=pnl,
             why_entered="test",

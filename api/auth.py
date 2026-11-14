@@ -12,7 +12,7 @@ from common.config import Settings, get_settings
 from storage.database import get_session
 
 
-def _check_bearer_token(
+def check_bearer_token(
     authorization: str | None, settings: Settings | None = None
 ) -> tuple[int, str] | None:
     """Validate the ``Authorization: Bearer <token>`` credential (H4).
@@ -43,10 +43,3 @@ def _check_bearer_token(
 
 DbSession = Annotated[Session, Depends(get_session)]
 """SQLAlchemy session dependency for DB access."""
-
-
-def check_bearer_token(
-    authorization: str | None, settings: Settings | None = None
-) -> tuple[int, str] | None:
-    """Public wrapper for bearer-token validation."""
-    return _check_bearer_token(authorization, settings=settings)

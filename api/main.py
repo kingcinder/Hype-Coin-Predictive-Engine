@@ -113,11 +113,6 @@ app = FastAPI(
 VALIDATION_REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
 
 
-def _check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
-    """Route auth through this module's settings name (tests patch it here)."""
-    return check_bearer_token(authorization, settings=get_settings())
-
-
 class _RequireApiTokenMiddleware:
     """Bearer-token gate for every HTTP and WebSocket endpoint (H4).
 
@@ -137,7 +132,7 @@ class _RequireApiTokenMiddleware:
         ):
             headers = dict(scope.get("headers", []))
             authorization = headers.get(b"authorization", b"").decode("latin-1") or None
-            verdict = _check_bearer_token(authorization)
+            verdict = check_bearer_token(authorization, settings=get_settings())
             if verdict is not None:
                 status_code, detail = verdict
                 log.warning(
