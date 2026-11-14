@@ -1,6 +1,7 @@
 # Production hardening overlay — apply on top of docker-compose.yml:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   docker compose --env-file .env.prod \
+#     -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
 # Hardens the single-container stack: read-only root filesystem (only the
 # named volumes and tmpfs are writable), dropped Linux capabilities, resource
@@ -8,16 +9,26 @@
 # backup sidecar is kept but given the same resource/security posture.
 #
 # Requires a .env.prod file (see INSTALL.md) holding secrets such as
-# HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, FARCASTER_API_KEY, etc.
+# HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, FARCASTER_API_KEY, etc.,
+# plus BIRDEYE_API_KEY: the engine service below refuses to start without a
+# non-empty value, because production must not silently run the Birdeye feed
+# in its disabled state. Local/non-production runs still degrade to that
+# disabled state when the key is absent.
 
 services:
   engine:
     env_file:
       - .env
-      # Secrets file — optional; create .env.prod for API keys and
-      # credentials (HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, ...).
+      # Secrets file — create .env.prod for API keys and credentials
+      # (HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, BIRDEYE_API_KEY, ...).
+      # The production command also passes it as --env-file so compose can
+      # interpolate the required BIRDEYE_API_KEY below.
       - path: .env.prod
         required: false
+    environment:
+      # Fail closed: compose aborts if BIRDEYE_API_KEY is unset or empty in
+      # .env.prod, instead of deploying a feed that reports "disabled".
+      BIRDEYE_API_KEY: ${BIRDEYE_API_KEY:?Set BIRDEYE_API_KEY in .env.prod before starting the production stack}
     read_only: true
     tmpfs:
       - /tmp

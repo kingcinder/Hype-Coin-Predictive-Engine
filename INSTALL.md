@@ -146,13 +146,21 @@ cp .env.example .env
 docker compose up -d
 
 # Production-hardened stack: read-only rootfs, dropped capabilities,
-# resource limits, log rotation. Optionally create .env.prod for secrets
-# (HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, FARCASTER_API_KEY, ...):
+# resource limits, log rotation. Create .env.prod for secrets
+# (HELIUS_API_KEY, ETHERSCAN_API_KEY, NTFY_TOPIC, FARCASTER_API_KEY,
+# BIRDEYE_API_KEY, ...):
 cp .env .env.prod && nano .env.prod
-sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+sudo docker compose --env-file .env.prod \
+  -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 - **GUI:** http://localhost:8501 · **API health:** http://localhost:8000/health
+- **Birdeye key is mandatory in production:** `docker-compose.prod.yml` sets
+  `BIRDEYE_API_KEY: ${BIRDEYE_API_KEY:?...}` and the command above loads
+  `.env.prod`, so an unset or empty key aborts `docker compose up` with a
+  clear message instead of deploying with the feed silently disabled. Local
+  and dev runs may omit it; the feed then reports `disabled` (yellow).
+  `.env.prod` is gitignored.
 - **Local LLM:** Compose defaults to Ollama and pulls `qwen2.5:7b` on first boot;
   models persist in the `ollama-models` volume. Set `LLM_PROVIDER=openai_compat`,
   `LLM_BASE_URL=http://<llama-server-host>:8080`, and `LLM_MODEL` to the alias

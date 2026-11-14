@@ -19,8 +19,10 @@ This checklist does not rotate credentials or rewrite Git history.
   each provider and update the corresponding deployment environment.
 - [ ] `QUICKNODE_EVM_RPC_URL`: if it contains a provider credential, revoke the
   endpoint/key and replace the URL in deployment configuration.
-- [ ] `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`: regenerate the app
-  credentials and update the crawler environment.
+- [ ] `BIRDEYE_API_KEY`: rotate at Birdeye, update `.env.prod` for the
+  production stack (and `.env` for local runs), then confirm the next scan
+  reports `source:birdeye` as `ok`. The production Compose overlay refuses to
+  start when this value is missing or empty.
 - [ ] `TELEGRAM_API_HASH`: regenerate the Telegram application credential;
   review and replace the associated `TELEGRAM_API_ID` configuration if the
   application itself was exposed. Revoke and recreate any affected Telegram
@@ -29,6 +31,15 @@ This checklist does not rotate credentials or rewrite Git history.
   create a new private topic and update every publisher and subscriber.
 
 Also inspect `DATABASE_URL` and any provider URL for embedded credentials.
+
+## Production secret storage
+
+`docker-compose.prod.yml` reads `.env.prod` for production secrets; the file
+is gitignored and must never be committed. Start that stack with
+`--env-file .env.prod` so Compose can interpolate the required
+`BIRDEYE_API_KEY` (see `INSTALL.md`). Development and local runs may omit the
+key: the Birdeye feed then reports `disabled` (yellow) instead of failing the
+scan.
 The literal `serpent` and `minioadmin` values in `.env.example` are documented
 development placeholders only; replace them in every real deployment.
 
