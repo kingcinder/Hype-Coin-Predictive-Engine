@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import storage.models as models
-from storage.database import SessionLocal
 
 if TYPE_CHECKING:
     from common.config import Settings
@@ -209,20 +208,59 @@ def _run_watchdog_phase(
 
         from storage.models import Alert as ModelsAlert
 
+        # Route the ntfy Alert row through the write queue (R3 P0-3): the
+        # old code opened a separate SessionLocal transaction here and
+        # fabricated asset_id 1 when no asset existed, which violates the
+        # Alert FK and reintroduces the lock contention the write queue
+        # removes. No Alert row is created when no asset exists yet.
+        from storage.repository import queued_write
+        from storage.write_queue import WriteQueueNotRunning
+
+        def _create_wedge_alert(write_session):
+            first_asset_id = write_session.scalar(select(models.Asset.id).limit(1))
+            if first_asset_id is None:
+                return None
+            alert = ModelsAlert(
+                asset_id=int(first_asset_id),
+                alert_type="phase_wedge_timeout",
+                threshold_version="watchdog-v1",
+                state="open",
+                message=message,
+                created_at=datetime.now(UTC),
+            )
+            write_session.add(alert)
+            write_session.flush()
+            return alert.id
+
         try:
-            with SessionLocal() as ns:
-                asset_id = session.scalar(select(models.Asset.id).limit(1)) or 1
-                alert = ModelsAlert(
-                    asset_id=int(asset_id),
-                    alert_type="phase_wedge_timeout",
-                    state="open",
-                    message=message,
-                    created_at=datetime.now(UTC),
+            queued_write(_create_wedge_alert)
+        except WriteQueueNotRunning:
+            # No write queue (tests, CLIs): use the injected session when
+            # one was provided, exactly like _record above. Never open a
+            # throwaway SessionLocal here - that was the separate write
+            # transaction this fix removes, and in tests it would target
+            # the production database file.
+            if session is not None:
+                try:
+                    _create_wedge_alert(session)
+                    session.flush()
+                except Exception as exc:
+                    log.warning(
+                        "phase_wedge_timeout_ntfy_alert_failed",
+                        stage=stage,
+                        error=str(exc),
+                        exc_info=True,
+                    )
+            else:
+                log.warning(
+                    "phase_wedge_timeout_ntfy_alert_skipped",
+                    stage=stage,
+                    reason="no write queue and no injected session",
                 )
-                ns.add(alert)
-                ns.commit()
         except Exception as exc:
-            log.warning("phase_wedge_timeout_ntfy_alert_failed", stage=stage, error=str(exc))
+            log.warning(
+                "phase_wedge_timeout_ntfy_alert_failed", stage=stage, error=str(exc), exc_info=True
+            )
         return outcome
 
     if not outcome.skipped:

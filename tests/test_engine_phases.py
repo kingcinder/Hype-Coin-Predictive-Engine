@@ -8,8 +8,9 @@ from typing import Any
 from sqlalchemy import select
 
 from common.config import Settings
-from engine.run import run_engine_phases
+from engine.run import _run_watchdog_phase, run_engine_phases
 from storage import models
+from tests.conftest import seed_market_asset
 
 # None of these health components is written by any other engine path, so the
 # assertion "each contributes exactly one red row" is unambiguous here.
@@ -493,3 +494,35 @@ def test_first_nightcrawler_pass_runs_on_a_freshly_booted_host(session, monkeypa
         score_drift_fn=_skip,
     )
     assert calls == [1], "a recent pass must still defer the next one"
+
+
+def test_wedge_timeout_alert_needs_a_real_asset(session) -> None:
+    """R3 P0-3: a wedged phase must not fabricate an Alert with asset_id 1.
+    With no assets, no Alert row is created; with a real asset, the row uses
+    that asset id and the phase_wedge_timeout type."""
+    outcome = _run_watchdog_phase(
+        stage="forecast",
+        component="forecast",
+        timeout_seconds=0.05,
+        fn=_blocking(1.0),
+        session=session,
+    )
+    assert outcome is not None and outcome.timed_out
+    session.commit()
+    assert session.scalars(select(models.Alert)).all() == []
+
+    asset = seed_market_asset(session)
+    session.commit()
+    outcome = _run_watchdog_phase(
+        stage="parity",
+        component="parity",
+        timeout_seconds=0.05,
+        fn=_blocking(1.0),
+        session=session,
+    )
+    assert outcome is not None and outcome.timed_out
+    session.commit()
+    alerts = session.scalars(select(models.Alert)).all()
+    assert len(alerts) == 1
+    assert alerts[0].asset_id == asset.id
+    assert alerts[0].alert_type == "phase_wedge_timeout"
