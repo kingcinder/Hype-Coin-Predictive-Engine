@@ -554,10 +554,21 @@ def test_unexpected_failure_keeps_claim(session, queue, enabled, monkeypatch) ->
     assert _rows(session, models.LedgerOpenPosition) == []
 
 
-@pytest.mark.parametrize("reason", sorted(copy._POST_SUBMIT_REFUSAL_REASONS))
-def test_post_submit_refusal_keeps_claim_and_blocks_retry(
-    session, queue, enabled, monkeypatch, reason
+def test_post_submit_fill_unconfirmed_keeps_claim_and_blocks_retry(
+    session, queue, enabled, monkeypatch
 ) -> None:
+    """The known post-submit refusal must keep the claim, explicitly.
+
+    ``fill_unconfirmed`` is spelled out here (not derived from
+    ``_POST_SUBMIT_REFUSAL_REASONS``) so clearing or narrowing that set cannot
+    delete this test: the classification is asserted first, then the retry
+    block proves a second live submission cannot happen.
+    """
+    reason = "fill_unconfirmed"
+    assert reason in copy._POST_SUBMIT_REFUSAL_REASONS, (
+        "fill_unconfirmed must stay classified as post-submit; otherwise its "
+        "claim is released and a retry can submit a second live order"
+    )
     settings = get_settings()
     monkeypatch.setattr(settings, "live_trading_enabled", "1")
     monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
