@@ -12,6 +12,11 @@ _SENSITIVE_QUERY_KEYS = frozenset(
     {"api-key", "api_key", "apikey", "key", "token", "access_token", "secret"}
 )
 _PATH_TOKEN = re.compile(r"(/(?:v\d+)/)([A-Za-z0-9_-]{12,})")
+# Chat/webhook endpoints authenticate with a token in the path, so an httpx
+# error message can leak the credential without any query string.
+_TELEGRAM_BOT_TOKEN = re.compile(r"(/bot)[A-Za-z0-9:_-]{20,}")
+_DISCORD_WEBHOOK_TOKEN = re.compile(r"(/api/webhooks/\d+/)[A-Za-z0-9_-]{20,}")
+_SLACK_WEBHOOK_TOKEN = re.compile(r"(/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/)[A-Za-z0-9_-]+")
 
 
 def redact_url(url: str) -> str:
@@ -23,6 +28,9 @@ def redact_url(url: str) -> str:
     except ValueError:
         return url
     path = _PATH_TOKEN.sub(r"\1***", parts.path)
+    path = _TELEGRAM_BOT_TOKEN.sub(r"\1***", path)
+    path = _DISCORD_WEBHOOK_TOKEN.sub(r"\1***", path)
+    path = _SLACK_WEBHOOK_TOKEN.sub(r"\1***", path)
     if not parts.query:
         return urlunsplit((parts.scheme, parts.netloc, path, "", parts.fragment))
     query = [

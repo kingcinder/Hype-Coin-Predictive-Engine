@@ -46,6 +46,19 @@ def test_redact_url_masks_credentials_inside_http_error_text() -> None:
     assert "api-key=***" in redact_url(helius)
 
 
+def test_redact_url_masks_webhook_and_bot_tokens_in_paths() -> None:
+    telegram = "https://api.telegram.org/bot123456789:AAHfake-token-value/sendMessage"
+    discord = "https://discord.com/api/webhooks/123456789012345678/fake-discord-webhook-token-value"
+    slack = "https://hooks.slack.com/services/T00000000/B00000000/fake-slack-secret"
+
+    assert "AAHfake-token-value" not in redact_url(telegram)
+    assert "fake-discord-webhook-token-value" not in redact_url(discord)
+    assert "fake-slack-secret" not in redact_url(slack)
+    assert redact_url(telegram).startswith("https://api.telegram.org/bot***")
+    assert "/api/webhooks/123456789012345678/***" in redact_url(discord)
+    assert redact_url(slack).endswith("/services/T00000000/B00000000/***")
+
+
 def _configure_helius(monkeypatch, settings) -> None:
     monkeypatch.setattr(settings, "helius_api_key", SECRET)
     monkeypatch.setattr(settings, "rpc_pool_enabled", True)

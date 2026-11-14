@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 from crawlers.heuristics import HeuristicsEngine
 from crawlers.sources.cmc import CMCCrawler
@@ -237,20 +238,22 @@ class NightCrawlerOrchestrator:
                     message=f"{len(items)} items collected",
                 )
             except Exception as exc:  # noqa: BLE001 — one crash must not abort the fleet
-                log.exception("nightcrawler_crawler_failed", crawler=name, error=str(exc))
+                log.exception(
+                    "nightcrawler_crawler_failed", crawler=name, error=redact_url(str(exc))
+                )
                 # Drop this crawler's partial writes separately from the ones that
                 # already landed; its health row below is the durable record.
                 session.rollback()
                 results[name] = {
                     "status": "error",
-                    "error": str(exc),
+                    "error": redact_url(str(exc)),
                     "items": 0,
                 }
                 record_health(
                     session,
                     component=f"nightcrawler:{name}",
                     state="red",
-                    message=str(exc),
+                    message=redact_url(str(exc)),
                     error_count=1,
                 )
 

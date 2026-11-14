@@ -1995,7 +1995,7 @@ def engine_trigger_scan() -> TriggerResponse:
             log.info("api_manual_scan_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_scan_failed", error=str(exc))
+            log.exception("api_manual_scan_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-scan", daemon=True).start()
     return TriggerResponse(
@@ -2028,7 +2028,7 @@ def engine_trigger_forecast() -> TriggerResponse:
             log.info("api_manual_forecast_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_forecast_failed", error=str(exc))
+            log.exception("api_manual_forecast_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-forecast", daemon=True).start()
     return TriggerResponse(status="accepted", message="Forecast training started")
@@ -2058,7 +2058,7 @@ def engine_trigger_retention() -> TriggerResponse:
             log.info("api_manual_retention_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_retention_failed", error=str(exc))
+            log.exception("api_manual_retention_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-retention", daemon=True).start()
     return TriggerResponse(status="accepted", message="Retention pass started")
@@ -2665,7 +2665,7 @@ def engine_trigger_nightcrawlers() -> TriggerResponse:
             log.info("api_nightcrawler_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_nightcrawler_failed", error=str(exc))
+            log.exception("api_nightcrawler_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-nightcrawler", daemon=True).start()
     return TriggerResponse(status="accepted", message="Night Crawler pipeline started")
@@ -2734,7 +2734,7 @@ def engine_trigger_data_lake() -> TriggerResponse:
             log.info("api_data_lake_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_data_lake_failed", error=str(exc))
+            log.exception("api_data_lake_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-data-lake", daemon=True).start()
     return TriggerResponse(status="accepted", message="Data lake pass started")

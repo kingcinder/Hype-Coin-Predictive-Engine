@@ -18,6 +18,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt
 from common.config import get_settings
 from common.http import build_httpx_client, jittered_backoff
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -176,9 +177,9 @@ class LLMPredictionEngine:
                 model=self._model,
                 available=False,
                 last_check=time.time(),
-                error=str(exc),
+                error=redact_url(str(exc)),
             )
-            log.debug("llm_health_check_failed", error=str(exc))
+            log.debug("llm_health_check_failed", error=redact_url(str(exc)))
         return self._health
 
     def predict(
@@ -215,7 +216,7 @@ class LLMPredictionEngine:
             result.raw_response = raw
             return result
         except Exception as exc:  # noqa: BLE001
-            log.debug("llm_predict_failed", asset_id=asset_id, error=str(exc))
+            log.debug("llm_predict_failed", asset_id=asset_id, error=redact_url(str(exc)))
             return LLMPrediction(
                 asset_id=asset_id,
                 symbol=symbol,

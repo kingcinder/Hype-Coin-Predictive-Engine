@@ -15,6 +15,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from common.config import get_settings
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -120,7 +121,7 @@ def build_httpx_client(
             trust_env=False,
         )
     except Exception as exc:
-        log.error("http_client_construction_failed", error=str(exc))
+        log.error("http_client_construction_failed", error=redact_url(str(exc)))
         raise
 
 

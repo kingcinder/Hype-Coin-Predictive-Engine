@@ -11,6 +11,7 @@ from common.enums import AlertState
 from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from ingestion.rpc_pool import RpcPoolAlert
 from storage import models
 from storage.repository import record_health
@@ -31,6 +32,13 @@ _RPC_PUSH_PROFILE: dict[str, tuple[int, str]] = {
     "endpoint_down_cooldown": (4, "warning"),
     "phase_wedge_timeout": (4, "alert"),
 }
+
+
+def _redact_ntfy_error(exc: Exception) -> str:
+    """Mask URL credentials and the ntfy topic (its own capability secret)."""
+    text = redact_url(str(exc))
+    topic = (get_settings().ntfy_topic or "").strip("/")
+    return text.replace(topic, "***") if topic else text
 
 
 class NtfyNotifier:
@@ -85,7 +93,7 @@ class NtfyNotifier:
                 sent += 1
             except Exception as exc:  # noqa: BLE001 - push failure is retried, never fatal.
                 errors += 1
-                log.warning("ntfy_push_failed", alert_id=alert.id, error=str(exc))
+                log.warning("ntfy_push_failed", alert_id=alert.id, error=_redact_ntfy_error(exc))
         digest = self._daily_digest(session, decision_ts)
         errors += int(digest.get("errors", 0))
         state = "ok" if not errors else "yellow"
@@ -177,7 +185,9 @@ class NtfyNotifier:
             status = "sent"
             errors = 0
         except Exception as exc:  # noqa: BLE001 - retain the row so next scan retries.
-            log.warning("ntfy_daily_digest_failed", digest_key=digest_key, error=str(exc))
+            log.warning(
+                "ntfy_daily_digest_failed", digest_key=digest_key, error=_redact_ntfy_error(exc)
+            )
             status = "failed"
             errors = 1
         session.flush()
@@ -295,7 +305,9 @@ def notify_rpc_pool_event(event: RpcPoolAlert) -> bool:
     try:
         return NtfyNotifier().send_rpc_pool_event(event)
     except Exception as exc:  # noqa: BLE001 - pool health must not depend on ntfy.
-        log.warning("ntfy_rpc_pool_push_failed", chain=event.chain_slug, error=str(exc))
+        log.warning(
+            "ntfy_rpc_pool_push_failed", chain=event.chain_slug, error=_redact_ntfy_error(exc)
+        )
         return False
 
 
@@ -326,7 +338,7 @@ def notify_lake_backlog(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - notifier failure must not block retention.
-        log.warning("ntfy_lake_backlog_push_failed", error=str(exc))
+        log.warning("ntfy_lake_backlog_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -359,7 +371,7 @@ def notify_lake_stale(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - notifier failure must not block scans.
-        log.warning("ntfy_lake_stale_push_failed", error=str(exc))
+        log.warning("ntfy_lake_stale_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -410,7 +422,7 @@ def notify_lake_budget(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - budget health must not depend on ntfy.
-        log.warning("ntfy_lake_budget_push_failed", error=str(exc))
+        log.warning("ntfy_lake_budget_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -454,7 +466,7 @@ def notify_parity_mismatch(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - parity health must not depend on ntfy.
-        log.warning("ntfy_parity_push_failed", error=str(exc))
+        log.warning("ntfy_parity_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -501,7 +513,7 @@ def notify_calibration_bias(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - calibration health must not depend on ntfy.
-        log.warning("ntfy_calibration_bias_failed", error=str(exc))
+        log.warning("ntfy_calibration_bias_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -549,7 +561,7 @@ def notify_score_drift(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - drift health must not depend on ntfy.
-        log.warning("ntfy_score_drift_push_failed", error=str(exc))
+        log.warning("ntfy_score_drift_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 
@@ -595,7 +607,7 @@ def notify_score_drift_partial_rescue(
         )
         return True
     except Exception as exc:  # noqa: BLE001 - rescue health must not depend on ntfy.
-        log.warning("ntfy_score_drift_partial_push_failed", error=str(exc))
+        log.warning("ntfy_score_drift_partial_push_failed", error=_redact_ntfy_error(exc))
         return False
 
 

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from storage import models
 from storage.repository import record_health
 
@@ -94,16 +95,16 @@ def run_nightcrawler_pipeline(
 
     except Exception as exc:
         duration = time.monotonic() - started
-        log.exception("nightcrawler_pipeline_failed", error=str(exc))
+        log.exception("nightcrawler_pipeline_failed", error=redact_url(str(exc)))
         record_health(
             session,
             component="nightcrawler_pipeline",
             state="red",
-            message=str(exc),
+            message=redact_url(str(exc)),
             error_count=1,
         )
         session.commit()
-        return {"error": str(exc), "duration_sec": round(duration, 2)}
+        return {"error": redact_url(str(exc)), "duration_sec": round(duration, 2)}
 
 
 def _score_and_archive(
