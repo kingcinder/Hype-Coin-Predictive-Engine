@@ -214,9 +214,9 @@ class Settings(BaseSettings):
     ntfy_timeout_seconds: float = 10.0
     ntfy_backlog_hours: int = 24
     ntfy_daily_digest_enabled: bool = True
-    ntfy_alert_types_csv: tuple[str, str] = (
-        "ignition_detected,liquidity_withdrawal_warning,syndicate_recidivism",
-        "lifecycle_transition,phase_wedge_timeout",
+    ntfy_alert_types_csv: str = (
+        "ignition_detected,liquidity_withdrawal_warning,syndicate_recidivism,"
+        "lifecycle_transition,phase_wedge_timeout"
     )
 
     # archive & retention: Parquet compaction of raw evidence
@@ -590,9 +590,7 @@ class Settings(BaseSettings):
 
     @property
     def ntfy_alert_types(self) -> list[str]:
-        if isinstance(self.ntfy_alert_types_csv, str):
-            return [part.strip() for part in self.ntfy_alert_types_csv.split(",") if part.strip()]
-        return [part.strip() for part in self.ntfy_alert_types_csv]
+        return [part.strip() for part in self.ntfy_alert_types_csv.split(",") if part.strip()]
 
     @property
     def telegram_channel_handles(self) -> list[str]:

@@ -35,6 +35,20 @@ def _enable_ntfy(notifier: NtfyNotifier, *, digest: bool = False) -> None:
     notifier.settings.ntfy_daily_digest_enabled = digest
 
 
+def test_default_ntfy_alert_types_cover_all_push_types() -> None:
+    """Guard against the ntfy allowlist type regressing: the default settings
+    must expose exactly the five alert types the notifier can push, or pushes
+    silently stop matching (R3 P0-1)."""
+    expected = [
+        "ignition_detected",
+        "liquidity_withdrawal_warning",
+        "syndicate_recidivism",
+        "lifecycle_transition",
+        "phase_wedge_timeout",
+    ]
+    assert NtfyNotifier().settings.ntfy_alert_types == expected
+
+
 def test_acked_alerts_are_not_pushed(session) -> None:
     """ACKing an alert removes it from the notifier's open set: repeat pushes
     are suppressed while other open alerts still flush."""
