@@ -449,6 +449,20 @@ class ScoringEngine:
         )
         session.add(row)
         session.flush()
+        # Append-only prediction snapshot for out-of-sample evaluation.
+        from storage.repository import record_prediction  # noqa: PLC0415 - avoids cycle.
+
+        record_prediction(
+            session,
+            asset_id=asset_id,
+            scored_at=decision_ts,
+            evidence_ts=row.observed_at,
+            risk_band=row.risk_band,
+            risk_score=row.risk,
+            confidence=row.confidence,
+            confidence_source=row.confidence_source,
+            missing_features=getattr(result, "missing_features", None),
+        )
         return row
 
     def _upsert_explanation(

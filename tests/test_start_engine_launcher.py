@@ -55,6 +55,9 @@ def test_gui_opens_after_authenticated_health_probe(tmp_path: Path) -> None:
         **os.environ,
         "PATH": f"{stubs}:{os.environ['PATH']}",
         "SERPENT_PROJECT_DIR": str(project),
+        # Explicit PID file: a missing file means no engine, so this test does
+        # not depend on whether the host is running one.
+        "SERPENT_ENGINE_PID_FILE": str(tmp_path / "none.pid"),
     }
     # Keep the probe on the .env path: an ambient ENGINE_API_TOKEN
     # (e.g. leaked into os.environ by the provisioning tests) would
@@ -119,6 +122,7 @@ def test_launcher_prunes_old_backups_to_the_configured_keep(tmp_path: Path) -> N
         **os.environ,
         "PATH": f"{stubs}:{os.environ['PATH']}",
         "SERPENT_PROJECT_DIR": str(project),
+        "SERPENT_ENGINE_PID_FILE": str(tmp_path / "none.pid"),
         "SERPENT_BACKUP_DIR": str(backups),
         "SERPENT_BACKUP_KEEP": "2",
         "SERPENT_LOG_DIR": str(tmp_path / "logs"),

@@ -71,7 +71,7 @@ py-modules = []
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["api*", "backtest*", "catalyst*", "common*", "crawlers*", "data_lake*", "engine*", "features*", "fingerprint*", "forecast*", "ingestion*", "llm*", "mempool*", "narrative*", "ops*", "radar*", "risk_engine*", "scoring*", "storage*", "ui*", "validation*"]
+include = ["api*", "backtest*", "catalyst*", "common*", "crawlers*", "data_lake*", "engine*", "features*", "fingerprint*", "forecast*", "ingestion*", "llm*", "mempool*", "narrative*", "ops*", "radar*", "risk_engine*", "scoring*", "storage*", "ui*", "trading*", "validation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

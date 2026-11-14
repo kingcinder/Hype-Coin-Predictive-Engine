@@ -250,7 +250,7 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
     assert report.unresolved == 1
     rows = _health_rows()
     assert rows[-1].error_count == 1
-    # Any backlog is at least yellow, even on the first (non-growing) pass.
+    # A backlog younger than three windows is yellow.
     assert rows[-1].state == "yellow"
 
     _seed_prediction(session, held, model_version="test-held")
@@ -258,27 +258,25 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
     assert report.unresolved == 2
     rows = _health_rows()
     assert rows[-1].error_count == 2
-    # Red, so /health reports degraded instead of ok.
-    assert rows[-1].state == "red"
+    # Growth alone stays yellow; only age beyond three windows is red.
+    assert report.unresolved_grew is True
+    assert rows[-1].state == "yellow"
     assert "GREW" in (rows[-1].message or "")
 
-    # No new withheld rows: no longer growing, but a backlog still exists, so
-    # it must not drop back to ok.
+    # Oldest unresolved row is now more than three windows old -> red.
     report = evaluate_outcomes(
-        session, decision_ts=EVAL_TS + timedelta(hours=1), window_hours=WINDOW_HOURS
+        session, decision_ts=SCORED_AT + timedelta(days=7), window_hours=WINDOW_HOURS
     )
     assert report.unresolved == 2
     rows = _health_rows()
-    assert rows[-1].error_count == 2
-    assert rows[-1].state == "yellow"
-    assert "GREW" not in (rows[-1].message or "")
+    assert rows[-1].state == "red"
 
     # Backfill lifecycle state inside both windows: the backlog resolves and
-    # the component finally returns to ok.
+    # the component returns to ok.
     for target in (asset, held):
         _seed_lifecycle(session, target, "collapse", SCORED_AT + timedelta(hours=1))
     report = evaluate_outcomes(
-        session, decision_ts=EVAL_TS + timedelta(hours=2), window_hours=WINDOW_HOURS
+        session, decision_ts=SCORED_AT + timedelta(days=7, hours=1), window_hours=WINDOW_HOURS
     )
     assert report.unresolved == 0
     rows = _health_rows()
@@ -309,3 +307,18 @@ def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -
     assert after_outcome.collapsed is False
     assert after_outcome.evaluated_at is None
     assert after_outcome.lifecycle_phase_at_eval == "unknown"
+
+
+def test_evaluated_outcome_is_labelled_v2_bounded(session) -> None:
+    """A freshly evaluated outcome carries the bounded label version."""
+    from risk_engine.outcomes import LABEL_VERSION
+
+    assert LABEL_VERSION == "v2_bounded"
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset, model_version="test-label-ver")
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+    assert outcome.label_version == "v2_bounded"

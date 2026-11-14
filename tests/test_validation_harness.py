@@ -248,6 +248,7 @@ def test_run_harness_reports_unresolved_outcome_backlog(session) -> None:
             risk_band="YELLOW",
             scored_at=scored_at,
             lifecycle_phase_at_score="seeding",
+            label_version="v2_bounded",
         )
     )
     session.commit()
@@ -315,6 +316,7 @@ def test_run_harness_wires_feature_leakage_audit(session) -> None:
                 scored_at=decision_ts,
                 lifecycle_phase_at_score="seeding",
                 evaluated_at=decision_ts + timedelta(hours=25),
+                label_version="v2_bounded",
                 collapsed=collapsed,
                 rugged=False,
                 survived=not collapsed,

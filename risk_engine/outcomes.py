@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
@@ -48,6 +48,8 @@ class RiskOutcomeReport:
     overall_precision: float = 0.0
     total_flagged: int = 0
     total_collapsed: int = 0
+    # Informational only: the health state is age-based, not growth-based.
+    unresolved_grew: bool = False
     # Predictions past their window that still have no established outcome
     # (evaluated_at IS NULL). A growing count means withheld labels are
     # accumulating instead of being resolved.
@@ -69,6 +71,9 @@ _SURVIVAL_PHASES = frozenset({"survivor", "parabolic", "saturation"})
 #: ``SystemHealth`` component carrying the unresolved-label backlog, so
 #: withheld outcomes are visible in ``/health`` without grepping logs.
 UNRESOLVED_OUTCOME_COMPONENT = "outcome_labels"
+
+#: Bounded label version for outcome tracking (v1_unbounded → v2_bounded)
+LABEL_VERSION = "v2_bounded"
 
 
 def _lifecycle_phase_as_of(session: Session, asset_id: int, as_of: datetime) -> str | None:
@@ -186,6 +191,7 @@ def record_risk_outcome(
             risk_band=risk_band,
             score_id=score_id,
             scored_at=ensure_utc(decision_ts),
+            label_version=LABEL_VERSION,
             lifecycle_phase_at_score=(
                 _lifecycle_phase_as_of(session, asset_id, decision_ts) or "unknown"
             ),
@@ -252,6 +258,7 @@ def evaluate_outcomes(
             session, outcome.asset_id, score_time, until=window_end
         )
         outcome.evaluated_at = decision_ts
+        outcome.label_version = LABEL_VERSION
         outcome.collapsed = phase in _COLLAPSE_PHASES
         outcome.rugged = phase == "rugged"
         outcome.survived = phase in _SURVIVAL_PHASES
@@ -276,14 +283,23 @@ def evaluate_outcomes(
         .limit(1)
     )
     grew = previous_unresolved is not None and unresolved > previous_unresolved
-    # Growth is red (degrades /health); any remaining backlog is at least
-    # yellow, so a large but stable backlog never looks healthy again.
-    if grew:
-        state = "red"
-    elif unresolved:
-        state = "yellow"
-    else:
+    report.unresolved_grew = grew
+    # State is age-based: an unresolved row older than three observation
+    # windows means the label pipeline is not resolving, which is red. A
+    # younger backlog is yellow; zero backlog is ok. Growth alone stays yellow.
+    oldest = session.scalar(
+        select(func.min(models.RiskOutcome.scored_at)).where(
+            models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.label_version == LABEL_VERSION,
+        )
+    )
+    age_limit = timedelta(hours=3 * settings.risk_outcome_window_hours)
+    if not unresolved:
         state = "ok"
+    elif oldest is not None and decision_ts - ensure_utc(oldest) > age_limit:
+        state = "red"
+    else:
+        state = "yellow"
     record_health(
         session,
         component=UNRESOLVED_OUTCOME_COMPONENT,
@@ -379,7 +395,7 @@ def evaluate_outcomes(
         "risk_outcome_evaluation",
         evaluated=evaluated,
         unresolved=report.unresolved,
-        unresolved_grew=grew,
+        unresolved_grew=report.unresolved_grew,
         total_flagged=report.total_flagged,
         total_collapsed=report.total_collapsed,
         overall_precision=round(report.overall_precision, 4),
@@ -478,3 +494,42 @@ def evaluate_outcomes(
         pass  # ensemble feedback must never break outcome evaluation
 
     return report
+
+
+def record_prediction(
+    session: Session,
+    *,
+    asset_id: int,
+    scored_at: datetime,
+    evidence_ts: datetime,
+    risk_band: str,
+    risk_score: float,
+    confidence: float,
+    confidence_source: str,
+    missing_features: dict,
+    code_sha: str | None = None,
+    config_sha256: str | None = None,
+    calibration_snapshot_id: str | None = None,
+) -> models.PredictionRecord:
+    """Record a prediction for a token at scoring time.
+
+    The prediction is stored so it can be compared against the actual outcome
+    when the observation window resolves. The calibrator uses these records
+    to adjust ensemble weights dynamically.
+    """
+    record = models.PredictionRecord(
+        asset_id=asset_id,
+        scored_at=scored_at,
+        evidence_ts=evidence_ts,
+        risk_band=risk_band,
+        risk_score=risk_score,
+        confidence=confidence,
+        confidence_source=confidence_source,
+        missing_features=missing_features,
+        code_sha=code_sha,
+        config_sha256=config_sha256,
+        calibration_snapshot_id=calibration_snapshot_id,
+    )
+    session.add(record)
+    session.flush()
+    return record

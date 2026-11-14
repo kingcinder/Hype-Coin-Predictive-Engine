@@ -33,9 +33,9 @@ models/
 reports/
 
 # Pre-rescore DB backups (never commit)
-serpent.db.pre-rescore*
-serpent.db.pre-rescore*-wal
-serpent.db.pre-rescore*-shm
+serpent.db.pre-*
+serpent.db.pre-*-wal
+serpent.db.pre-*-shm
 
 # Serpent Circle renovation chain workspace (per-run scratch; never commit)
 .serpent-circle/
@@ -43,3 +43,5 @@ serpent.db.pre-rescore*-shm
 .freebuff/
 coverage/history.json.new
 serpent.db.lock
+# Trading rules (example only; real one is user-provided)
+config/trading_rules.json

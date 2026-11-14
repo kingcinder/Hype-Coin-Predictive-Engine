@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -704,6 +705,35 @@ class Settings(BaseSettings):
         if primary and primary not in entries:
             entries.insert(0, primary)
         return entries
+
+    # ── UNCONFIRMED defaults - needs user approval ──────────────────────
+    # These are paper-trading defaults; the human may change them before
+    # switching LIVE_TRADING_ENABLED=1.
+    paper_bankroll_sol: Decimal = Decimal("10")
+    risk_per_trade_pct: Decimal = Decimal("1")
+    drawdown_review_pct: Decimal = Decimal("-10")
+    trading_chain: str = "solana"
+    gmgn_fee_pct_per_tx: Decimal = Decimal("1")
+    slippage_pct_normal: Decimal = Decimal("30")
+    slippage_pct_new_token: Decimal = Decimal("50")
+    priority_fee_sol: Decimal = Decimal("0.001")
+    new_token_age_minutes: int = 60
+    trading_rules_path: str = "config/trading_rules.json"
+    candidate_max_age_hours: int = 24
+    live_trading_enabled: str = "0"
+    live_max_bankroll_sol: Decimal | None = None
+    live_daily_loss_limit_sol: Decimal | None = None
+    live_max_risk_pct: Decimal = Decimal("1")
+    gmgn_api_base: str = ""
+    gmgn_api_key: str | None = None
+    gmgn_wallet_address: str | None = None
+    gmgn_signer_secret: str | None = None
+    first_buy_window_minutes: int = 5
+    copy_trading_enabled: bool = False
+    copy_max_size_sol: Decimal = Decimal("0.1")
+    copy_max_risk_pct: Decimal = Decimal("1")
+    copy_delay_seconds: int = 30
+    copy_requires_confirmation: bool = True
 
     @property
     def target_chains(self) -> list[str]:

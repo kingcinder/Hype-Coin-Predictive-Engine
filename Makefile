@@ -3,7 +3,7 @@
 	check-imports check-deps rescore-compare score-drift score-drift-history typecheck gate
 
 # Single source of truth for mypy coverage: `make lint` and CI both use it.
-MYPY_PACKAGES = api backtest catalyst common crawlers data_lake engine features fingerprint forecast ingestion llm mempool narrative ops pump_physics radar risk_engine scoring storage ui validation
+MYPY_PACKAGES = api backtest catalyst common crawlers data_lake engine features fingerprint forecast ingestion llm mempool narrative ops pump_physics radar risk_engine scoring storage trading validation
 
 # Dev/test install: the pinned lock first, then this project editable with
 # --no-deps, so pip never re-resolves the pyproject floors (which is how

@@ -58,7 +58,7 @@ cd "$PROJECT_DIR" || {
 }
 echo "📂 Project: $PROJECT_DIR"
 
-# ── Step 2: Refuse to start a second writer ──────────────────────────
+# ── Step 2: Refuse to start a second writer ──────────────────────────────────────
 # Two engines on one serpent.db wedge the loop: the second one's writes
 # collide with the first one's and the queue drops them. Check the process,
 # the shipped ports, and host-network containers (which can hold a port
@@ -66,12 +66,27 @@ echo "📂 Project: $PROJECT_DIR"
 # The pattern is anchored to an executable path so it cannot match a shell
 # whose command line merely mentions "python -m engine" (a log tail, a test
 # harness, another launcher's arguments).
-ENGINE_PATTERN='(^|/)[p]ython[0-9.]* -m engine( |$)'
-if pgrep -f "$ENGINE_PATTERN" >/dev/null; then
-    echo "❌ An engine process is already running; do not start a second one:" >&2
-    pgrep -af "$ENGINE_PATTERN" >&2 || true
-    echo "   Stop it first (Ctrl+C in its terminal, or kill the PID above)." >&2
-    exit 1
+ENGINE_PID_FILE=${SERPENT_ENGINE_PID_FILE:-}
+if [ -n "$ENGINE_PID_FILE" ]; then
+    # An explicit PID file is authoritative: a missing or empty file means
+    # "no engine running", so shell-driven tests need not depend on the
+    # host's real process table. When the variable is unset, use the pgrep
+    # default below.
+    ENGINE_PID="$(cat "$ENGINE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$ENGINE_PID" ] && kill -0 "$ENGINE_PID" 2>/dev/null; then
+        echo "❌ An engine process is already running; do not start a second one:" >&2
+        echo "   $ENGINE_PID" >&2
+        echo "   Stop it first (Ctrl+C in its terminal, or kill the PID above)." >&2
+        exit 1
+    fi
+else
+    ENGINE_PATTERN='(^|/)[p]ython[0-9.]* -m engine( |$)'
+    if pgrep -f "$ENGINE_PATTERN" >/dev/null; then
+        echo "❌ An engine process is already running; do not start a second one:" >&2
+        pgrep -af "$ENGINE_PATTERN" >&2 || true
+        echo "   Stop it first (Ctrl+C in its terminal, or kill the PID above)." >&2
+        exit 1
+    fi
 fi
 if command -v ss >/dev/null 2>&1 &&
     ss -ltn 2>/dev/null | grep -Eq ":(${API_PORT}|${UI_PORT})[[:space:]]"; then

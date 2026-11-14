@@ -72,6 +72,7 @@ from api.schemas import (
     VelocityFeatureRow,
     score_family_validation,
 )
+from api.trading_routes import router as trading_router
 from common.config import get_settings
 from common.enums import AlertState
 from common.logging import get_logger
@@ -2757,3 +2758,6 @@ def engine_trigger_data_lake() -> TriggerResponse:
 
     threading.Thread(target=_run, name="api-data-lake", daemon=True).start()
     return TriggerResponse(status="accepted", message="Data lake pass started")
+
+
+app.include_router(trading_router)

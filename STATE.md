@@ -1,4 +1,3 @@
-103 STATE.md
 # STATE.md — Serpent Circle Change Ledger
 
 Single source of persistent state for this repo. Read this file (plus recent `git log`) at the
@@ -22,6 +21,100 @@ or `STATE.md` existed before 2026-09-09.
 - **Checks (2026-11-14):** targeted suites 35 passed; full pytest 939 passed / 13 skipped / 2 failed — only the two known pre-existing `tests/test_start_engine_launcher.py` failures caused by the live engine PID 3825263; `ruff check .` and `ruff format --check .` clean (292 files); validation self-tests pass.
 - **Checks (backlog visibility, 2026-11-14):** targeted suites (outcomes, validation harness/presentation, risk scoring, API) 70 passed; full pytest 943 passed / 13 skipped / 2 failed — the same two pre-existing `tests/test_start_engine_launcher.py` failures; `ruff check .` and `ruff format --check .` clean (292 files).
 - **Backlog visibility (2026-11-14):** every evaluation pass records `SystemHealth` component `outcome_labels` (`error_count` = unresolved backlog, state `red` with a `GREW` message when the count rises — which makes `/health` report `degraded` — `yellow` whenever unresolved rows remain, and `ok` only when the backlog is zero), so `/health` and Health & Diagnostics show withheld labels without log access. The validation harness reports the same backlog as `unresolved_outcomes` in the report JSON, `database_digest`, and a note; `/validation/latest` returns it and the Validation Integrity page warns when it is non-zero.
+
+## PHASE C/D/E — 2026-11-14 (trading modules landed)
+
+- **C1–C8 done.** `trading/errors.py`, `trading/costs.py` (exact simulators),
+  `trading/rules.py` (`Rules.sha256`, `load_rules`, `validate_for_open` with
+  the three-item `RulesIncomplete.missing`), `trading/executors.py`
+  (`PriceQuote(price, ts, source)`, `PriceSource` protocol, `PaperExecutor`),
+  `trading/ledger.py` (`TradeEngine(price_source, settings, now)` with
+  `bankroll`/`peak_bankroll`/`open_trade`/`close_trade`/`suggest_exits`; every
+  write via `queued_write`; `DrawdownReview` needs a newer `LedgerReviewAck`
+  than the last close), `trading/scorecard.py` (flat-price baseline,
+  per-trade bootstrap CI) and `api/trading_routes.py` (paper trades/exit,
+  ledger, scorecard, review ack).
+- **D1 done.** `trading/gmgn_client.py` read client: `token_url`, 10 s price
+  cache, 2 req/s limiter, 30 s block on 429, no secrets logged. Fixed the
+  agent draft's `price=0`/`__import__("exception")`/PriceQuote-in-price-cache
+  bugs and the broken tests.
+- **D2 done.** `trading/live_gate.py`: `ARM_PHRASE`, `is_open`,
+  `require_open` (`env_flag_off` → `not_armed_or_killed` →
+  `live_max_bankroll_unset` → `live_daily_loss_limit_unset`),
+  `effective_risk_pct` (hard 1 % cap), `daily_loss_sol`. Routes
+  `POST /trading/arm` (422 wrong phrase, 403 flag off), `GET /trading/status`.
+- **D3 done.** `POST /trading/kill` writes `LiveGateState(kind="killed")` even
+  with the flag off, then cancels `live_fills.status="submitted"` orders and
+  returns 200 with `cancelled`/`failed` counts.
+- **D4 done.** `trading/gmgn_exec.py`: `GmgnExecutor(session, http, …)` re-checks
+  the gate and venue config, submits/polls, records `live_fills`, raises
+  `LiveFill` alerts for unconfirmed orders, writes `trade_divergence` when the
+  fill is >30 % away from the expected quote, and supports `cancel`.
+  `TradeEngine.open_trade`/`close_trade` use it when `mode="live"`.
+- **E1 done.** `trading/candidates.py`: `build_candidates` /
+  `get_candidate` with the exact `CANDIDATE_KEYS`, missing-as-None,
+  `excluded_no_evidence`, `evidence_ts` = max(score ts, snapshot ts); routes
+  `GET /paper/candidates` and `POST /paper/candidates/{mint}/trade`.
+- **Migration:** `0030_trading_execution` (prompt called it 0029; renumbered
+  because `0029_relabel_support` occupies that id). Fresh DB upgrade →
+  downgrade → upgrade verified; live `serpent.db` migrated 0029 → 0030 after
+  backup `serpent.db.pre-r3-0030-2026-11-14`.
+- **Tests added/rewritten:** `test_paper_ledger.py` (open/close/simulator
+  equality, rules, evidence, price, staleness, drawdown ack, live gate,
+  suggest_exits read-only, no update_/delete_ helpers), `test_scorecard.py`,
+  `test_trading_rules.py`, `test_paper_api.py`, `test_live_gate.py`,
+  `test_kill_switch.py`, `test_gmgn_exec.py`, `test_gmgn_client.py`,
+  `test_candidates.py`.
+- **Checks (2026-11-14):** `ruff check .` clean; `mypy api trading storage
+  scoring validation risk_engine/outcomes.py scripts/relabel_outcomes_v2.py`
+  clean (77 files); targeted pytest suites (paper ledger/API, live gate, kill
+  switch, exec, gmgn client, candidates, scorecard, rules, costs, api,
+  relabel, validation) all pass.
+- **Known gap:** `POST /trading/execute` covers buy (candidate → live
+  `open_trade`) and sell (position_id → live `close_trade`); the fill price is
+  the venue fill, but order-status reconciliation for partially filled orders is
+  not implemented beyond the `unconfirmed` alert.
+
+## BLOCKED — 2026-11-14 (B4/B8 residual gaps)
+
+- **B4 applied except two items.** Confirmatory metrics filter to
+  `v2_bounded`; report carries `resolved`/`censored`; ordinal distance and
+  per-band collapse precision now bootstrap over ASSETS (not rows). STILL
+  MISSING: asset-grouped CIs for the ECE/calibration cells (still row-level;
+  they take plain arrays, not outcome rows), and the
+  `retrospective_exploratory` v1 report section. `tests/test_verdict.py` is
+  not added because the spec's `verdict()` signature/strings collide with the
+  existing `validation.metrics.verdict` that every cell already calls.
+- **B8 must be run after a real relabel.** `python -m validation` now reports
+  only `v2_bounded` rows; the DB still holds only v1 rows until
+  `python -m scripts.relabel_outcomes_v2 --apply` is run.
+
+## RESOLVED — 2026-11-14 (B3 relabel: score_id uniqueness)
+
+Migration `0029_relabel_support` relaxes the per-score UNIQUE to
+`UNIQUE (score_id, label_version)` and adds `correction_of`, so
+`scripts/relabel_outcomes_v2.py` now writes append-only v2 copies (bounded
+recompute, censored count, idempotent, `queued_write` on apply). Verified by
+`tests/test_relabel_outcomes.py` and the fresh upgrade/downgrade/upgrade test.
+
+- **B3 cannot be implemented as written.** `risk_outcomes.score_id` is `UNIQUE`
+  (`storage/models.py:892`, migration `0016_risk_outcomes.py:25`), so a v2_bounded
+  copy row cannot carry the same `score_id` as the v1 row it derives from. The
+  spec's `--apply` (insert copies, keep originals untouched) therefore fails the
+  unique constraint, and its test ("2 new rows, 3 originals untouched") cannot
+  pass without a schema change that the prompt does not authorize.
+  `scripts/relabel_outcomes_v2.py` currently updates v1 rows in place instead,
+  which violates L8 (append-only); its `--apply` path is blocked pending a
+  decision (drop/relax the unique constraint, or add a `correction_of`-style
+  column and allow duplicate score ids).
+- **0027 migration is out of order and contradicts B6.**
+  `storage/migrations/versions/0027_prediction_records.py` creates
+  `score_id/predicted_at/prediction_horizon_hours/actual_*`, but B6 specifies
+  `scored_at/evidence_ts/risk_band/risk_score/confidence/confidence_source/
+  missing_features/code_sha/config_sha256/calibration_snapshot_id/created_at`.
+  The matching `PredictionRecord` model and `risk_engine.outcomes.record_prediction`
+  were hallucinated with literal `\n` text (a syntax break) and were removed.
+  Rewrite 0027 to the B6 schema before B6.
 
 ## PITFIX 2026-11-13 (Wren, user-directed, uncommitted)
 
@@ -1217,3 +1310,4 @@ the new ingestion timestamp fix does not rewrite that history.
   validated, validated map equals measured survival, non-monotone survival stays
   unvalidated, unevaluated outcomes are ignored) and the existing ingestion, API,
   phase-integration and risk-scoring suites pass.
+## EDGE VERDICT 2026-11-14 (v2 bounded, post-restore): scores do not beat baseline — RiskBand 2.8987 [2.0293,3.6442] vs 1.1242; BLACK precision 0.2718 [0.0799,0.5027] vs 0.2810 (indistinguishable); calibration error 0.4643 [0.4133,0.5101] vs ceiling 0.1000; resolved=306; censored=2210 (report: reports/validation-2026-11-14-v2-relabel.json)

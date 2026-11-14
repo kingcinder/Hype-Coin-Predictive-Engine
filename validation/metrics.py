@@ -7,6 +7,8 @@ data and real engine rows. Implements the metrics fixed in
 
 from __future__ import annotations
 
+import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -230,7 +232,7 @@ def confidence_calibration_error(
     return total / weight if weight else float("nan")
 
 
-def bootstrap_ci(
+def bootstrap_rows_ci(
     x: np.ndarray,
     y: np.ndarray,
     metric_fn,
@@ -323,3 +325,32 @@ def verdict(
 
 
 BAND_RANKS = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3, "BLACK": 4}
+
+
+def bootstrap_ci[T](
+    groups: Sequence[Sequence[T]],
+    stat: Callable[[list[T]], float],
+    *,
+    n_boot: int = 2000,
+    alpha: float = 0.05,
+    seed: int = 20261113,
+) -> tuple[float, float]:
+    """Percentile bootstrap CI. ``groups`` = one inner sequence per ASSET.
+
+    Resampling whole assets (not rows) stops one token's many rows from faking
+    a narrow interval. Returns (low, high). Empty input -> (nan, nan).
+    """
+    if not groups:
+        return (float("nan"), float("nan"))
+    rng = random.Random(seed)
+    n = len(groups)
+    stats: list[float] = []
+    for _ in range(n_boot):
+        sample: list[T] = []
+        for _i in range(n):
+            sample.extend(groups[rng.randrange(n)])
+        stats.append(stat(sample))
+    stats.sort()
+    lo = stats[int((alpha / 2) * (n_boot - 1))]
+    hi = stats[int((1 - alpha / 2) * (n_boot - 1))]
+    return (lo, hi)

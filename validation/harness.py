@@ -28,6 +28,7 @@ from validation.leakage import LeakageReport, check_feature_leakage
 from validation.metrics import (
     BAND_RANKS,
     WilsonCI,
+    bootstrap_ci,
     bootstrap_ci_generic,
     brier_base_rate,
     brier_score,
@@ -41,7 +42,7 @@ from validation.metrics import (
     wilson_ci,
 )
 from validation.metrics import (
-    bootstrap_ci as _bootstrap_ci,
+    bootstrap_rows_ci as _bootstrap_ci,
 )
 from validation.report import MetricCell, ValidationReport
 
@@ -71,6 +72,7 @@ class OutcomeRow:
     collapsed: bool
     rugged: bool
     survived: bool
+    label_version: str = "v2_bounded"
 
 
 @dataclass
@@ -267,6 +269,14 @@ def evaluate_probabilities(
     return cells
 
 
+def _asset_groups(outcomes: list[OutcomeRow]) -> list[list[OutcomeRow]]:
+    """One group per asset so bootstrap CIs do not treat rows as independent."""
+    grouped: dict[int, list[OutcomeRow]] = {}
+    for outcome in outcomes:
+        grouped.setdefault(outcome.asset_id, []).append(outcome)
+    return [grouped[asset_id] for asset_id in sorted(grouped)]
+
+
 def evaluate_band_outcomes(
     outcomes: list[OutcomeRow],
     *,
@@ -291,12 +301,36 @@ def evaluate_band_outcomes(
         # Baseline: always predict GREEN (0) — the laziest ordinal classifier.
         baseline_dist = ordinal_band_distance(np.zeros_like(actual), actual)
 
-        # Bootstrap CI for BOTH the model distance and the baseline distance.
+        # Asset-level bootstrap: resample ASSETS, not rows, so a token with
+        # many scores cannot masquerade as many independent observations.
         def _dist(p: np.ndarray, a: np.ndarray) -> float:
             return ordinal_band_distance(p, a)
 
-        ci = _bootstrap_ci(pred, actual, _dist)
-        b_ci = _bootstrap_ci(np.zeros_like(actual), actual, _dist)
+        valid_assets: dict[int, list[tuple[float, float]]] = {}
+        for i in np.where(valid)[0]:
+            valid_assets.setdefault(outcomes[i].asset_id, []).append(
+                (float(pred_ranks[i]), float(actual_ranks[i]))
+            )
+        groups = [[(a, y) for a, y in rows] for rows in valid_assets.values()]
+
+        def _group_dist(pairs: list[tuple[float, float]]) -> float:
+            return ordinal_band_distance(
+                np.array([p for p, _ in pairs]), np.array([y for _, y in pairs])
+            )
+
+        def _group_baseline(pairs: list[tuple[float, float]]) -> float:
+            return ordinal_band_distance(np.zeros(len(pairs)), np.array([y for _, y in pairs]))
+
+        ci = (
+            bootstrap_ci(groups, _group_dist)
+            if len(groups) > 1
+            else _bootstrap_ci(pred, actual, _dist)
+        )
+        b_ci = (
+            bootstrap_ci(groups, _group_baseline)
+            if len(groups) > 1
+            else _bootstrap_ci(np.zeros_like(actual), actual, _dist)
+        )
         unknown = int((~valid).sum())
         cells.append(
             MetricCell(
@@ -333,6 +367,16 @@ def evaluate_band_outcomes(
         band_labels = labels[idx]
         band_b = base_rate_proportion(band_labels)
         band_ci = wilson_ci(float(band_labels.sum()), len(band_labels))
+        band_groups: dict[int, list[float]] = {}
+        for row_index in idx:
+            band_groups.setdefault(outcomes[row_index].asset_id, []).append(
+                float(labels[row_index])
+            )
+        if len(band_groups) > 1:
+            grouped_ci = bootstrap_ci(
+                list(band_groups.values()), lambda values: float(np.mean(values))
+            )
+            band_ci = WilsonCI(*grouped_ci)
         unknown_band = sum(
             1
             for i in idx
@@ -613,11 +657,18 @@ def ensemble_weight_tracking(
 
 
 def load_outcomes(session: Session) -> list[OutcomeRow]:
-    """Load evaluated risk outcomes joined to their scores (read-only)."""
+    """Load evaluated, bounded (v2) risk outcomes joined to their scores.
+
+    Confirmatory metrics use only timestamp-bounded labels. ``v1_unbounded``
+    rows are retrospective/exploratory and are excluded.
+    """
     rows = session.execute(
         select(models.RiskOutcome, models.Score)
         .join(models.Score, models.Score.id == models.RiskOutcome.score_id)
-        .where(models.RiskOutcome.evaluated_at.is_not(None))
+        .where(
+            models.RiskOutcome.evaluated_at.is_not(None),
+            models.RiskOutcome.label_version == "v2_bounded",
+        )
     ).all()
     out: list[OutcomeRow] = []
     for outcome, score in rows:
@@ -634,6 +685,7 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
                 collapsed=bool(outcome.collapsed),
                 rugged=bool(outcome.rugged),
                 survived=bool(outcome.survived),
+                label_version=outcome.label_version or "v2_bounded",
             )
         )
     return out
@@ -1054,6 +1106,12 @@ def run_harness(
     """Run the full benchmark over the engine's persisted rows (read-only)."""
     outcomes = load_outcomes(session)
     unresolved_outcomes = load_unresolved_outcome_count(session)
+    censored_outcomes = session.scalar(
+        select(func.count(models.RiskOutcome.id)).where(
+            models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.label_version == "v2_bounded",
+        )
+    )
     forecasts = load_forecasts(session)
     forecast_outcomes = load_forecast_outcomes(session)
     ensemble_history = load_ensemble_history(session)
@@ -1105,6 +1163,7 @@ def run_harness(
             "labels": _count(session, models.Label),
             "lifecycle_events": _count(session, models.LifecycleEvent),
             "unresolved_outcomes": unresolved_outcomes,
+            "resolved_outcomes": len(outcomes),
         },
         partition={
             "cutoff": cutoff.isoformat() if cutoff else None,
@@ -1116,6 +1175,10 @@ def run_harness(
             "reference_rows": len(reference_rows),
         },
         unresolved_outcomes=unresolved_outcomes,
+    )
+    report.notes.append(
+        f"resolved={len(outcomes)} censored={int(censored_outcomes or 0)}: "
+        "metrics are conditional on resolved outcomes"
     )
     if unresolved_outcomes:
         report.notes.append(

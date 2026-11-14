@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -11,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -885,11 +887,14 @@ class RiskOutcome(Base):
         Index("ix_risk_outcomes_score_id", "score_id"),
         Index("ix_risk_outcomes_risk_band", "risk_band"),
         Index("ix_risk_outcomes_scored_at", "scored_at"),
+        # Append-only relabels add a v2 row per score, so uniqueness is per
+        # (score, label_version), not per score.
+        UniqueConstraint("score_id", "label_version", name="uq_risk_outcomes_score_label"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
-    score_id: Mapped[int] = mapped_column(ForeignKey("scores.id"), nullable=False, unique=True)
+    score_id: Mapped[int] = mapped_column(ForeignKey("scores.id"), nullable=False)
     risk_band: Mapped[str] = mapped_column(String(16), nullable=False)
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     lifecycle_phase_at_score: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -909,6 +914,11 @@ class RiskOutcome(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+    label_version: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="v1_unbounded", server_default="v1_unbounded"
+    )
+    # Set on append-only relabel copies: the v1 row this row corrects.
+    correction_of: Mapped[int | None] = mapped_column(Integer)
 
 
 class RiskCalibration(Base):
@@ -1082,3 +1092,195 @@ class CrossSourceSignal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class PredictionRecord(Base):
+    """Immutable per-score prediction snapshot for out-of-sample evaluation."""
+
+    __tablename__ = "prediction_records"
+    __table_args__ = (Index("ix_prediction_records_asset_scored_at", "asset_id", "scored_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evidence_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    risk_band: Mapped[str] = mapped_column(String(16), nullable=False)
+    risk_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    confidence_source: Mapped[str] = mapped_column(String(16), nullable=False)
+    missing_features: Mapped[dict | None] = mapped_column(JSON)
+    code_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    calibration_snapshot_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class LedgerOpenPosition(Base):
+    """An open position that can be reviewed/closed.
+
+    Stores all the information about a paper-trade open position, including
+    entry prices, stop/target, source signal, and the rules hash for audit.
+    """
+
+    __tablename__ = "ledger_open_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_signal: Mapped[str] = mapped_column(String(128), nullable=False)
+    entry_quote_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    entry_effective_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    qty: Mapped[Any] = mapped_column(Numeric(38, 12), nullable=False)
+    size_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    entry_fees_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    entry_slip_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=False)
+    is_new_token: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    stop_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=False)
+    target_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=True)
+    time_stop_minutes: Mapped[Any] = mapped_column(Integer, nullable=True)
+    stop_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    target_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=True)
+    time_stop_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    price_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_source_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    candidate_evidence_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    why_entered: Mapped[str] = mapped_column(Text, nullable=False)
+    rules_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LedgerTrade(Base):
+    """A closed trade with PnL realized.
+
+    Stores a completed trade with entry and exit prices, fees, PnL, and
+    exit reason for review and copy-trading analytics.
+    """
+
+    __tablename__ = "ledger_trades"
+    __table_args__ = (
+        Index("ix_ledger_trades_mint_opened", "mint", "opened_at"),
+        Index("ix_ledger_trades_closed_at", "closed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_signal: Mapped[str] = mapped_column(String(128), nullable=False)
+    entry_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    size_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    fees_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    slippage_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    stop_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=True)
+    target_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=True)
+    time_stop_minutes: Mapped[Any] = mapped_column(Integer, nullable=True)
+    exit_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    pnl_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
+    tx_signature: Mapped[str | None] = mapped_column(String(128))
+    why_entered: Mapped[str | None] = mapped_column(Text)
+    why_exited: Mapped[str | None] = mapped_column(Text)
+    lesson: Mapped[str | None] = mapped_column(Text)
+    candidate_evidence_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    price_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_source_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rules_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    correction_of: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LedgerReviewAck(Base):
+    """A review acknowledgment for a ledger trade."""
+
+    __tablename__ = "ledger_review_acks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    acked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class LedgerScorecard(Base):
+    """A scorecard snapshot for a trade or run."""
+
+    __tablename__ = "ledger_scorecards"
+    __table_args__ = (Index("ix_ledger_scorecards_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    mode: Mapped[str | None] = mapped_column(String(8))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class PriceEvidence(Base):
+    """Captured price at the time a trade decision was made."""
+
+    __tablename__ = "price_evidence"
+    __table_args__ = (
+        Index("ix_price_evidence_mint_ts", "mint", "source_ts"),
+        Index("ix_price_evidence_trade_ref", "trade_ref"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    price_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trade_ref: Mapped[str | None] = mapped_column(String(64))
+
+
+class LiveGateState(Base, TimestampMixin):
+    __tablename__ = "live_gate_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class LiveFill(Base, TimestampMixin):
+    __tablename__ = "live_fills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    size_sol: Mapped[Decimal] = mapped_column(Numeric(30, 9), nullable=False)
+    fee_sol: Mapped[Decimal] = mapped_column(Numeric(30, 9), nullable=False)
+    slippage_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    tx_signature: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    ledger_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class TradeDivergence(Base, TimestampMixin):
+    __tablename__ = "trade_divergence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trade_ref: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    fill_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    delta_pct: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CopyLog(Base):
+    __tablename__ = "copy_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    wallet: Mapped[str] = mapped_column(String(64), nullable=False)
+    mint: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_sol: Mapped[Decimal] = mapped_column(Numeric(30, 9), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)

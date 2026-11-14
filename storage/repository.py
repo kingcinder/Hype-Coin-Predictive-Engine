@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
@@ -839,3 +840,76 @@ def assets_for_ids(session: Session, asset_ids: Iterable[int]) -> dict[int, mode
         asset.id: asset
         for asset in session.scalars(select(models.Asset).where(models.Asset.id.in_(ids))).all()
     }
+
+
+_CODE_SHA: str | None = None
+
+
+def _code_sha() -> str:
+    """git HEAD for prediction records, resolved once per process."""
+    global _CODE_SHA
+    if _CODE_SHA is None:
+        try:
+            sha = (
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+                ).stdout.strip()
+                or "unknown"
+            )
+        except Exception:  # noqa: BLE001
+            sha = "unknown"
+        _CODE_SHA = (sha + "0" * 40)[:40]
+    return _CODE_SHA
+
+
+def _config_fingerprint_input() -> str:
+    """JSON input hashed into ``config_sha256``; secrets are excluded."""
+    from common.config import get_settings  # noqa: PLC0415 - lazy, avoids import cycle.
+
+    settings_dict = get_settings().model_dump(
+        mode="json",
+        exclude={
+            "engine_api_token",
+            "gmgn_api_key",
+            "gmgn_signer_secret",
+            "gmgn_wallet_address",
+        },
+    )
+    return json.dumps(settings_dict, sort_keys=True, default=str)
+
+
+def record_prediction(
+    session: Session,
+    *,
+    asset_id: int,
+    scored_at: datetime,
+    evidence_ts: datetime,
+    risk_band: str,
+    risk_score: float,
+    confidence: float | None,
+    confidence_source: str,
+    missing_features: dict | None = None,
+) -> models.PredictionRecord:
+    """Record a prediction for a token (append-only).
+
+    Computes code_sha from git HEAD and config_sha256 from settings,
+    then stores the PredictionRecord immutably.
+    """
+    code_sha = _code_sha()
+    config_sha256 = hashlib.sha256(_config_fingerprint_input().encode()).hexdigest()
+
+    record = models.PredictionRecord(
+        asset_id=asset_id,
+        scored_at=scored_at,
+        evidence_ts=evidence_ts,
+        risk_band=risk_band,
+        risk_score=risk_score,
+        confidence=confidence,
+        confidence_source=confidence_source,
+        missing_features=missing_features or {},
+        code_sha=code_sha,
+        config_sha256=config_sha256,
+    )
+    session.add(record)
+    session.flush()
+    return record
