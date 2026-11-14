@@ -147,6 +147,7 @@ def fetch_account_info(
     try:
         url = endpoint_pool.pick()
         client = http or HttpClient(base_url=url)
+        endpoint_pool.record_request(url)
         response = client.post_json(
             "/",
             json={

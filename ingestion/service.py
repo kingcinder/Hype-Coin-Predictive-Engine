@@ -10,9 +10,10 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
+from common.urls import redact_url
 from fingerprint.engine import FingerprintEngine
 from forecast.engine import run_forecast_if_due
 from ingestion.birdeye_client import BirdeyeClient
@@ -549,7 +550,7 @@ class IngestionService:
             base_url=BirdeyeClient.BASE_URL,
         )
         source = self._source(session, "birdeye")
-        api_key = (self.settings.birdeye_api_key or "").strip()
+        api_key = (secret_value(self.settings.birdeye_api_key) or "").strip()
         if not api_key:
             record_health(
                 session,
@@ -592,6 +593,7 @@ class IngestionService:
             )
         except Exception as exc:  # noqa: BLE001
             status = getattr(getattr(exc, "response", None), "status_code", None)
+            safe_error = redact_url(str(exc))
             if status in (401, 403):
                 # A rejected key is configuration, not an outage: name the
                 # variable an operator must fix so this never reads as flaky.
@@ -610,10 +612,10 @@ class IngestionService:
                     session,
                     component="source:birdeye",
                     state="red",
-                    message=str(exc),
+                    message=safe_error,
                     error_count=1,
                 )
-                log.warning("birdeye_ingestion_failed", error=str(exc))
+                log.warning("birdeye_ingestion_failed", error=safe_error)
         finally:
             client.close()
         return count
@@ -865,7 +867,7 @@ class IngestionService:
                     raw.raw_path = raw.raw_path or f"holder_snapshot:{asset.id}:{ts.isoformat()}"
                 except Exception as exc:  # noqa: BLE001 - preserve per-asset source failure.
                     session.rollback()
-                    errors.append(f"{asset.address}: {exc}")
+                    errors.append(f"{asset.address}: {redact_url(str(exc))}")
                 # Per-asset commit: the RPC calls above are network I/O and must
                 # not run inside an open write transaction.
                 self._commit_stage(session)
@@ -886,10 +888,10 @@ class IngestionService:
                 session,
                 component="source:solana_holders",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
-            log.warning("solana_holders_failed", error=str(exc))
+            log.warning("solana_holders_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count
@@ -1010,7 +1012,11 @@ class IngestionService:
                 collect_asset_safety(session, asset, observed_at=observed_at)
             except Exception as exc:  # noqa: BLE001 - isolate malformed provider/account data.
                 session.rollback()
-                log.warning("solana_safety_snapshot_failed", asset_id=asset.id, error=str(exc))
+                log.warning(
+                    "solana_safety_snapshot_failed",
+                    asset_id=asset.id,
+                    error=redact_url(str(exc)),
+                )
             self._commit_stage(session)
             sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
         record_health(
@@ -1253,7 +1259,7 @@ class IngestionService:
             log.warning(
                 "first_buy_rpc_fallback_failed",
                 pool=normalized.pair_address,
-                error=str(exc),
+                error=redact_url(str(exc)),
             )
             return [], False
         finally:

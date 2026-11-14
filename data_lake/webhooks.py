@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from storage import models
 
 log = get_logger(__name__)
@@ -291,8 +292,8 @@ def dispatch_webhook(
         log.warning(
             "webhook_dispatch_blocked",
             webhook_id=webhook.id,
-            url=webhook.url,
-            error=str(exc),
+            url=redact_url(webhook.url),
+            error=redact_url(str(exc)),
         )
         return result
     try:
@@ -345,7 +346,7 @@ def dispatch_webhook(
             webhook_id=webhook.id,
             url=webhook.url,
             success=False,
-            error=str(exc),
+            error=redact_url(str(exc)),
             duration_ms=round(duration_ms, 1),
         )
         _record_dispatch(session, webhook, result)

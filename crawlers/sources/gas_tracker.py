@@ -19,6 +19,7 @@ from typing import Any
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -27,7 +28,8 @@ log = get_logger(__name__)
 class GasTrackerCrawler(BaseCrawler):
     """Crawls Ethereum + Solana network gas prices as market-pressure signals."""
 
-    ETH_GASORACLE_URL = "https://api.etherscan.io/api"
+    # Etherscan retired the V1 endpoint; V2 requires an explicit chain id.
+    ETH_GASORACLE_URL = "https://api.etherscan.io/v2/api"
     # gwei levels used to label the fee regime in each snapshot
     SPIKE_GWEI = 100.0
     HIGH_GWEI = 40.0
@@ -78,6 +80,7 @@ class GasTrackerCrawler(BaseCrawler):
         """Fetch Ethereum gas prices from the free Etherscan gas oracle."""
         try:
             params: dict[str, Any] = {
+                "chainid": "1",
                 "module": "gastracker",
                 "action": "gasoracle",
             }
@@ -123,7 +126,9 @@ class GasTrackerCrawler(BaseCrawler):
                 },
             }
         except Exception as exc:  # noqa: BLE001
-            log.debug("gas_tracker_eth_failed", error=str(exc))
+            # Class name only: an HTTPStatusError message embeds the request
+            # URL, which carries the Etherscan ``apikey`` query parameter.
+            log.debug("gas_tracker_eth_failed", error=type(exc).__name__)
             return None
 
     def _fetch_eth_pending_tx_congestion(self) -> dict[str, Any] | None:
@@ -234,7 +239,7 @@ class GasTrackerCrawler(BaseCrawler):
                 },
             }
         except Exception as exc:  # noqa: BLE001
-            log.debug("gas_tracker_solana_failed", error=str(exc))
+            log.debug("gas_tracker_solana_failed", error=redact_url(str(exc)))
             return None
 
 

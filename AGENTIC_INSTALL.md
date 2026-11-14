@@ -19,6 +19,10 @@ disagree, `INSTALL.md` and the shipped scripts win.
 
 - **Default to the desktop (local) install** in Step 3A. Use the system
   install in Step 3B only if the user explicitly asked for a systemd service.
+- **Do not arm live trading.** The paper ledger is the default. Live orders
+  require `LIVE_TRADING_ENABLED=1`, the arm phrase, and explicit bankroll and
+  daily-loss caps; copy signals are logged for human approval only. If the
+  user did not ask for live trading, leave it off and say so in the report.
 - **Never print, log, or echo the value of `ENGINE_API_TOKEN`** or any other
   secret. The API token is passed to `curl` as a stdin config (`curl -K -`)
   precisely so it never appears in a command line or the process list —

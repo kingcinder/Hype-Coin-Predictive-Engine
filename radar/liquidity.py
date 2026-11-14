@@ -11,6 +11,7 @@ from common.config import get_settings
 from common.http import HttpClient
 from common.logging import get_logger
 from common.time import ensure_utc
+from common.urls import redact_url
 from ingestion.source_clients import get_rpc_url, rpc_pool_for
 from storage import models
 from storage.repository import record_health
@@ -92,10 +93,10 @@ class LiquidityRemovalWatcher:
                     session,
                     component=f"source:lp_removal:{chain.slug}",
                     state="red",
-                    message=str(exc),
+                    message=redact_url(str(exc)),
                     error_count=1,
                 )
-                log.warning("lp_removal_watch_failed", chain=chain.slug, error=str(exc))
+                log.warning("lp_removal_watch_failed", chain=chain.slug, error=redact_url(str(exc)))
             # Per-chain commit: the health write above (and any persisted event)
             # must not ride into the next chain's eth_getLogs call, which would
             # hold the write lock across that RPC round-trip.
@@ -139,8 +140,8 @@ class LiquidityRemovalWatcher:
                 log.warning(
                     "lp_removal_endpoint_failed",
                     chain=chain_slug,
-                    url=url,
-                    error=str(exc),
+                    url=redact_url(url),
+                    error=redact_url(str(exc)),
                 )
         if last_error is None:
             raise RuntimeError(f"no RPC endpoint available for {chain_slug}")
@@ -154,6 +155,8 @@ class LiquidityRemovalWatcher:
         pool_addresses: list[str],
     ) -> list[dict[str, Any]]:
         with HttpClient(base_url=rpc_url) as http:
+            if pool is not None:
+                pool.record_request(rpc_url)
             latest_payload = http.post_json(
                 "/",
                 json={
@@ -167,6 +170,8 @@ class LiquidityRemovalWatcher:
             if latest is None:
                 raise RuntimeError(f"{chain_slug}: invalid eth_blockNumber response")
             start = max(0, latest - max(1, self.settings.liquidity_removal_lookback_blocks))
+            if pool is not None:
+                pool.record_request(rpc_url)
             payload = http.post_json(
                 "/",
                 json={

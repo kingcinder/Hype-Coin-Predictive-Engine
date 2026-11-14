@@ -1,0 +1,103 @@
+"""Provider keys embedded in RPC URLs must not be persisted or surfaced."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from common.config import get_settings
+from common.urls import redact_url
+from ingestion import rpc_pool
+from storage import models
+
+SECRET = "00000000-0000-4000-8000-000000000000"
+HELIUS = f"https://mainnet.helius-rpc.com/?api-key={SECRET}"
+
+
+def test_redact_url_masks_query_credentials() -> None:
+    assert redact_url(HELIUS) == "https://mainnet.helius-rpc.com/?api-key=***"
+    assert (
+        redact_url("https://rpc.example/v1?key=abc&network=mainnet")
+        == "https://rpc.example/v1?key=***&network=mainnet"
+    )
+    assert redact_url("https://api.mainnet-beta.solana.com") == (
+        "https://api.mainnet-beta.solana.com"
+    )
+
+
+def test_redact_url_masks_alchemy_path_token() -> None:
+    alchemy = "https://eth-mainnet.g.alchemy.com/v2/fake-key-for-tests"
+    assert redact_url(alchemy) == "https://eth-mainnet.g.alchemy.com/v2/***"
+
+
+def test_redact_url_masks_credentials_inside_http_error_text() -> None:
+    """httpx errors embed the URL, so log messages need the same treatment."""
+    alchemy = (
+        "Client error '400 Bad Request' for url "
+        "'https://eth-mainnet.g.alchemy.com/v2/fake-key-for-tests/'"
+    )
+    helius = (
+        "Client error '401 Unauthorized' for url "
+        "'https://mainnet.helius-rpc.com/?api-key=fake-helius-key-for-tests'"
+    )
+
+    assert "fake-key-for-tests" not in redact_url(alchemy)
+    assert "/v2/***" in redact_url(alchemy)
+    assert "fake-helius-key-for-tests" not in redact_url(helius)
+    assert "api-key=***" in redact_url(helius)
+
+
+def test_redact_url_masks_webhook_and_bot_tokens_in_paths() -> None:
+    telegram = "https://api.telegram.org/bot123456789:AAHfake-token-value/sendMessage"
+    discord = "https://discord.com/api/webhooks/123456789012345678/fake-discord-webhook-token-value"
+    slack = "https://hooks.slack.com/services/T00000000/B00000000/fake-slack-secret"
+
+    assert "AAHfake-token-value" not in redact_url(telegram)
+    assert "fake-discord-webhook-token-value" not in redact_url(discord)
+    assert "fake-slack-secret" not in redact_url(slack)
+    assert redact_url(telegram).startswith("https://api.telegram.org/bot***")
+    assert "/api/webhooks/123456789012345678/***" in redact_url(discord)
+    assert redact_url(slack).endswith("/services/T00000000/B00000000/***")
+
+
+def _configure_helius(monkeypatch, settings) -> None:
+    monkeypatch.setattr(settings, "helius_api_key", SECRET)
+    monkeypatch.setattr(settings, "rpc_pool_enabled", True)
+    monkeypatch.setattr(settings, "solana_rpc_pool_csv", "https://solana-rpc.publicnode.com")
+    rpc_pool.get_rpc_pool.cache_clear()
+
+
+def test_pool_snapshot_persists_redacted_url(session, monkeypatch) -> None:
+    settings = get_settings()
+    _configure_helius(monkeypatch, settings)
+    try:
+        rpc_pool.persist_pool_snapshots(session)
+        session.commit()
+        urls = session.scalars(select(models.RpcPoolSnapshot.url)).all()
+    finally:
+        rpc_pool.get_rpc_pool.cache_clear()
+
+    assert urls
+    assert SECRET not in "".join(urls)
+    assert any("api-key=***" in url for url in urls)
+
+
+def test_pool_health_message_redacts_down_endpoint(session, monkeypatch) -> None:
+    settings = get_settings()
+    _configure_helius(monkeypatch, settings)
+    try:
+        pool = rpc_pool.get_rpc_pool("solana")
+        for _ in range(settings.rpc_pool_failure_threshold + 1):
+            pool.mark_failure(HELIUS)
+        rpc_pool._pool_health_row(session, "solana")
+        session.commit()
+        row = session.scalar(
+            select(models.SystemHealth)
+            .where(models.SystemHealth.component == "rpc_pool:solana")
+            .order_by(models.SystemHealth.id.desc())
+        )
+    finally:
+        rpc_pool.get_rpc_pool.cache_clear()
+
+    assert row is not None
+    assert SECRET not in (row.message or "")
+    assert "api-key=***" in (row.message or "")

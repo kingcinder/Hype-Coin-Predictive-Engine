@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.http import HttpClient
 from ingestion.provider_gate import ProviderGate
 from ingestion.rpc_pool import POOL_CHAINS, RpcEndpointPool, get_rpc_pool
@@ -192,6 +192,8 @@ class SolanaRpcClient:
         self.http.close()
 
     def rpc(self, method: str, params: list[Any] | None = None) -> Any:
+        if self._pool is not None:
+            self._pool.record_request(self._pool_url or self.http.base_url)
         try:
             data = self.http.post_json(
                 "/",
@@ -316,7 +318,7 @@ class EtherscanClient:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.settings.etherscan_api_key)
+        return bool(secret_value(self.settings.etherscan_api_key))
 
     def token_supply(self, chain_slug: str, contract_address: str) -> float | None:
         if not self.enabled:
@@ -326,7 +328,7 @@ class EtherscanClient:
             "module": "stats",
             "action": "tokensupply",
             "contractaddress": contract_address,
-            "apikey": self.settings.etherscan_api_key,
+            "apikey": secret_value(self.settings.etherscan_api_key),
         }
         data = self.http.get_json("/v2/api", params=params)
         try:

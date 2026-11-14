@@ -14,7 +14,7 @@ from crawlers.sources.x_trends import XTrendsCrawler
 
 @respx.mock
 def test_gas_tracker_parses_eth_oracle() -> None:
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -44,7 +44,7 @@ def test_gas_tracker_parses_eth_oracle() -> None:
 
 @respx.mock
 def test_gas_tracker_normal_regime_no_spike() -> None:
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -70,7 +70,7 @@ def test_gas_tracker_normal_regime_no_spike() -> None:
 @respx.mock
 def test_gas_tracker_handles_bad_oracle_response() -> None:
     # Oracle returns a non-dict "result" (e.g. rate-limited NOTOK) — must not raise.
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(200, json={"status": "0", "result": "NOTOK"})
     )
     crawler = GasTrackerCrawler(include_solana=False, include_pending_tx=False)
@@ -85,7 +85,7 @@ def test_gas_tracker_handles_bad_oracle_response() -> None:
 def test_gas_tracker_pending_tx_severe_congestion() -> None:
     """Pending tx count above 200k = severe congestion signal."""
     # Mock the Etherscan oracle (gas prices normal)
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -135,7 +135,7 @@ def test_gas_tracker_pending_tx_severe_congestion() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_high_congestion() -> None:
     """Pending tx count above 80k but below 200k = high congestion."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -177,7 +177,7 @@ def test_gas_tracker_pending_tx_high_congestion() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_normal_congestion() -> None:
     """Pending tx count below 80k = normal congestion."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -219,7 +219,7 @@ def test_gas_tracker_pending_tx_normal_congestion() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_fallback_on_rpc_failure() -> None:
     """When the first RPC fails, try the next one."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -265,7 +265,7 @@ def test_gas_tracker_pending_tx_fallback_on_rpc_failure() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_all_rpcs_fail() -> None:
     """When all RPCs fail, pending tx item is skipped but gas oracle still works."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -302,7 +302,7 @@ def test_gas_tracker_pending_tx_all_rpcs_fail() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_disabled() -> None:
     """When include_pending_tx=False, no pending tx item is returned."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={
@@ -328,7 +328,7 @@ def test_gas_tracker_pending_tx_disabled() -> None:
 @respx.mock
 def test_gas_tracker_pending_tx_bad_rpc_response() -> None:
     """RPC returns non-dict result — skip this endpoint, try next."""
-    respx.get("https://api.etherscan.io/api").mock(
+    respx.get("https://api.etherscan.io/v2/api").mock(
         return_value=Response(
             200,
             json={

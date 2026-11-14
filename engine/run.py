@@ -73,6 +73,41 @@ def _wait_for_api(server, stop: threading.Event, timeout_seconds: float = 20.0) 
     return server.started
 
 
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_ui(ui: subprocess.Popen[bytes], pgid: int) -> None:
+    """Stop the GUI's process group, even if its leader already exited.
+
+    Streamlit runs in its own session (``start_new_session=True``). Gating the
+    group signal on ``ui.poll() is None`` missed the case where the launcher
+    process had exited while a worker it spawned still held the UI port — the
+    leftover listener then blocked the next ``./start-engine.sh`` launch.
+    """
+    for sig, timeout in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ui.poll()  # reap the leader so group liveness reflects its children
+            if not _process_group_alive(pgid):
+                return
+            time.sleep(0.1)
+    try:
+        ui.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        log.warning("engine_ui_still_running", pid=ui.pid)
+
+
 def _port_in_use(host: str, port: int) -> bool:
     """True when a socket on ``(host, port)`` is already bound by another process.
 
@@ -659,6 +694,7 @@ def main() -> None:
         # parent left them holding the UI port after the engine exited.
         start_new_session=True,
     )
+    ui_pgid = os.getpgid(ui.pid)
 
     print(
         "\nSerpent Circle engine is up.\n"
@@ -741,20 +777,9 @@ def main() -> None:
             llm_engine.close()
         except Exception:
             pass
-        if ui.poll() is None:
-            # Signal the whole group (the UI child and anything it spawned), since
-            # a lone terminate() orphaned Streamlit's children on the UI port.
-            try:
-                os.killpg(os.getpgid(ui.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                ui.terminate()
-            try:
-                ui.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(ui.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    ui.kill()
+        # Always signal the captured group, not just a live leader: a Streamlit
+        # worker can outlive the launcher and keep the UI port bound.
+        _terminate_ui(ui, ui_pgid)
         api_server.should_exit = True
         api_thread.join(timeout=10)
         # Drain the write queue: every submitted write commits before exit, so

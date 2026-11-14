@@ -20,10 +20,12 @@ _TABLE = "ledger_trades"
 def upgrade() -> None:
     # Older rows may predate the required-field contract; keep them valid
     # without inventing non-empty explanations.
-    op.execute(sa.text(f"UPDATE {_TABLE} SET stop_pct = 0 WHERE stop_pct IS NULL"))
-    op.execute(sa.text(f"UPDATE {_TABLE} SET why_entered = '' WHERE why_entered IS NULL"))
-    op.execute(sa.text(f"UPDATE {_TABLE} SET why_exited = '' WHERE why_exited IS NULL"))
-    op.execute(sa.text(f"UPDATE {_TABLE} SET lesson = '' WHERE lesson IS NULL"))
+    # nosec B608 - ``_TABLE`` is the module-level constant identifier; the
+    # only interpolated value in each statement is that literal table name.
+    op.execute(sa.text(f"UPDATE {_TABLE} SET stop_pct = 0 WHERE stop_pct IS NULL"))  # nosec B608
+    op.execute(sa.text(f"UPDATE {_TABLE} SET why_entered = '' WHERE why_entered IS NULL"))  # nosec B608
+    op.execute(sa.text(f"UPDATE {_TABLE} SET why_exited = '' WHERE why_exited IS NULL"))  # nosec B608
+    op.execute(sa.text(f"UPDATE {_TABLE} SET lesson = '' WHERE lesson IS NULL"))  # nosec B608
 
     with op.batch_alter_table(_TABLE) as batch_op:
         batch_op.alter_column("stop_pct", existing_type=sa.Numeric(10, 4), nullable=False)

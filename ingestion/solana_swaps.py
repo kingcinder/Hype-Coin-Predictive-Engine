@@ -16,6 +16,7 @@ from typing import Any
 
 from common.config import get_settings
 from common.logging import get_logger
+from common.urls import redact_url
 from ingestion.provider_gate import CircuitOpen, ProviderGate
 
 log = get_logger(__name__)
@@ -137,7 +138,11 @@ def fetch_pool_swaps(
         return []
     except Exception as exc:  # noqa: BLE001 - ingestion must survive an RPC outage.
         _rpc_gate.record_failure(exc)
-        log.warning("solana_swap_signatures_failed", pool=pool_address, error=str(exc))
+        log.warning(
+            "solana_swap_signatures_failed",
+            pool=pool_address,
+            error=redact_url(str(exc)),
+        )
         return []
 
     unseen = [
@@ -161,7 +166,7 @@ def fetch_pool_swaps(
                 "solana_swap_transaction_failed",
                 pool=pool_address,
                 signature=signature,
-                error=str(exc),
+                error=redact_url(str(exc)),
             )
             if _rpc_gate.is_open():
                 break

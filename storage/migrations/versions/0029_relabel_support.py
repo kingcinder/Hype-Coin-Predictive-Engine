@@ -119,5 +119,7 @@ def downgrade() -> None:
         columns = {column["name"] for column in inspector.get_columns(_TABLE)}
         if "correction_of" in columns:
             # Copies must go before per-score uniqueness can be restored.
-            bind.execute(sa.text(f"DELETE FROM {_TABLE} WHERE label_version != 'v1_unbounded'"))
+            # ``_TABLE`` is the module-level constant identifier; the only
+            # interpolated value is that literal table name.
+            bind.execute(sa.text(f"DELETE FROM {_TABLE} WHERE label_version != 'v1_unbounded'"))  # nosec B608
     _swap(bounded=False)

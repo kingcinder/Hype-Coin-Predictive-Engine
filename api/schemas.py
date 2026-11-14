@@ -493,6 +493,7 @@ class RpcPoolEndpointRow(BaseModel):
     probe_successes: int
     probe_failures: int
     probe_history: list[RpcPoolProbeRow]
+    request_count: int
 
 
 class RpcPoolChainRow(BaseModel):

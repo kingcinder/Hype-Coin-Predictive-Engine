@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ipaddress import ip_address
 
-from common.config import Settings
+from common.config import Settings, secret_value
 from common.logging import get_logger
 
 log = get_logger(__name__)
@@ -37,7 +37,7 @@ def validate_network_exposure(settings: Settings) -> None:
     )
     if not settings.engine_allow_lan:
         raise RuntimeError("non-loopback binds require ENGINE_ALLOW_LAN=1")
-    if not (settings.engine_api_token or "").strip():
+    if not (secret_value(settings.engine_api_token) or "").strip():
         raise RuntimeError("non-loopback binds require ENGINE_API_TOKEN")
     if settings.engine_api_auth_bypass:
         raise RuntimeError("ENGINE_API_AUTH_BYPASS must be disabled for non-loopback binds")

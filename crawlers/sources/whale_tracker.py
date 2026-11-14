@@ -11,11 +11,26 @@ import time
 from datetime import UTC
 from typing import Any
 
+from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
+
+# Etherscan V2 requires the key on every endpoint; V1 is retired.
+_ETHERSCAN_V2_URL = "https://api.etherscan.io/v2/api"
+_ETHEREUM_CHAIN_ID = "1"
+
+
+def _etherscan_params(**params: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {"chainid": _ETHEREUM_CHAIN_ID, **params}
+    api_key = secret_value(get_settings().etherscan_api_key)
+    if api_key:
+        out["apikey"] = api_key
+    return out
+
 
 # Known whale / smart-money addresses to monitor
 ETH_WHALE_ADDRESSES = [
@@ -59,17 +74,17 @@ class WhaleTrackerCrawler(BaseCrawler):
         for address in ETH_WHALE_ADDRESSES:
             try:
                 data = self.client.get(
-                    "https://api.etherscan.io/api",
-                    params={
-                        "module": "account",
-                        "action": "txlist",
-                        "address": address,
-                        "startblock": 0,
-                        "endblock": 99999999,
-                        "page": 1,
-                        "offset": 5,
-                        "sort": "desc",
-                    },
+                    _ETHERSCAN_V2_URL,
+                    params=_etherscan_params(
+                        module="account",
+                        action="txlist",
+                        address=address,
+                        startblock=0,
+                        endblock=99999999,
+                        page=1,
+                        offset=5,
+                        sort="desc",
+                    ),
                 ).json()
                 for tx in (data.get("result") or [])[:5]:
                     value_eth = int(tx.get("value", "0")) / 1e18
@@ -100,7 +115,7 @@ class WhaleTrackerCrawler(BaseCrawler):
                     )
                 time.sleep(0.25)  # Etherscan rate limit
             except Exception as exc:  # noqa: BLE001
-                log.debug("whale_eth_error", address=address, error=str(exc))
+                log.debug("whale_eth_error", address=address, error=redact_url(str(exc)))
         return items
 
     def _fetch_eth_large_swaps(self) -> list[dict[str, Any]]:
@@ -115,17 +130,17 @@ class WhaleTrackerCrawler(BaseCrawler):
         try:
             # Get recent transactions to the Uniswap router
             data = self.client.get(
-                "https://api.etherscan.io/api",
-                params={
-                    "module": "account",
-                    "action": "txlist",
-                    "address": router,
-                    "startblock": 0,
-                    "endblock": 99999999,
-                    "page": 1,
-                    "offset": 20,
-                    "sort": "desc",
-                },
+                _ETHERSCAN_V2_URL,
+                params=_etherscan_params(
+                    module="account",
+                    action="txlist",
+                    address=router,
+                    startblock=0,
+                    endblock=99999999,
+                    page=1,
+                    offset=20,
+                    sort="desc",
+                ),
             ).json()
             for tx in (data.get("result") or [])[:20]:
                 value_eth = int(tx.get("value", "0")) / 1e18
@@ -156,7 +171,7 @@ class WhaleTrackerCrawler(BaseCrawler):
                     }
                 )
         except Exception as exc:  # noqa: BLE001
-            log.debug("whale_eth_swap_error", error=str(exc))
+            log.debug("whale_eth_swap_error", error=redact_url(str(exc)))
         return items
 
     # ── Solana whale tracking ────────────────────────────────────────────
@@ -227,7 +242,7 @@ class WhaleTrackerCrawler(BaseCrawler):
                         )
                     time.sleep(0.1)  # Rate limit
             except Exception as exc:  # noqa: BLE001
-                log.debug("whale_sol_error", account=account, error=str(exc))
+                log.debug("whale_sol_error", account=account, error=redact_url(str(exc)))
         return items
 
 

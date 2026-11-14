@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from common.logging import get_logger
+from common.urls import redact_url
 from scoring.ensemble import clamp
 
 log = get_logger(__name__)
@@ -79,7 +80,7 @@ def apply_llm_adjustments(
             applied=True,
         )
     except Exception as exc:  # noqa: BLE001
-        log.debug("llm_ensemble_failed", error=str(exc))
+        log.debug("llm_ensemble_failed", error=redact_url(str(exc)))
         return LLMEnsembleResult(
             hype=base_hype,
             risk=base_risk,

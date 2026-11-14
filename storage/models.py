@@ -758,6 +758,7 @@ class RpcPoolSnapshot(Base):
     probe_successes: Mapped[int] = mapped_column(Integer, nullable=False)
     probe_failures: Mapped[int] = mapped_column(Integer, nullable=False)
     probe_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class IngestionWatermark(Base):

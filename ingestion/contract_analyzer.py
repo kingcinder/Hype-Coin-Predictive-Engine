@@ -9,9 +9,12 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
+from common.config import get_settings, secret_value
 from common.http import HttpClient
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -107,15 +110,18 @@ def _analyze_evm_contract(
     try:
         # Fetch contract source code for pattern matching
         chain_id = "1" if chain == "ethereum" else "8453"
-        data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "contract",
-                "action": "getsourcecode",
-                "address": address,
-            },
-        )
+        params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "contract",
+            "action": "getsourcecode",
+            "address": address,
+        }
+        # Etherscan V2 rejects unauthenticated requests ("Missing/Invalid API
+        # Key"), so pass the configured key when there is one.
+        api_key = secret_value(get_settings().etherscan_api_key)
+        if api_key:
+            params["apikey"] = api_key
+        data = client.get_json("/v2/api", params=params)
 
         source_code = ""
         if isinstance(data, dict) and data.get("result"):
@@ -156,21 +162,22 @@ def _analyze_evm_contract(
             result.suspicious_flags += 1
             result.reasons.append("Contract source code not verified")
 
-        # Fetch deployer info
-        tx_data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "account",
-                "action": "txlist",
-                "address": address,
-                "startblock": 0,
-                "endblock": 99999999,
-                "page": 1,
-                "offset": 1,
-                "sort": "asc",
-            },
-        )
+        # Fetch deployer info. V2 requires the key on every endpoint, not just
+        # getsourcecode; without it this silently lost deployer age/history.
+        tx_params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": address,
+            "startblock": 0,
+            "endblock": 99999999,
+            "page": 1,
+            "offset": 1,
+            "sort": "asc",
+        }
+        if api_key:
+            tx_params["apikey"] = api_key
+        tx_data = client.get_json("/v2/api", params=tx_params)
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list) and txs:
@@ -180,7 +187,9 @@ def _analyze_evm_contract(
                 _check_deployer_history(deployer, client, chain_id, result)
 
     except Exception as exc:  # noqa: BLE001
-        log.debug("contract_analysis_error", address=address, error=str(exc))
+        # Class name only: an HTTPStatusError message embeds the request URL,
+        # which carries the Etherscan ``apikey`` query parameter.
+        log.debug("contract_analysis_error", address=address, error=type(exc).__name__)
     finally:
         if http is None:
             client.close()
@@ -223,7 +232,7 @@ def _analyze_solana_contract(
                 result.ownership_renounced = True  # No mint authority
 
     except Exception as exc:  # noqa: BLE001
-        log.debug("solana_analysis_error", address=address, error=str(exc))
+        log.debug("solana_analysis_error", address=address, error=redact_url(str(exc)))
     finally:
         if http is None:
             client.close()
@@ -237,20 +246,21 @@ def _check_deployer_history(
 ) -> None:
     """Check if deployer has prior rug-pull history."""
     try:
-        tx_data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "account",
-                "action": "txlist",
-                "address": deployer,
-                "startblock": 0,
-                "endblock": 99999999,
-                "page": 1,
-                "offset": 5,
-                "sort": "desc",
-            },
-        )
+        params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": deployer,
+            "startblock": 0,
+            "endblock": 99999999,
+            "page": 1,
+            "offset": 5,
+            "sort": "desc",
+        }
+        api_key = secret_value(get_settings().etherscan_api_key)
+        if api_key:
+            params["apikey"] = api_key
+        tx_data = client.get_json("/v2/api", params=params)
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list):

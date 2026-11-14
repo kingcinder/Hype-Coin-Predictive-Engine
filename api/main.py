@@ -78,6 +78,7 @@ from common.enums import AlertState
 from common.logging import get_logger
 from common.network import validate_network_exposure
 from common.time import utc_now
+from common.urls import redact_url
 from engine.activity_stream import activity_stream_broker, compute_activity_signal_score
 from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
@@ -1640,23 +1641,21 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
     """Per-chain RPC pool state, preferring the worker's persisted snapshots.
 
     The worker and API commonly run in separate processes. The API therefore
-    reads the latest endpoint snapshot from the database and only falls back to
-    its local in-memory pool before the first worker scan.
+    reads every endpoint from each chain's latest scan snapshot and only falls
+    back to its local in-memory pool before the first worker scan.
     """
     latest = (
         select(
             models.RpcPoolSnapshot.chain_slug,
-            models.RpcPoolSnapshot.url,
             func.max(models.RpcPoolSnapshot.ts).label("max_ts"),
         )
-        .group_by(models.RpcPoolSnapshot.chain_slug, models.RpcPoolSnapshot.url)
+        .group_by(models.RpcPoolSnapshot.chain_slug)
         .subquery()
     )
     persisted = session.scalars(
         select(models.RpcPoolSnapshot).join(
             latest,
             (models.RpcPoolSnapshot.chain_slug == latest.c.chain_slug)
-            & (models.RpcPoolSnapshot.url == latest.c.url)
             & (models.RpcPoolSnapshot.ts == latest.c.max_ts),
         )
     ).all()
@@ -1672,7 +1671,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
             degraded_count = sum(not row.down and row.health < HEALTH_START for row in rows)
             endpoints = [
                 RpcPoolEndpointRow(
-                    url=row.url,
+                    url=redact_url(row.url),
                     health=row.health,
                     consecutive_failures=row.consecutive_failures,
                     down=row.down,
@@ -1681,6 +1680,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_count=row.probe_count,
                     probe_successes=row.probe_successes,
                     probe_failures=row.probe_failures,
+                    request_count=row.request_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe["ts"], ok=bool(probe["ok"]))
                         for probe in (row.probe_history or [])
@@ -1695,7 +1695,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
             degraded_count = sum(not state.down and state.health < HEALTH_START for state in states)
             endpoints = [
                 RpcPoolEndpointRow(
-                    url=state.url,
+                    url=redact_url(state.url),
                     health=state.health,
                     consecutive_failures=state.consecutive_failures,
                     down=state.down,
@@ -1704,6 +1704,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_count=state.probe_count,
                     probe_successes=state.probe_successes,
                     probe_failures=state.probe_failures,
+                    request_count=state.request_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe.ts, ok=probe.ok) for probe in state.probe_history
                     ],
@@ -1994,7 +1995,7 @@ def engine_trigger_scan() -> TriggerResponse:
             log.info("api_manual_scan_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_scan_failed", error=str(exc))
+            log.exception("api_manual_scan_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-scan", daemon=True).start()
     return TriggerResponse(
@@ -2027,7 +2028,7 @@ def engine_trigger_forecast() -> TriggerResponse:
             log.info("api_manual_forecast_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_forecast_failed", error=str(exc))
+            log.exception("api_manual_forecast_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-forecast", daemon=True).start()
     return TriggerResponse(status="accepted", message="Forecast training started")
@@ -2057,7 +2058,7 @@ def engine_trigger_retention() -> TriggerResponse:
             log.info("api_manual_retention_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_manual_retention_failed", error=str(exc))
+            log.exception("api_manual_retention_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-retention", daemon=True).start()
     return TriggerResponse(status="accepted", message="Retention pass started")
@@ -2664,7 +2665,7 @@ def engine_trigger_nightcrawlers() -> TriggerResponse:
             log.info("api_nightcrawler_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_nightcrawler_failed", error=str(exc))
+            log.exception("api_nightcrawler_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-nightcrawler", daemon=True).start()
     return TriggerResponse(status="accepted", message="Night Crawler pipeline started")
@@ -2733,7 +2734,7 @@ def engine_trigger_data_lake() -> TriggerResponse:
             log.info("api_data_lake_complete", result=result)
         except Exception as exc:  # noqa: BLE001
             engine_state.mark_error(str(exc))
-            log.exception("api_data_lake_failed", error=str(exc))
+            log.exception("api_data_lake_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-data-lake", daemon=True).start()
     return TriggerResponse(status="accepted", message="Data lake pass started")

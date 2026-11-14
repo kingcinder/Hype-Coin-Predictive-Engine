@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
@@ -283,7 +283,7 @@ class NarrativeEngine:
         return TelegramCrawler(
             handles,
             api_id=self.settings.telegram_api_id,
-            api_hash=self.settings.telegram_api_hash,
+            api_hash=secret_value(self.settings.telegram_api_hash) or "",
             session_file=self.settings.telegram_session_file,
             message_limit=self.settings.telegram_message_limit,
             pause_seconds=self.settings.telegram_rate_limit_pause_seconds,

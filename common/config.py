@@ -4,9 +4,16 @@ import os
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Database URL override sources, highest precedence first. ``SERPENT_DB_PATH``
@@ -17,6 +24,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``settings.database_url`` — session_scope() users, alembic migrations,
 # diagnose_retention's ``--db`` default, bootstrap_local's written config, the
 # watchdog's sqlite checks — binds the effective URL, not a per-layer guess.
+
+
+def _allows_none(annotation: object) -> bool:
+    """Whether a field annotation accepts ``None`` (``X | None``/``Optional``)."""
+    if annotation is type(None):
+        return True
+    return any(_allows_none(arg) for arg in get_args(annotation))
+
+
+def secret_value(value: SecretStr | str | None) -> str | None:
+    """Plaintext of a ``SecretStr`` field (or of a plain string set by a test).
+
+    ``Settings`` stores credentials as ``SecretStr`` so ``repr``/logging and JSON
+    dumps cannot leak them; call sites that must actually send a credential go
+    through this helper.
+    """
+    if value is None:
+        return None
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return str(value)
 
 
 def database_url_env_override() -> tuple[str, str] | None:
@@ -60,7 +88,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "http://localhost:9000"
     minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
+    minio_secret_key: SecretStr = SecretStr("minioadmin")
     minio_bucket: str = "raw-evidence"
 
     api_host: str = "127.0.0.1"
@@ -75,7 +103,7 @@ class Settings(BaseSettings):
     # request is refused with 403 (fail closed) unless
     # ENGINE_API_AUTH_BYPASS=1 is explicitly set. Non-loopback binds also
     # require ENGINE_ALLOW_LAN=1, a token, and bypass disabled.
-    engine_api_token: str | None = None
+    engine_api_token: SecretStr | None = None
     engine_api_auth_bypass: bool = False
     # SQLite busy timeout (ms) before a write gives up on a transient lock and
     # raises "database is locked". Higher than the SQLite default so genuine
@@ -126,15 +154,15 @@ class Settings(BaseSettings):
     rpc_pool_probe_interval_seconds: int = 300
     rpc_pool_alert_cooldown_seconds: int = 900
 
-    helius_api_key: str | None = None
-    alchemy_api_key: str | None = None
+    helius_api_key: SecretStr | None = None
+    alchemy_api_key: SecretStr | None = None
     # Optional Birdeye enhancement; without it the feed is skipped instead of
     # recording a 401 as a transient failure on every scan.
-    birdeye_api_key: str | None = None
+    birdeye_api_key: SecretStr | None = None
     quicknode_evm_rpc_url: str | None = None
-    etherscan_api_key: str | None = None
+    etherscan_api_key: SecretStr | None = None
     reddit_client_id: str | None = None
-    reddit_client_secret: str | None = None
+    reddit_client_secret: SecretStr | None = None
 
     # Minimum evaluated outcomes per risk band before the band→survival
     # confidence table is treated as validated (scoring/band_calibration.py).
@@ -207,11 +235,30 @@ class Settings(BaseSettings):
     # telegram public-channel crawler (Telethon; free, one-time session login)
     telegram_enabled: bool = False
     telegram_api_id: int | None = None
-    telegram_api_hash: str | None = None
+    telegram_api_hash: SecretStr | None = None
     telegram_session_file: str = "telegram.session"
     telegram_channel_handles_csv: str = ""
     telegram_message_limit: int = 30
     telegram_rate_limit_pause_seconds: float = 2.0
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_optional_is_unset(cls, value: object, info: ValidationInfo) -> object:
+        """Treat an empty ``KEY=`` line on an optional field as unset, not invalid.
+
+        ``.env.example`` ships placeholder blanks for optional numbers and API
+        keys (``TELEGRAM_API_ID``, ``LIVE_MAX_BANKROLL_SOL``, ``HELIUS_API_KEY``,
+        …). Pydantic would otherwise raise a ``decimal_parsing`` error — aborting
+        the whole engine — or hand consumers an empty ``SecretStr`` that looks
+        configured. Fields that cannot be ``None`` are left untouched.
+        """
+        if not isinstance(value, str) or value.strip():
+            return value
+        field_name = info.field_name
+        field = cls.model_fields.get(field_name) if field_name else None
+        if field is not None and _allows_none(field.annotation):
+            return None
+        return value
 
     # ntfy.sh push notifier (free, no account on ntfy.sh)
     ntfy_enabled: bool = False
@@ -355,7 +402,7 @@ class Settings(BaseSettings):
     )
     nightcrawler_presale_enabled: bool = True
     nightcrawler_cmc_enabled: bool = True
-    cmc_api_key: str | None = None
+    cmc_api_key: SecretStr | None = None
     nightcrawler_farcaster_enabled: bool = True
     # Phase 8 fleet expansion: gas tracker, CoinPaprika, GitHub trending, X trends
     nightcrawler_gas_tracker_enabled: bool = True
@@ -365,7 +412,7 @@ class Settings(BaseSettings):
     nightcrawler_github_trending_enabled: bool = True
     github_trending_search_query: str = "crypto token memecoin created:>30d"
     # Optional GitHub token raises the search API rate limit from 10 to 5000 req/h.
-    github_token: str | None = None
+    github_token: SecretStr | None = None
     nightcrawler_x_trends_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices(
@@ -727,9 +774,9 @@ class Settings(BaseSettings):
     live_daily_loss_limit_sol: Decimal | None = None
     live_max_risk_pct: Decimal = Decimal("1")
     gmgn_api_base: str = ""
-    gmgn_api_key: str | None = None
+    gmgn_api_key: SecretStr | None = None
     gmgn_wallet_address: str | None = None
-    gmgn_signer_secret: str | None = None
+    gmgn_signer_secret: SecretStr | None = None
     first_buy_window_minutes: int = 5
     # Fetch pool trades while a pair is inside its first-buy window so tracked
     # wallet buys can queue copy signals from real ingestion, not only the API.
@@ -755,13 +802,21 @@ class Settings(BaseSettings):
 
     def rpc_url_for_chain(self, chain_slug: str) -> str | None:
         if chain_slug == "solana":
-            if self.helius_api_key:
-                return f"https://mainnet.helius-rpc.com/?api-key={self.helius_api_key}"
+            helius_key = secret_value(self.helius_api_key)
+            if helius_key:
+                return f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
             return self.solana_rpc_url
         if chain_slug == "base":
             return self.quicknode_evm_rpc_url or self.base_rpc_url
         if chain_slug == "ethereum":
-            return self.quicknode_evm_rpc_url or self.ethereum_rpc_url
+            # This Alchemy key is enabled for Ethereum only (``base-mainnet``
+            # returns 403), so Alchemy is wired for Ethereum alone.
+            alchemy_key = secret_value(self.alchemy_api_key)
+            if self.quicknode_evm_rpc_url:
+                return self.quicknode_evm_rpc_url
+            if alchemy_key:
+                return f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}"
+            return self.ethereum_rpc_url
         return None
 
 

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.time import utc_now
+from common.urls import redact_url
 from storage import models
 from storage.repository import record_health
 
@@ -39,6 +40,7 @@ class EndpointState:
     probe_successes: int = 0
     probe_failures: int = 0
     probe_history: tuple[ProbeRecord, ...] = ()
+    request_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,7 @@ class RpcEndpointPool:
         }
         self._probe_counts: dict[str, int] = {url: 0 for url in self.endpoints}
         self._probe_successes: dict[str, int] = {url: 0 for url in self.endpoints}
+        self._request_counts: dict[str, int] = {url: 0 for url in self.endpoints}
 
     @property
     def enabled(self) -> bool:
@@ -153,6 +156,12 @@ class RpcEndpointPool:
                 self._health[url] = min(1.0, self._health[url] + HEALTH_SUCCESS_BOOST)
             self._consecutive_failures[url] = 0
 
+    def record_request(self, url: str) -> None:
+        """Count one attempted JSON-RPC request, excluding pool probes."""
+        with self._lock:
+            if url in self._request_counts:
+                self._request_counts[url] += 1
+
     def mark_failure(self, url: str) -> None:
         with self._lock:
             if url not in self._health:
@@ -184,6 +193,7 @@ class RpcEndpointPool:
                     probe_successes=self._probe_successes[url],
                     probe_failures=self._probe_counts[url] - self._probe_successes[url],
                     probe_history=tuple(self._probe_history[url]),
+                    request_count=self._request_counts[url],
                 )
                 for url in self.endpoints
             ]
@@ -251,7 +261,7 @@ class RpcEndpointPool:
                         RpcPoolAlert(
                             chain_slug=self.chain_slug,
                             kind="endpoint_down_cooldown",
-                            url=url,
+                            url=redact_url(url),
                             healthy_endpoints=healthy,
                             total_endpoints=len(self.endpoints),
                             down_for_seconds=down_for,
@@ -405,8 +415,10 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
     states = pool.snapshot()
     if not states:
         return
-    down = [state.url for state in states if state.down]
-    degraded = [state.url for state in states if state.health < HEALTH_START and not state.down]
+    down = [redact_url(state.url) for state in states if state.down]
+    degraded = [
+        redact_url(state.url) for state in states if state.health < HEALTH_START and not state.down
+    ]
     state = "red" if down else ("yellow" if degraded else "ok")
     message = (
         f"{chain_slug} rpc pool: {len(states)} endpoints, {len(down)} down, "
@@ -437,7 +449,7 @@ def persist_pool_snapshots(session: Session, *, ts: datetime | None = None) -> i
             session.add(
                 models.RpcPoolSnapshot(
                     chain_slug=chain_slug,
-                    url=state.url,
+                    url=redact_url(state.url),
                     ts=snapshot_ts,
                     health=state.health,
                     consecutive_failures=state.consecutive_failures,
@@ -451,6 +463,7 @@ def persist_pool_snapshots(session: Session, *, ts: datetime | None = None) -> i
                         {"ts": probe.ts.isoformat(), "ok": probe.ok}
                         for probe in state.probe_history
                     ],
+                    request_count=state.request_count,
                 )
             )
             count += 1

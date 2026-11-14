@@ -15,6 +15,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from common.config import get_settings
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -120,7 +121,7 @@ def build_httpx_client(
             trust_env=False,
         )
     except Exception as exc:
-        log.error("http_client_construction_failed", error=str(exc))
+        log.error("http_client_construction_failed", error=redact_url(str(exc)))
         raise
 
 
@@ -171,11 +172,23 @@ class HttpClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def get_json(self, path: str, *, params: Mapping[str, Any] | None = None) -> Any:
-        return self._request_json("GET", path, params=params)
+    def get_json(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        return self._request_json("GET", path, params=params, headers=headers)
 
-    def post_json(self, path: str, *, json: Mapping[str, Any] | None = None) -> Any:
-        return self._request_json("POST", path, json=json)
+    def post_json(
+        self,
+        path: str,
+        *,
+        json: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        return self._request_json("POST", path, json=json, headers=headers)
 
     @retry(
         retry=retry_if_exception_type(

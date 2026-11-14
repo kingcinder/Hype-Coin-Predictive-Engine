@@ -38,6 +38,17 @@ def test_failure_decays_health_and_fails_over() -> None:
     assert pool.health(first) < HEALTH_START
 
 
+def test_request_counts_track_rpc_calls_separately_from_probes() -> None:
+    pool = RpcEndpointPool(POOL[:1])
+    pool.record_request(POOL[0])
+    pool.mark_success(POOL[0])
+    pool.probe_endpoints(lambda _url: True)
+
+    state = pool.snapshot()[0]
+    assert state.request_count == 1
+    assert state.probe_count == 1
+
+
 def test_endpoint_goes_down_after_threshold_and_is_excluded() -> None:
     pool = RpcEndpointPool(POOL, failure_threshold=2)
     for _ in range(2):
@@ -164,9 +175,13 @@ def test_solana_client_picks_from_pool_and_marks_failure(monkeypatch) -> None:
     with pytest.raises(ConnectionError):
         client.rpc("getHealth")
     assert client._pool.health(client.http.base_url) < HEALTH_START
+    assert client._pool.snapshot()[POOL.index(client.http.base_url)].request_count == 1
 
 
 def test_solana_client_fallback_without_pool(monkeypatch) -> None:
+    from common.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "helius_api_key", None)
     monkeypatch.setattr(
         "ingestion.source_clients.get_rpc_pool",
         lambda chain_slug: RpcEndpointPool(POOL, failure_threshold=2),
@@ -343,6 +358,7 @@ def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monke
         for chain in ("solana", "base", "ethereum")
     }
     pools["base"].mark_failure("https://base.example.com")
+    pools["base"].record_request("https://base.example.com")
     monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain: pools[chain])
 
     assert persist_pool_snapshots(session) == 3
@@ -355,6 +371,7 @@ def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monke
     assert row.health < 1.0
     assert row.probe_count == 0
     assert row.probe_history == []
+    assert row.request_count == 1
 
 
 def test_record_pool_health_writes_per_chain_rows(session, monkeypatch) -> None:
