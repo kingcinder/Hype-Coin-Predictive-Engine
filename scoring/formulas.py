@@ -63,6 +63,7 @@ class ScoreResult:
     drivers: dict[str, float]
     risk_reasons: list[str]
     missing_features: list[str]
+    confidence_source: str = "fallback"
 
 
 def compute_scores(
@@ -170,8 +171,9 @@ def compute_scores(
     # Confidence derives from the risk band to calibrate against survival:
     # GREEN tokens have high survival probability, BLACK tokens have near-zero.
     # This replaces the old feature-availability formula which was uncalibrated.
-    from scoring.band_calibration import band_confidence_map
+    from scoring.band_calibration import band_confidence_map, band_confidence_source
 
+    confidence_source = band_confidence_source()
     raw_confidence = band_confidence_map().get(risk_assessment.band, 50.0)
     # Light 15% blend with feature availability adds intra-band nuance
     # without collapsing the distribution into a single bin.
@@ -193,6 +195,7 @@ def compute_scores(
             and calibration.sample_size >= get_settings().risk_confidence_calibration_min_samples
         ):
             confidence = apply_isotonic_map(confidence, calibration.x_points, calibration.y_points)
+            confidence_source = "calibrated"
     # Uncertainty keeps the original factory-missing semantics: the union
     # above already erodes confidence via the coverage penalty, and adding
     # the union count here as well would double-count and clamp degenerate
@@ -279,6 +282,7 @@ def compute_scores(
         exit_risk=round(exit_risk, 4),
         research_priority=round(research_priority, 4),
         risk_band=risk_assessment.band,
+        confidence_source=confidence_source,
         drivers=drivers,
         risk_reasons=risk_assessment.reasons,
         missing_features=all_missing,

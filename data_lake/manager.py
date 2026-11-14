@@ -74,10 +74,15 @@ def run_data_lake_pass(
         # 2b. Re-derive the band→survival confidence map from the outcomes now
         # persisted (two aggregates); until it validates, the conservative
         # fallback stays in place and every read path reports it as unvalidated.
-        from scoring.band_calibration import refresh_band_calibration
+        from scoring.band_calibration import calibration_cutoff, refresh_band_calibration
 
+        # R3 P1-3: calibrate only on outcomes before the walk-forward cutoff.
+        # Calibrating on the same outcomes validation evaluates would fit the
+        # map to its own test set.
         result["confidence_calibration"] = {
-            "validated": refresh_band_calibration(session)["validated"]
+            "validated": refresh_band_calibration(session, cutoff=calibration_cutoff(session))[
+                "validated"
+            ]
         }
         session.commit()
 

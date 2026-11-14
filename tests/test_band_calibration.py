@@ -18,6 +18,7 @@ from scoring.band_calibration import (
     COMPONENT,
     FALLBACK_BAND_CONFIDENCE,
     band_confidence_map,
+    band_confidence_source,
     refresh_band_calibration,
     set_band_confidence,
 )
@@ -118,3 +119,96 @@ def test_unevaluated_outcomes_do_not_count(session) -> None:
 
     assert summary["validated"] is False
     assert summary["samples"] == {}
+
+
+def test_band_confidence_source_tracks_fallback_and_calibrated(session) -> None:
+    """R3 P1-3 (a): the fallback path must be stampable, not implied."""
+    set_band_confidence(None)
+    assert band_confidence_source() == "fallback"
+    set_band_confidence(dict(FALLBACK_BAND_CONFIDENCE))
+    assert band_confidence_source() == "calibrated"
+    set_band_confidence(None)
+    assert band_confidence_source() == "fallback"
+
+
+def test_refresh_with_cutoff_ignores_post_cutoff_outcomes(session) -> None:
+    """R3 P1-3 (d): only outcomes scored before the cutoff calibrate the map.
+    Pre-cutoff outcomes are monotone (GREEN survives most); post-cutoff
+    outcomes are anti-monotone, so without a cutoff the refresh must stay
+    unvalidated, while with a cutoff it validates on the pre-cutoff set."""
+    set_band_confidence(None)
+    cutoff = NOW - timedelta(days=7)
+    for band, survived in (("GREEN", 9), ("YELLOW", 7), ("ORANGE", 5), ("RED", 2), ("BLACK", 1)):
+        for index in range(10):
+            session.add(
+                models.RiskOutcome(
+                    asset_id=1,
+                    score_id=len(session.new) + 2000,
+                    risk_band=band,
+                    scored_at=NOW - timedelta(days=30, hours=index + 1),
+                    lifecycle_phase_at_score="launch",
+                    evaluated_at=NOW,
+                    collapsed=index >= survived,
+                    survived=index < survived,
+                    rugged=False,
+                )
+            )
+    for band, survived in (("GREEN", 1), ("YELLOW", 3), ("ORANGE", 5), ("RED", 7), ("BLACK", 9)):
+        for index in range(10):
+            session.add(
+                models.RiskOutcome(
+                    asset_id=1,
+                    score_id=len(session.new) + 1000,
+                    risk_band=band,
+                    scored_at=NOW - timedelta(hours=index + 1),
+                    lifecycle_phase_at_score="launch",
+                    evaluated_at=NOW,
+                    collapsed=index >= survived,
+                    survived=index < survived,
+                    rugged=False,
+                )
+            )
+    session.commit()
+    assert refresh_band_calibration(session, min_samples=5)["validated"] is False
+    set_band_confidence(None)
+    summary = refresh_band_calibration(session, min_samples=5, cutoff=cutoff)
+    assert summary["validated"] is True, summary
+    assert band_confidence_source() == "calibrated"
+    set_band_confidence(None)
+
+
+def test_band_confidence_cache_is_thread_safe() -> None:
+    """R3 P1-3 (b): concurrent readers and writers of the band map must never
+    observe a torn or half-installed map."""
+    import threading
+
+    maps = [dict(FALLBACK_BAND_CONFIDENCE), {band: 50.0 for band in FALLBACK_BAND_CONFIDENCE}]
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                seen = band_confidence_map()
+                assert set(seen) == set(FALLBACK_BAND_CONFIDENCE)
+                assert band_confidence_source() in ("calibrated", "fallback")
+            except BaseException as exc:  # noqa: BLE001 - collected and re-raised below.
+                errors.append(exc)
+                stop.set()
+
+    def writer() -> None:
+        for index in range(50):
+            set_band_confidence(maps[index % 2])
+            set_band_confidence(None)
+
+    threads = [threading.Thread(target=reader) for _ in range(4)] + [
+        threading.Thread(target=writer)
+    ]
+    for thread in threads:
+        thread.start()
+    threads[-1].join()
+    stop.set()
+    for thread in threads[:-1]:
+        thread.join()
+    set_band_confidence(None)
+    assert errors == []

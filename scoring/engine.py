@@ -434,6 +434,7 @@ class ScoringEngine:
             "exit_risk": result.exit_risk,
             "research_priority": result.research_priority,
             "risk_band": result.risk_band.value,
+            "confidence_source": result.confidence_source,
             "observed_at": utc_now(),
         }
         if row:

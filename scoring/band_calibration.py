@@ -62,10 +62,21 @@ _cache_lock = threading.Lock()
 
 
 def band_confidence_map() -> dict[RiskBand, float]:
-    """Current band→survival map: the refreshed calibration, else the fallback."""
+    """Current band-to-survival map: the refreshed calibration, else the fallback."""
     with _cache_lock:
-        cached = _cache
-    return dict(cached) if cached is not None else dict(FALLBACK_BAND_CONFIDENCE)
+        return dict(_cache) if _cache is not None else dict(FALLBACK_BAND_CONFIDENCE)
+
+
+def band_confidence_source() -> str:
+    """Where the current map came from: calibrated or fallback.
+
+    Thread-safe: reads the cache under the same lock that installs it.
+    Callers that stamp a Score or API row with this value must call it at
+    scoring time, next to band_confidence_map(), or the stamp can disagree
+    with the map that produced the confidence.
+    """
+    with _cache_lock:
+        return "calibrated" if _cache is not None else "fallback"
 
 
 def set_band_confidence(mapping: dict[RiskBand, float] | None) -> None:
@@ -75,17 +86,16 @@ def set_band_confidence(mapping: dict[RiskBand, float] | None) -> None:
         _cache = dict(mapping) if mapping is not None else None
 
 
-def _survival_by_band(session: Session) -> dict[RiskBand, tuple[int, float]]:
+def _survival_by_band(session: Session, *, cutoff=None) -> dict[RiskBand, tuple[int, float]]:
     """``{band: (evaluated, survival_rate)}`` from persisted, evaluated outcomes."""
-    rows = session.execute(
-        select(
-            models.RiskOutcome.risk_band,
-            func.count(models.RiskOutcome.id),
-            func.sum(func.cast(models.RiskOutcome.survived, Integer)),
-        )
-        .where(models.RiskOutcome.evaluated_at.is_not(None))
-        .group_by(models.RiskOutcome.risk_band)
-    ).all()
+    query = select(
+        models.RiskOutcome.risk_band,
+        func.count(models.RiskOutcome.id),
+        func.sum(func.cast(models.RiskOutcome.survived, Integer)),
+    ).where(models.RiskOutcome.evaluated_at.is_not(None))
+    if cutoff is not None:
+        query = query.where(models.RiskOutcome.scored_at < cutoff)
+    rows = session.execute(query.group_by(models.RiskOutcome.risk_band)).all()
     out: dict[RiskBand, tuple[int, float]] = {}
     for band_name, total, survived in rows:
         try:
@@ -99,16 +109,50 @@ def _survival_by_band(session: Session) -> dict[RiskBand, tuple[int, float]]:
     return out
 
 
-def refresh_band_calibration(session: Session, *, min_samples: int | None = None) -> dict[str, Any]:
+def calibration_cutoff(session: Session):
+    """Walk-forward cutoff for calibration, mirroring validation/harness.py.
+
+    cutoff = latest evaluated scored_at minus max(30 percent of the scored
+    window, 7 days). Outcomes before it calibrate the map; outcomes at or
+    after it are the evaluation set. Returns None when the evaluated
+    outcomes do not span a usable window, in which case calibration must
+    stay unvalidated rather than fall back to fitting the test set.
+    """
+    from datetime import timedelta
+
+    rows = session.execute(
+        select(
+            func.min(models.RiskOutcome.scored_at), func.max(models.RiskOutcome.scored_at)
+        ).where(models.RiskOutcome.evaluated_at.is_not(None))
+    ).one()
+    t0, t1 = rows
+    if t0 is None or t1 is None or t1 <= t0:
+        return None
+    window_hours = (t1 - t0).total_seconds() / 3600.0
+    eval_hours = max(window_hours * 0.30, 7 * 24)
+    return t1 - timedelta(hours=eval_hours)
+
+
+def refresh_band_calibration(
+    session: Session, *, min_samples: int | None = None, cutoff=None
+) -> dict[str, Any]:
     """Recompute the band map from persisted outcomes and record its status.
 
-    Returns a summary dict (``validated``, per-band samples/rates, the map in
+    Returns a summary dict (validated, per-band samples/rates, the map in
     use). Safe to call every data-lake pass: it is two aggregate queries.
+
+    Leakage rule: calibrating on the same outcomes the validation harness
+    evaluates is leakage - the calibrated map would be fit to its own test
+    set. Production callers must pass cutoff (see calibration_cutoff):
+    only outcomes scored before the cutoff calibrate the map, outcomes at
+    or after it are the evaluation set. cutoff=None keeps the old
+    all-outcomes behaviour for tests and backfills only, and must never
+    be used to claim a validated calibration on live data.
     """
     minimum = (
         min_samples if min_samples is not None else get_settings().risk_confidence_band_min_samples
     )
-    observed = _survival_by_band(session)
+    observed = _survival_by_band(session, cutoff=cutoff)
     samples = {band.value: count for band, (count, _) in observed.items()}
     rates = {band.value: round(rate, 4) for band, (_, rate) in observed.items()}
 
@@ -129,6 +173,7 @@ def refresh_band_calibration(session: Session, *, min_samples: int | None = None
         set_band_confidence(None)
 
     summary: dict[str, Any] = {
+        "cutoff": cutoff.isoformat() if cutoff is not None else None,
         "validated": validated,
         "min_samples": minimum,
         "samples": samples,

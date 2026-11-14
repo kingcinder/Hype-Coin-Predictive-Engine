@@ -479,6 +479,7 @@ class Score(Base):
     exit_risk: Mapped[float] = mapped_column(Float, nullable=False)
     research_priority: Mapped[float] = mapped_column(Float, nullable=False)
     risk_band: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence_source: Mapped[str] = mapped_column(String(16), nullable=False, default="fallback")
     model_version: Mapped[str] = mapped_column(String(128), nullable=False)
 
 

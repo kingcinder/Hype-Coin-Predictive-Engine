@@ -225,6 +225,7 @@ def _score_row(session: Session, score: models.Score) -> TokenScoreRow:
         exit_risk=score.exit_risk,
         research_priority=score.research_priority,
         risk_band=score.risk_band,
+        confidence_source=score.confidence_source,
         score_validation=score_family_validation(session),
     )
 

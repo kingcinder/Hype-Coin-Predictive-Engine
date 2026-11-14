@@ -164,6 +164,7 @@ class TokenScoreRow(BaseModel):
     exit_risk: float
     research_priority: float
     risk_band: str
+    confidence_source: str = "fallback"
     score_validation: dict[str, ScoreFamilyValidation]
 
 
