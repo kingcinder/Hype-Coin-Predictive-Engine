@@ -25,7 +25,7 @@ def test_redact_url_masks_query_credentials() -> None:
 
 
 def test_redact_url_masks_alchemy_path_token() -> None:
-    alchemy = "https://eth-mainnet.g.alchemy.com/v2/alch_0000000000000000000000"
+    alchemy = "https://eth-mainnet.g.alchemy.com/v2/fake-key-for-tests"
     assert redact_url(alchemy) == "https://eth-mainnet.g.alchemy.com/v2/***"
 
 
