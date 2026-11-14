@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import timedelta
 from functools import partial
 from time import sleep
 from typing import Any
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
 from common.config import get_settings
 from common.logging import get_logger
-from common.time import floor_to_hour, utc_now
+from common.time import ensure_utc, floor_to_hour, utc_now
 from fingerprint.engine import FingerprintEngine
 from forecast.engine import run_forecast_if_due
 from ingestion.birdeye_client import BirdeyeClient
@@ -23,6 +24,7 @@ from ingestion.normalizers import (
     extract_profile_links,
     normalize_dexscreener_pair,
     normalize_geckoterminal_pool,
+    normalize_geckoterminal_trades,
 )
 from ingestion.rpc_pool import (
     POOL_CHAINS,
@@ -31,6 +33,7 @@ from ingestion.rpc_pool import (
     record_pool_health,
 )
 from ingestion.solana_safety import collect_asset_safety
+from ingestion.solana_swaps import fetch_pool_swaps
 from ingestion.source_clients import (
     DexScreenerClient,
     EVMHolderClient,
@@ -1001,6 +1004,10 @@ class IngestionService:
         if not chain:
             return False
         observed_at = utc_now()
+        # Fetch trades before the first write below, so the provider round-trip
+        # never runs while this session holds SQLite's write lock.
+        swaps = self._first_buy_swaps(normalized, observed_at)
+        tracked = self._tracked_wallets(normalized.chain_slug)
         first_seen_at = normalized.pair_created_at or observed_at
         base_asset = upsert_asset(
             session,
@@ -1084,16 +1091,86 @@ class IngestionService:
             session.add(flag)
         from radar.first_buys import record_first_buys  # noqa: PLC0415 - local import.
 
-        # The pair payload carries no wallet-level swaps; record the stats row
-        # as unknown rather than inventing zeroes.
+        # No trades (old pair, unsupported chain, or provider failure) keeps
+        # the stats unknown rather than inventing zeroes.
         record_first_buys(
             session,
             base_asset.id,
             normalized.pair_created_at or observed_at,
-            [],
-            set(),
+            swaps,
+            tracked,
         )
         return True
+
+    def _first_buy_swaps(
+        self, normalized: NormalizedPair, observed_at: Any
+    ) -> list[dict[str, Any]]:
+        """Real wallet trades for a pool while its first-buy window is open."""
+        created = normalized.pair_created_at
+        if not self.settings.first_buy_trade_fetch_enabled or created is None:
+            return []
+        window = timedelta(minutes=self.settings.first_buy_window_minutes)
+        if ensure_utc(observed_at) > ensure_utc(created) + window:
+            return []
+        if normalized.chain_slug not in GeckoTerminalClient.NETWORKS:
+            return []
+        client = GeckoTerminalClient()
+        trades: list[dict[str, Any]] = []
+        try:
+            trades = client.pool_trades(normalized.chain_slug, normalized.pair_address)
+        except Exception as exc:  # noqa: BLE001 - fall back to chain data below.
+            log.warning(
+                "first_buy_trades_failed",
+                pool=normalized.pair_address,
+                chain=normalized.chain_slug,
+                error=str(exc),
+            )
+        finally:
+            client.close()
+        swaps = normalize_geckoterminal_trades(trades, chain_slug=normalized.chain_slug)
+        if swaps or normalized.chain_slug != "solana":
+            return swaps
+
+        # The public trades endpoint is rate-limited; when it yields nothing,
+        # rebuild the same wallet swaps from the pool's on-chain transactions.
+        rpc = SolanaRpcClient()
+        try:
+            fallback = fetch_pool_swaps(
+                rpc,
+                pool_address=normalized.pair_address,
+                base_mint=normalized.base_address,
+                price_usd=normalized.price_usd,
+            )
+        except Exception as exc:  # noqa: BLE001 - pair ingest must survive an RPC outage.
+            log.warning(
+                "first_buy_rpc_fallback_failed",
+                pool=normalized.pair_address,
+                error=str(exc),
+            )
+            return []
+        finally:
+            rpc.close()
+        if fallback:
+            log.info(
+                "first_buy_rpc_fallback",
+                pool=normalized.pair_address,
+                swaps=len(fallback),
+            )
+        return fallback
+
+    @staticmethod
+    def _tracked_wallets(chain_slug: str) -> set[str]:
+        from trading.wallets import load_wallets  # noqa: PLC0415 - avoids import cycle.
+
+        tracked: set[str] = set()
+        for entry in load_wallets():
+            if str(entry.get("chain") or "solana").lower() != chain_slug:
+                continue
+            address = str(entry.get("address") or "")
+            if not address:
+                continue
+            tracked.add(address if chain_slug == "solana" else address.lower())
+        return tracked
 
 
 def _analysis_findings(analysis: ContractAnalysis) -> list[dict[str, str]]:

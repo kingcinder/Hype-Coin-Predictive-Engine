@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from common.config import get_settings
@@ -31,6 +32,12 @@ def test_first_window_stats_and_tracked_alert(session) -> None:
     )
     assert stats is not None
     assert stats.buy_sell_ratio == Decimal("2")
+    record_first_buys(session, asset.id, NOW, [], set())
+    session.commit()
+    session.refresh(stats)
+    assert stats.buys == 2
+    assert stats.sells == 1
+    assert stats.buy_sell_ratio == Decimal("2")
     alerts = session.scalars(
         select(models.Alert).where(models.Alert.alert_type == "tracked_wallet_first_buy")
     ).all()
@@ -53,6 +60,27 @@ def test_tracked_first_buy_queues_copy_without_trading(session, monkeypatch) -> 
     log = session.scalars(select(models.CopyLog)).one()
     assert log.status == "paper_only"
     assert log.size_sol == Decimal("0.1")
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
+
+
+@pytest.mark.parametrize("raw_size", [None, "0", "-2"])
+def test_invalid_first_buy_size_never_queues_zero_copy(session, monkeypatch, raw_size) -> None:
+    asset = seed_market_asset(session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "copy_trading_enabled", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", "0")
+    monkeypatch.setattr("trading.copy.load_wallets", lambda: [{"address": "A", "chain": "solana"}])
+    swap = {"wallet": "A", "side": "buy", "ts": NOW + timedelta(minutes=1)}
+    if raw_size is not None:
+        swap["size_sol"] = raw_size
+
+    record_first_buys(session, asset.id, NOW, [swap], {"A"})
+    session.commit()
+
+    log = session.scalars(select(models.CopyLog)).one()
+    assert log.status == "paper_only"
+    assert log.size_sol == settings.copy_max_size_sol
+    assert log.size_sol > 0
     assert session.scalars(select(models.LedgerOpenPosition)).all() == []
 
 

@@ -132,6 +132,17 @@ class GeckoTerminalClient:
             return items if isinstance(items, list) else []
         return []
 
+    def pool_trades(self, chain_slug: str, pool_address: str) -> list[dict[str, Any]]:
+        """Recent wallet-level trades for a pool (latest 300 in the past 24h)."""
+        network = self.NETWORKS.get(chain_slug)
+        if network is None:
+            return []
+        data = self.http.get_json(f"/api/v2/networks/{network}/pools/{pool_address}/trades")
+        if isinstance(data, dict):
+            items = data.get("data") or []
+            return items if isinstance(items, list) else []
+        return []
+
 
 class SolanaRpcClient:
     def __init__(
@@ -192,10 +203,23 @@ class SolanaRpcClient:
         except (KeyError, TypeError):
             return []
 
-    def get_recent_signatures(self, mint: str, *, limit: int = 100) -> list[dict[str, Any]]:
-        data = self.rpc("getSignaturesForAddress", [mint, {"limit": limit}])
+    def get_signatures_for_address(self, address: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        data = self.rpc("getSignaturesForAddress", [address, {"limit": limit}])
         value = data.get("result") if isinstance(data, dict) else None
         return value if isinstance(value, list) else []
+
+    def get_recent_signatures(self, mint: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.get_signatures_for_address(mint, limit=limit)
+
+    def get_transaction(self, signature: str) -> dict[str, Any] | None:
+        data = self.rpc(
+            "getTransaction",
+            [
+                signature,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+            ],
+        )
+        return data if isinstance(data, dict) else None
 
 
 class EVMHolderClient:

@@ -182,6 +182,36 @@ def normalize_geckoterminal_pool(payload: dict[str, Any]) -> NormalizedPair | No
     )
 
 
+def normalize_geckoterminal_trades(
+    items: list[dict[str, Any]], *, chain_slug: str
+) -> list[dict[str, Any]]:
+    """Map GeckoTerminal pool trades onto the first-buy swap shape."""
+    swaps: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        attributes = item.get("attributes") or item
+        if not isinstance(attributes, dict):
+            continue
+        side = str(attributes.get("kind") or "").lower()
+        wallet = attributes.get("tx_from_address") or attributes.get("from_address")
+        ts = _parse_iso_timestamp(attributes.get("block_timestamp"))
+        if side not in ("buy", "sell") or not wallet or ts is None:
+            continue
+        wallet_address = str(wallet)
+        if chain_slug != "solana":
+            wallet_address = wallet_address.lower()
+        swaps.append(
+            {
+                "wallet": wallet_address,
+                "side": side,
+                "size_usd": _float(attributes.get("volume_in_usd")),
+                "ts": ts,
+            }
+        )
+    return swaps
+
+
 def extract_profile_links(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     website_url: str | None = None
     github_url: str | None = None

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
@@ -53,6 +53,12 @@ def record_first_buys(
     stats = session.scalar(
         select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset_id)
     )
+    if not swaps and stats is not None and stats.buys is not None:
+        # A later scan after the window cannot re-fetch the trades; keep the
+        # stats that were observed while the window was open.
+        buys = stats.buys
+        sells = stats.sells
+        ratio = stats.buy_sell_ratio
     if stats is None:
         stats = models.PairFirstWindowStats(asset_id=asset_id)
         session.add(stats)
@@ -114,16 +120,23 @@ def record_first_buys(
                     )
                 )
             if asset is not None:
-                raw_size = swap.get("size_sol")
-                size_sol = (
-                    settings.copy_max_size_sol if raw_size is None else Decimal(str(raw_size))
-                )
                 maybe_queue_copy(
                     session,
                     wallet,
                     asset.address,
-                    size_sol,
+                    _copy_size_sol(swap.get("size_sol"), settings.copy_max_size_sol),
                     now=ts,
                     use_write_queue=False,
                 )
     session.flush()
+
+
+def _copy_size_sol(raw_size: Any, default: Decimal) -> Decimal:
+    """A positive copy size; malformed or non-positive swap sizes use the cap."""
+    if raw_size is None:
+        return default
+    try:
+        size = Decimal(str(raw_size))
+    except (InvalidOperation, TypeError, ValueError):
+        return default
+    return size if size.is_finite() and size > 0 else default

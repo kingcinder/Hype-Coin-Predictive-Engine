@@ -729,6 +729,9 @@ class Settings(BaseSettings):
     gmgn_wallet_address: str | None = None
     gmgn_signer_secret: str | None = None
     first_buy_window_minutes: int = 5
+    # Fetch pool trades while a pair is inside its first-buy window so tracked
+    # wallet buys can queue copy signals from real ingestion, not only the API.
+    first_buy_trade_fetch_enabled: bool = True
     copy_trading_enabled: bool = False
     copy_max_size_sol: Decimal = Decimal("0.1")
     copy_max_risk_pct: Decimal = Decimal("1")

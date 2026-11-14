@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
 
 import ingestion.service as ingestion_service
+from common.config import get_settings
 from common.time import ensure_utc
 from ingestion.contract_analyzer import ContractAnalysis
 from ingestion.service import IngestionService, _analysis_findings
+from ingestion.source_clients import GeckoTerminalClient
 from ops.archive import LocalArchiveStore
 from storage import models
 from storage.repository import (
@@ -45,6 +48,226 @@ def test_dexscreener_pair_ingest_is_idempotent(session) -> None:
     )
     assert session.scalar(select(func.count()).select_from(models.MarketSnapshot)) == 1
     assert session.scalar(select(func.count()).select_from(models.LiquiditySnapshot)) == 1
+
+
+def test_geckoterminal_pool_trades_reads_recent_wallet_trades() -> None:
+    client = GeckoTerminalClient()
+    requested: list[str] = []
+
+    def fake_get_json(path: str):
+        requested.append(path)
+        return {"data": [{"id": "trade-1", "type": "trade"}]}
+
+    client.http.get_json = fake_get_json  # type: ignore[method-assign]
+    try:
+        assert client.pool_trades("solana", "PoolABC") == [{"id": "trade-1", "type": "trade"}]
+    finally:
+        client.close()
+    assert requested == ["/api/v2/networks/solana/pools/PoolABC/trades"]
+
+
+def test_first_buy_ingestion_uses_real_pool_trades(session, monkeypatch) -> None:
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(get_settings(), "copy_trading_enabled", True)
+
+    def wallets() -> list[dict[str, str]]:
+        return [{"address": "W", "chain": "solana"}]
+
+    monkeypatch.setattr("trading.wallets.load_wallets", wallets)
+    monkeypatch.setattr("trading.copy.load_wallets", wallets)
+    trade = {
+        "attributes": {
+            "kind": "buy",
+            "tx_from_address": "W",
+            "block_timestamp": (now + timedelta(seconds=30)).isoformat(),
+            "volume_in_usd": "25",
+        }
+    }
+    monkeypatch.setattr(
+        ingestion_service.GeckoTerminalClient,
+        "pool_trades",
+        lambda self, chain, pool: [trade],
+    )
+    payload = {
+        "chainId": "solana",
+        "dexId": "raydium",
+        "pairAddress": "PairTracked111111111111111111111111111111",
+        "pairCreatedAt": int(now.timestamp() * 1000),
+        "baseToken": {
+            "address": "TokenTracked1111111111111111111111111111",
+            "symbol": "TRACK",
+            "name": "Tracked Token",
+        },
+        "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+        "liquidity": {"usd": 80000},
+    }
+
+    service = IngestionService()
+    assert service._store_dexscreener_pair(session, source, payload) is True
+    session.commit()
+
+    asset = session.scalar(
+        select(models.Asset).where(models.Asset.address == payload["baseToken"]["address"])
+    )
+    assert asset is not None
+    first_buy = session.scalar(select(models.FirstBuy).where(models.FirstBuy.asset_id == asset.id))
+    assert first_buy is not None
+    assert first_buy.wallet == "W"
+    assert first_buy.is_tracked_wallet is True
+    stats = session.scalar(
+        select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset.id)
+    )
+    assert stats is not None and stats.buys == 1 and stats.sells == 0
+    log = session.scalar(select(models.CopyLog))
+    assert log is not None and log.status == "paper_only"
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
+
+
+def test_tracked_first_buy_ingestion_queues_pending_copy_only(session, monkeypatch) -> None:
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    settings = get_settings()
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(settings, "copy_trading_enabled", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=now, kind="armed", reason="test"))
+    session.commit()
+
+    def wallets() -> list[dict[str, str]]:
+        return [{"address": "W", "chain": "solana"}]
+
+    monkeypatch.setattr("trading.wallets.load_wallets", wallets)
+    monkeypatch.setattr("trading.copy.load_wallets", wallets)
+    feed_calls: list[tuple[str, str]] = []
+
+    def pool_trades(self, chain: str, pool: str) -> list[dict]:
+        feed_calls.append((chain, pool))
+        return [
+            {
+                "attributes": {
+                    "kind": "buy",
+                    "tx_from_address": "W",
+                    "block_timestamp": (now + timedelta(seconds=30)).isoformat(),
+                    "volume_in_usd": "25",
+                }
+            }
+        ]
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", pool_trades)
+    pair_address = "PairLiveCopy1111111111111111111111111111111"
+    mint = "TokenLiveCopy111111111111111111111111111111"
+    payload = {
+        "chainId": "solana",
+        "dexId": "raydium",
+        "pairAddress": pair_address,
+        "pairCreatedAt": int(now.timestamp() * 1000),
+        "baseToken": {"address": mint, "symbol": "LIVE", "name": "Live Copy Token"},
+        "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+        "liquidity": {"usd": 80000},
+    }
+
+    service = IngestionService()
+    assert service._store_dexscreener_pair(session, source, payload) is True
+    session.commit()
+
+    assert feed_calls == [("solana", pair_address)]
+    log = session.scalars(select(models.CopyLog)).one()
+    assert log.status == "pending"
+    assert log.wallet == "W"
+    assert log.mint == mint
+    assert log.detail is not None and log.detail.startswith("awaiting human approval")
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
+    assert session.scalars(select(models.LiveFill)).all() == []
+
+
+def test_ingestion_rpc_fallback_queues_pending_copy(session, monkeypatch) -> None:
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    settings = get_settings()
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(settings, "copy_trading_enabled", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=now, kind="armed", reason="test"))
+    session.commit()
+
+    def wallets() -> list[dict[str, str]]:
+        return [{"address": "W", "chain": "solana"}]
+
+    monkeypatch.setattr("trading.wallets.load_wallets", wallets)
+    monkeypatch.setattr("trading.copy.load_wallets", wallets)
+
+    def rate_limited(self, chain: str, pool: str):
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+
+    pair_address = "PairRpcFallback11111111111111111111111111111"
+    mint = "TokenRpcFallback1111111111111111111111111111"
+    transaction = {
+        "result": {
+            "blockTime": int((now + timedelta(seconds=30)).timestamp()),
+            "meta": {
+                "preTokenBalances": [
+                    {"mint": mint, "owner": "W", "uiTokenAmount": {"uiAmount": 0}}
+                ],
+                "postTokenBalances": [
+                    {"mint": mint, "owner": "W", "uiTokenAmount": {"uiAmountString": "100"}}
+                ],
+            },
+        }
+    }
+    requested_pools: list[str] = []
+
+    class FakeRpc:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def get_signatures_for_address(self, address: str, *, limit: int):
+            requested_pools.append(address)
+            return [{"signature": "sig-1", "err": None}]
+
+        def get_transaction(self, signature: str):
+            assert signature == "sig-1"
+            return transaction
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ingestion_service, "SolanaRpcClient", FakeRpc)
+    payload = {
+        "chainId": "solana",
+        "dexId": "raydium",
+        "pairAddress": pair_address,
+        "pairCreatedAt": int(now.timestamp() * 1000),
+        "baseToken": {"address": mint, "symbol": "RPC", "name": "RPC Token"},
+        "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+        "priceUsd": "2.0",
+        "liquidity": {"usd": 80000},
+    }
+
+    service = IngestionService()
+    assert service._store_dexscreener_pair(session, source, payload) is True
+    session.commit()
+
+    assert requested_pools == [pair_address]
+    log = session.scalars(select(models.CopyLog)).one()
+    assert log.status == "pending"
+    assert log.wallet == "W"
+    assert log.mint == mint
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
+    assert session.scalars(select(models.LiveFill)).all() == []
 
 
 def test_geckoterminal_pool_ingest_creates_point_in_time_rows(session, monkeypatch) -> None:

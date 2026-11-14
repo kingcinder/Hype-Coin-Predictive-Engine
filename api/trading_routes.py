@@ -36,6 +36,11 @@ class AckBody(BaseModel):
     note: str | None = None
 
 
+class RecoverCopyBody(BaseModel):
+    confirm_no_order: bool = False
+    position_id: int | None = Field(default=None, ge=1)
+
+
 class CandidateTradeBody(BaseModel):
     why_entered: str
     mode: str = "paper"
@@ -316,6 +321,26 @@ async def trading_copy_approve(log_id: int, session: DbSession) -> dict:
 
     try:
         row = approve_copy(session, log_id)
+    except TradeRefused as exc:
+        _raise_mapped(exc)
+    return {"status": row.status, "log_id": row.id, "detail": row.detail}
+
+
+@router.post("/trading/copy/{log_id}/recover")
+async def trading_copy_recover(
+    log_id: int, session: DbSession, body: RecoverCopyBody | None = None
+) -> dict:
+    """Recover a copy log left approving by a crash."""
+    from trading.copy import recover_copy_approval
+
+    payload = body or RecoverCopyBody()
+    try:
+        row = recover_copy_approval(
+            session,
+            log_id,
+            confirm_no_order=payload.confirm_no_order,
+            position_id=payload.position_id,
+        )
     except TradeRefused as exc:
         _raise_mapped(exc)
     return {"status": row.status, "log_id": row.id, "detail": row.detail}
