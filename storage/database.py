@@ -154,33 +154,50 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 
 @contextmanager
 def session_scope() -> Generator[Session, None, None]:
-    """Explicit context-manager session for ``with session_scope() as s:`` callers.
+    """Explicit context-manager session for with session_scope() callers.
 
-    FastAPI's ``Depends`` requires ``get_session`` to stay a *bare* generator
-    (FastAPI drives ``next()``/``throw()`` on the generator object itself — a
-    ``@contextmanager`` wrapper breaks every DB endpoint with
-    ``TypeError: '_GeneratorContextManager' object is not an iterator``).
-    Non-FastAPI code that wants ``with`` syntax must use this dedicated
-    context manager instead of wrapping ``get_session``.
+    FastAPI Depends requires get_session to stay a bare generator
+    (FastAPI drives next()/throw() on the generator object itself - a
+    @contextmanager wrapper breaks every DB endpoint with
+    TypeError: _GeneratorContextManager object is not an iterator).
+    Non-FastAPI code that wants with syntax must use this dedicated
+    context manager instead of wrapping get_session.
 
-    Lightweight runtime guard: logs a warning if the session (and hence
-    any in-progress SQLite write transaction) is held open beyond
-    ``SESSION_SCOPE_BUDGET_SECONDS``. This catches future regressions where
-    a phase holds the write lock across network I/O or heavy per-item work.
+    Lightweight runtime guard: logs a structured warning if the session is
+    held open beyond settings.session_scope_budget_seconds (default
+    10.0s). The clock starts at the first flush when one happens, so the
+    measurement approximates write-transaction time rather than raw session
+    lifetime; sessions that never flush are measured from session start and
+    the log records measured_from and had_flush so a long read-only
+    session is recognisable as a possible false positive. The check runs in
+    a try/finally so it also fires when the body raises.
     """
     import time as _time
 
-    budget_seconds = getattr(get_settings(), "SESSION_SCOPE_BUDGET_SECONDS", 10.0)
+    budget_seconds = get_settings().session_scope_budget_seconds
     started = _time.monotonic()
+    first_flush: list[float] = []
+
+    def _mark_first_flush(sess, ctx) -> None:
+        if not first_flush:
+            first_flush.append(_time.monotonic())
+
     with SessionLocal() as session:
-        yield session
-    elapsed = _time.monotonic() - started
-    if elapsed > budget_seconds:
-        log.warning(
-            "session_scope held write lock for %.1fs (budget %.1fs)",
-            elapsed,
-            budget_seconds,
-        )
+        event.listen(session, "after_flush", _mark_first_flush)
+        try:
+            yield session
+        finally:
+            event.remove(session, "after_flush", _mark_first_flush)
+            measured_from = first_flush[0] if first_flush else started
+            elapsed = _time.monotonic() - measured_from
+            if elapsed > budget_seconds:
+                log.warning(
+                    "session_scope_over_budget",
+                    elapsed_sec=round(elapsed, 3),
+                    budget_sec=budget_seconds,
+                    measured_from="first_flush" if first_flush else "session_start",
+                    had_flush=bool(first_flush),
+                )
 
 
 def get_session() -> Generator[Session, None, None]:

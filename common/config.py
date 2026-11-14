@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     database_url: str = "postgresql+psycopg://serpent:serpent@localhost:5432/serpent"
+    # Budget for session_scope(): warn when a session is held open longer
+    # than this (seconds). See storage/database.py session_scope.
+    session_scope_budget_seconds: float = 10.0
     redis_url: str = "redis://localhost:6379/0"
     minio_endpoint: str = "http://localhost:9000"
     minio_access_key: str = "minioadmin"
