@@ -8,6 +8,9 @@ rebuilds the same swap shape from ``getSignaturesForAddress`` and
 
 from __future__ import annotations
 
+import threading
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,8 +24,24 @@ _MIN_TOKEN_DELTA = 1e-12
 _rpc_gate = ProviderGate()
 
 
+@dataclass
+class _PoolSwapCache:
+    created_at: float
+    swaps: list[dict[str, Any]] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+
+
+_cache_lock = threading.Lock()
+_swap_cache: dict[tuple[str, str], _PoolSwapCache] = {}
+
+
 def reset_solana_swap_gate() -> None:
     _rpc_gate.reset()
+
+
+def reset_solana_swap_cache() -> None:
+    with _cache_lock:
+        _swap_cache.clear()
 
 
 def _amount(entry: dict[str, Any]) -> float:
@@ -100,9 +119,20 @@ def fetch_pool_swaps(
         min_interval=settings.solana_swap_rpc_min_interval_seconds,
         cooldown=settings.provider_circuit_break_seconds,
     )
+    cache_key = (pool_address, base_mint)
+    now = time.monotonic()
+    with _cache_lock:
+        entry = _swap_cache.get(cache_key)
+        if entry is None or now - entry.created_at > settings.first_buy_swap_cache_seconds:
+            entry = _PoolSwapCache(created_at=now)
+            _swap_cache[cache_key] = entry
+
+    # Fetch a wider signature window than we parse per scan, then walk unseen
+    # transactions oldest-first. Repeated scans continue where the last stopped.
+    signature_limit = max(limit * 4, 24)
     try:
         _rpc_gate.before()
-        signatures = rpc.get_signatures_for_address(pool_address, limit=limit)
+        signatures = rpc.get_signatures_for_address(pool_address, limit=signature_limit)
     except CircuitOpen:
         return []
     except Exception as exc:  # noqa: BLE001 - ingestion must survive an RPC outage.
@@ -110,13 +140,16 @@ def fetch_pool_swaps(
         log.warning("solana_swap_signatures_failed", pool=pool_address, error=str(exc))
         return []
 
-    swaps: list[dict[str, Any]] = []
-    for entry in reversed(signatures):
-        if not isinstance(entry, dict) or entry.get("err") is not None:
-            continue
-        signature = entry.get("signature")
-        if not isinstance(signature, str) or not signature:
-            continue
+    unseen = [
+        item
+        for item in reversed(signatures)
+        if isinstance(item, dict)
+        and item.get("err") is None
+        and isinstance(item.get("signature"), str)
+        and item["signature"] not in entry.seen
+    ]
+    for item in unseen[: max(0, limit)]:
+        signature = item["signature"]
         try:
             _rpc_gate.before()
             transaction = rpc.get_transaction(signature)
@@ -139,9 +172,10 @@ def fetch_pool_swaps(
             base_mint=base_mint,
             price_usd=price_usd,
         )
-        swaps.extend(tx_swaps)
+        entry.swaps.extend(tx_swaps)
+        entry.seen.add(signature)
         if tracked and any(
             swap["side"] == "buy" and swap["wallet"] in tracked for swap in tx_swaps
         ):
             break
-    return swaps
+    return list(entry.swaps)

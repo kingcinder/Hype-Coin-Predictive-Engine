@@ -20,11 +20,11 @@ def record_first_buys(
     pair_created_at: datetime,
     swaps: list[dict[str, Any]],
     tracked: set[str],
-) -> None:
+) -> dict[str, int]:
     """Persist first buys and the first-window buy/sell stats.
 
     ``swaps=[]`` means the data was unavailable: buys, sells and ratio stay
-    ``None`` (unknown), never zero.
+    ``None`` (unknown), never zero. Returns counters for feed telemetry.
     """
     from trading.copy import maybe_queue_copy  # noqa: PLC0415 - avoids import cycle.
 
@@ -53,9 +53,13 @@ def record_first_buys(
     stats = session.scalar(
         select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset_id)
     )
-    if not swaps and stats is not None and stats.buys is not None:
-        # A later scan after the window cannot re-fetch the trades; keep the
-        # stats that were observed while the window was open.
+    # One asset can have several pools, and each ingest only observes its own
+    # pool. Keep the strongest observation instead of letting a later, quieter
+    # pool overwrite richer stats. This also preserves the stats when a later
+    # scan can no longer re-fetch trades after the window has closed.
+    if stats is not None and _observation_rank(buys, sells) <= _observation_rank(
+        stats.buys, stats.sells
+    ):
         buys = stats.buys
         sells = stats.sells
         ratio = stats.buy_sell_ratio
@@ -68,6 +72,12 @@ def record_first_buys(
     stats.buy_sell_ratio = ratio
     stats.computed_at = utc_now()
 
+    summary = {
+        "tracked_buys": 0,
+        "pending_copy_logs": 0,
+        "paper_only_copy_logs": 0,
+        "other_copy_logs": 0,
+    }
     seen: set[tuple[str, datetime]] = set()
     for swap in in_window:
         if swap.get("side") != "buy":
@@ -102,6 +112,7 @@ def record_first_buys(
             )
         )
         if is_tracked:
+            summary["tracked_buys"] += 1
             alert = session.scalar(
                 select(models.Alert).where(
                     models.Alert.asset_id == asset_id,
@@ -120,7 +131,7 @@ def record_first_buys(
                     )
                 )
             if asset is not None:
-                maybe_queue_copy(
+                copy_log = maybe_queue_copy(
                     session,
                     wallet,
                     asset.address,
@@ -128,7 +139,22 @@ def record_first_buys(
                     now=ts,
                     use_write_queue=False,
                 )
+                if copy_log is not None:
+                    if copy_log.status == "pending":
+                        summary["pending_copy_logs"] += 1
+                    elif copy_log.status == "paper_only":
+                        summary["paper_only_copy_logs"] += 1
+                    else:
+                        summary["other_copy_logs"] += 1
     session.flush()
+    return summary
+
+
+def _observation_rank(buys: int | None, sells: int | None) -> tuple[int, int]:
+    """Order observations by buys, then total activity; None is unknown."""
+    if buys is None:
+        return (-1, -1)
+    return (buys, buys + (sells or 0))
 
 
 def _copy_size_sol(raw_size: Any, default: Decimal) -> Decimal:

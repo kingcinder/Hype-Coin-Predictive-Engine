@@ -26,6 +26,7 @@ from ingestion.normalizers import (
     normalize_geckoterminal_pool,
     normalize_geckoterminal_trades,
 )
+from ingestion.provider_gate import RATE_LIMIT_STATUSES, CircuitOpen
 from ingestion.rpc_pool import (
     POOL_CHAINS,
     get_rpc_pool,
@@ -116,6 +117,24 @@ def _int_from_result(value: Any) -> int:
 class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
+        self._first_buy_stats: dict[str, int] = {}
+        self._reset_first_buy_stats()
+
+    def _reset_first_buy_stats(self) -> None:
+        self._first_buy_provider_backoff = False
+        self._first_buy_stats = {
+            "pools": 0,
+            "budget_skipped": 0,
+            "backoff_skipped": 0,
+            "gecko_failures": 0,
+            "rpc_fallback_hits": 0,
+            "rpc_fallback_swaps": 0,
+            "swaps": 0,
+            "tracked_buys": 0,
+            "pending_copy_logs": 0,
+            "paper_only_copy_logs": 0,
+            "other_copy_logs": 0,
+        }
 
     def ensure_reference_data(self, session: Session) -> None:
         for slug, name, vm_type, native_symbol in [
@@ -219,6 +238,7 @@ class IngestionService:
         # No stop check here: this call sits outside the try, and the first
         # stage boundary inside it honours the request a moment later.
         self._commit_stage(session)
+        self._reset_first_buy_stats()
         errors: list[str] = []
         result: dict[str, Any] = {
             "pairs": 0,
@@ -235,6 +255,7 @@ class IngestionService:
             self._commit_stage(session, stop)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
+            self._record_first_buy_health(session)
             self._commit_stage(session, stop)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
             self._commit_stage(session, stop)
@@ -1005,7 +1026,12 @@ class IngestionService:
             return False
         observed_at = utc_now()
         # Fetch trades before the first write below, so the provider round-trip
-        # never runs while this session holds SQLite's write lock.
+        # never runs while this session holds SQLite's write lock. Earlier
+        # pairs from this token's loop may still be pending, so commit them
+        # first: SQLite holds the single write lock from the first write until
+        # COMMIT, and an uncommitted sibling would otherwise hold it across
+        # the GeckoTerminal call.
+        session.commit()
         tracked = self._tracked_wallets(normalized.chain_slug)
         swaps = self._first_buy_swaps(normalized, observed_at, tracked)
         first_seen_at = normalized.pair_created_at or observed_at
@@ -1093,13 +1119,15 @@ class IngestionService:
 
         # No trades (old pair, unsupported chain, or provider failure) keeps
         # the stats unknown rather than inventing zeroes.
-        record_first_buys(
+        summary = record_first_buys(
             session,
             base_asset.id,
             normalized.pair_created_at or observed_at,
             swaps,
             tracked,
         )
+        for key, value in summary.items():
+            self._first_buy_stats[key] = self._first_buy_stats.get(key, 0) + value
         return True
 
     def _first_buy_swaps(
@@ -1117,11 +1145,28 @@ class IngestionService:
             return []
         if normalized.chain_slug not in GeckoTerminalClient.NETWORKS:
             return []
+        if self._first_buy_provider_backoff:
+            # Back off for the rest of this scan after a rate limit or an open
+            # circuit: retrying every remaining pool only makes the flood worse.
+            self._first_buy_stats["backoff_skipped"] += 1
+            return []
+        if self._first_buy_stats["pools"] >= self.settings.first_buy_trade_max_pools_per_scan:
+            # Cap provider traffic per scan: first-buy telemetry is useful, but
+            # an unbounded pool walk turns rate limits into a warning flood.
+            self._first_buy_stats["budget_skipped"] += 1
+            return []
+        self._first_buy_stats["pools"] += 1
         client = GeckoTerminalClient()
         trades: list[dict[str, Any]] = []
+        gecko_failed = False
         try:
             trades = client.pool_trades(normalized.chain_slug, normalized.pair_address)
         except Exception as exc:  # noqa: BLE001 - fall back to chain data below.
+            gecko_failed = True
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if isinstance(exc, CircuitOpen) or status in RATE_LIMIT_STATUSES:
+                self._first_buy_provider_backoff = True
+            self._first_buy_stats["gecko_failures"] += 1
             log.warning(
                 "first_buy_trades_failed",
                 pool=normalized.pair_address,
@@ -1131,11 +1176,16 @@ class IngestionService:
         finally:
             client.close()
         swaps = normalize_geckoterminal_trades(trades, chain_slug=normalized.chain_slug)
-        if swaps or normalized.chain_slug != "solana":
+        if swaps:
+            self._first_buy_stats["swaps"] += len(swaps)
+        # A successful empty feed is a real answer: no trades yet. Only a
+        # failed request justifies the more expensive on-chain fallback.
+        if not gecko_failed or normalized.chain_slug != "solana":
             return swaps
 
-        # The public trades endpoint is rate-limited; when it yields nothing,
-        # rebuild the same wallet swaps from the pool's on-chain transactions.
+        # The public trades endpoint failed (often rate-limited); rebuild the
+        # same wallet swaps from the pool's on-chain transactions.
+        self._first_buy_stats["rpc_fallback_hits"] += 1
         rpc = SolanaRpcClient()
         try:
             fallback = fetch_pool_swaps(
@@ -1155,6 +1205,7 @@ class IngestionService:
             return []
         finally:
             rpc.close()
+        self._first_buy_stats["rpc_fallback_swaps"] += len(fallback)
         if fallback:
             log.info(
                 "first_buy_rpc_fallback",
@@ -1162,6 +1213,27 @@ class IngestionService:
                 swaps=len(fallback),
             )
         return fallback
+
+    def _record_first_buy_health(self, session: Session) -> None:
+        stats = self._first_buy_stats
+        skipped = stats["budget_skipped"] + stats["backoff_skipped"]
+        if stats["gecko_failures"] == 0 and skipped == 0:
+            state = "ok"
+        elif stats["gecko_failures"] == 0 or stats["rpc_fallback_swaps"] > 0:
+            # A cap/backoff skip means some pools were not checked, so the scan
+            # must not look healthy even when no request failed outright.
+            state = "yellow"
+        else:
+            state = "red"
+        message = " ".join(f"{key}={value}" for key, value in stats.items())
+        record_health(
+            session,
+            component="source:first_buy_feed",
+            state=state,
+            message=message,
+            error_count=stats["gecko_failures"],
+        )
+        log.info("first_buy_feed_health", state=state, **stats)
 
     @staticmethod
     def _tracked_wallets(chain_slug: str) -> set[str]:

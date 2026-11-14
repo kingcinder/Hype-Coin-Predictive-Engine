@@ -44,6 +44,40 @@ def test_first_window_stats_and_tracked_alert(session) -> None:
     assert len(alerts) == 1
 
 
+def test_multi_pool_asset_keeps_strongest_first_window_stats(session) -> None:
+    asset = seed_market_asset(session)
+    strong_pool = [
+        {"wallet": "A", "side": "buy", "size_usd": 10, "ts": NOW + timedelta(minutes=1)},
+        {"wallet": "B", "side": "buy", "size_usd": 20, "ts": NOW + timedelta(minutes=2)},
+        {"wallet": "C", "side": "sell", "size_usd": 5, "ts": NOW + timedelta(minutes=3)},
+    ]
+    quiet_pool = [
+        {"wallet": "D", "side": "buy", "size_usd": 5, "ts": NOW + timedelta(minutes=2)},
+    ]
+    record_first_buys(session, asset.id, NOW, strong_pool, set())
+    record_first_buys(session, asset.id, NOW, quiet_pool, set())
+    session.commit()
+
+    stats = session.scalar(
+        select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset.id)
+    )
+    assert stats is not None
+    assert stats.buys == 2
+    assert stats.sells == 1
+    assert stats.buy_sell_ratio == Decimal("2")
+
+    better_pool = [
+        *strong_pool,
+        {"wallet": "E", "side": "buy", "size_usd": 30, "ts": NOW + timedelta(minutes=4)},
+    ]
+    record_first_buys(session, asset.id, NOW, better_pool, set())
+    session.commit()
+    session.refresh(stats)
+    assert stats.buys == 3
+    assert stats.sells == 1
+    assert stats.buy_sell_ratio == Decimal("3")
+
+
 def test_tracked_first_buy_queues_copy_without_trading(session, monkeypatch) -> None:
     asset = seed_market_asset(session)
     monkeypatch.setattr(get_settings(), "copy_trading_enabled", True)

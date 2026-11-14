@@ -11,9 +11,14 @@ import ingestion.service as ingestion_service
 from common.config import get_settings
 from common.time import ensure_utc
 from ingestion.contract_analyzer import ContractAnalysis
+from ingestion.normalizers import NormalizedPair
 from ingestion.provider_gate import CircuitOpen
 from ingestion.service import IngestionService, _analysis_findings
-from ingestion.solana_swaps import fetch_pool_swaps, reset_solana_swap_gate
+from ingestion.solana_swaps import (
+    fetch_pool_swaps,
+    reset_solana_swap_cache,
+    reset_solana_swap_gate,
+)
 from ingestion.source_clients import GeckoTerminalClient, reset_geckoterminal_gate
 from ops.archive import LocalArchiveStore
 from storage import models
@@ -29,9 +34,11 @@ from tests.conftest import seed_market_asset, seed_reference
 def _reset_provider_circuits():
     reset_geckoterminal_gate()
     reset_solana_swap_gate()
+    reset_solana_swap_cache()
     yield
     reset_geckoterminal_gate()
     reset_solana_swap_gate()
+    reset_solana_swap_cache()
 
 
 def test_dexscreener_pair_ingest_is_idempotent(session) -> None:
@@ -60,6 +67,67 @@ def test_dexscreener_pair_ingest_is_idempotent(session) -> None:
     )
     assert session.scalar(select(func.count()).select_from(models.MarketSnapshot)) == 1
     assert session.scalar(select(func.count()).select_from(models.LiquiditySnapshot)) == 1
+
+
+def test_pair_ingest_commits_prior_pairs_before_pool_trade_fetch(session, monkeypatch) -> None:
+    """Reusing one session for several pairs must release the write lock first.
+
+    The second pair's GeckoTerminal fetch must see the first pair committed and
+    must run without this session holding SQLite's write lock. A separate
+    connection proves both by taking BEGIN IMMEDIATE during the fetch.
+    """
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    session.commit()
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_fetch_enabled", True)
+
+    observed: list[tuple[str, int]] = []
+
+    def fake_pool_trades(self, chain: str, pool: str):
+        raw = session.get_bind().raw_connection()
+        try:
+            cursor = raw.cursor()
+            cursor.execute("PRAGMA busy_timeout=100")
+            cursor.execute("BEGIN IMMEDIATE")
+            count = cursor.execute("SELECT COUNT(*) FROM pairs").fetchone()[0]
+            raw.rollback()
+        finally:
+            raw.close()
+        observed.append((pool, count))
+        return []
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", fake_pool_trades)
+    service = IngestionService()
+
+    def payload(pair_address: str, token_address: str) -> dict[str, object]:
+        return {
+            "chainId": "solana",
+            "dexId": "raydium",
+            "pairAddress": pair_address,
+            "pairCreatedAt": int(now.timestamp() * 1000),
+            "baseToken": {
+                "address": token_address,
+                "symbol": f"T{token_address[-1]}",
+                "name": "Same Session Token",
+            },
+            "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+            "liquidity": {"usd": 80000},
+        }
+
+    first_pair = "PairSameSession1111111111111111111111111111"
+    second_pair = "PairSameSession2222222222222222222222222222"
+    assert service._store_dexscreener_pair(
+        session, source, payload(first_pair, "TokenSameSession1111111111111111111111111111")
+    )
+    # Deliberately no commit here: the next pair's fetch must commit this one.
+    assert service._store_dexscreener_pair(
+        session, source, payload(second_pair, "TokenSameSession2222222222222222222222222222")
+    )
+
+    assert observed == [(first_pair, 0), (second_pair, 1)]
 
 
 def test_geckoterminal_pool_trades_reads_recent_wallet_trades(monkeypatch) -> None:
@@ -117,6 +185,260 @@ def test_solana_rpc_429_opens_circuit(monkeypatch) -> None:
     assert fetch_pool_swaps(RateLimitedRpc(), pool_address="Pool429", base_mint="Mint") == []
     assert fetch_pool_swaps(RateLimitedRpc(), pool_address="Pool429", base_mint="Mint") == []
     assert calls == ["Pool429"]
+
+
+def test_solana_swap_cache_budgets_transactions_without_losing_buys(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "solana_swap_rpc_min_interval_seconds", 0)
+    monkeypatch.setattr(get_settings(), "first_buy_swap_cache_seconds", 300)
+    transactions: list[str] = []
+
+    class Rpc:
+        def get_signatures_for_address(self, address: str, *, limit: int):
+            return [{"signature": f"sig-{i}", "err": None} for i in range(5, 0, -1)]
+
+        def get_transaction(self, signature: str):
+            transactions.append(signature)
+            wallet = signature.replace("sig", "W")
+            return {
+                "result": {
+                    "blockTime": 1_777_000_000,
+                    "meta": {
+                        "preTokenBalances": [
+                            {"mint": "Mint", "owner": wallet, "uiTokenAmount": {"uiAmount": 0}}
+                        ],
+                        "postTokenBalances": [
+                            {"mint": "Mint", "owner": wallet, "uiTokenAmount": {"uiAmount": 1}}
+                        ],
+                    },
+                }
+            }
+
+    rpc = Rpc()
+    first = fetch_pool_swaps(rpc, pool_address="Pool", base_mint="Mint", limit=2)
+    second = fetch_pool_swaps(rpc, pool_address="Pool", base_mint="Mint", limit=2)
+    third = fetch_pool_swaps(rpc, pool_address="Pool", base_mint="Mint", limit=2)
+    fourth = fetch_pool_swaps(rpc, pool_address="Pool", base_mint="Mint", limit=2)
+
+    assert [len(first), len(second), len(third), len(fourth)] == [2, 4, 5, 5]
+    assert len(transactions) == 5
+    assert set(transactions) == {f"sig-{i}" for i in range(1, 6)}
+
+
+def test_successful_empty_geckoterminal_feed_skips_solana_rpc_fallback(monkeypatch) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    pair = NormalizedPair(
+        chain_slug="solana",
+        dex_id="raydium",
+        pair_address="PoolEmptyFeed",
+        base_address="MintEmptyFeed",
+        base_symbol="EMPTY",
+        base_name="Empty Feed Token",
+        quote_address="USDC",
+        quote_symbol="USDC",
+        quote_name="USD Coin",
+        pair_created_at=now,
+        price_usd=1.0,
+        volume_usd=0.0,
+        liquidity_usd=80000.0,
+        reserve_base=None,
+        reserve_quote=None,
+        buys=0,
+        sells=0,
+        trades=0,
+    )
+    monkeypatch.setattr(
+        ingestion_service.GeckoTerminalClient,
+        "pool_trades",
+        lambda self, chain, pool: [],
+    )
+
+    class UnexpectedRpc:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("RPC fallback ran for a successful empty feed")
+
+    monkeypatch.setattr(ingestion_service, "SolanaRpcClient", UnexpectedRpc)
+    service = IngestionService()
+
+    assert service._first_buy_swaps(pair, now, set()) == []
+    assert service._first_buy_stats["gecko_failures"] == 0
+    assert service._first_buy_stats["rpc_fallback_hits"] == 0
+
+
+def test_ingestion_gecko_failure_without_trades_keeps_stats_unknown(session, monkeypatch) -> None:
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    settings = get_settings()
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(settings, "copy_trading_enabled", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=now, kind="armed", reason="test"))
+    session.commit()
+
+    def wallets() -> list[dict[str, str]]:
+        return [{"address": "W", "chain": "solana"}]
+
+    monkeypatch.setattr("trading.wallets.load_wallets", wallets)
+    monkeypatch.setattr("trading.copy.load_wallets", wallets)
+
+    def rate_limited(self, chain: str, pool: str):
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+    rpc_calls: list[str] = []
+
+    def empty_rpc_fallback(*args, **kwargs):
+        rpc_calls.append(kwargs["pool_address"])
+        return []
+
+    monkeypatch.setattr(ingestion_service, "fetch_pool_swaps", empty_rpc_fallback)
+    pair_address = "PairUnknownStats11111111111111111111111111"
+    mint = "TokenUnknownStats11111111111111111111111111"
+    payload = {
+        "chainId": "solana",
+        "dexId": "raydium",
+        "pairAddress": pair_address,
+        "pairCreatedAt": int(now.timestamp() * 1000),
+        "baseToken": {"address": mint, "symbol": "UNK", "name": "Unknown Stats Token"},
+        "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+        "liquidity": {"usd": 80000},
+    }
+
+    service = IngestionService()
+    assert service._store_dexscreener_pair(session, source, payload) is True
+    session.commit()
+
+    assert rpc_calls == [pair_address]
+    pool = session.scalar(select(models.Pool).where(models.Pool.address == pair_address))
+    assert pool is not None
+    pair = session.scalar(select(models.Pair).where(models.Pair.pool_id == pool.id))
+    assert pair is not None
+    asset = session.scalar(select(models.Asset).where(models.Asset.address == mint))
+    assert asset is not None
+    stats = session.scalar(
+        select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset.id)
+    )
+    assert stats is not None
+    assert stats.buys is None
+    assert stats.sells is None
+    assert stats.buy_sell_ratio is None
+    assert session.scalars(select(models.CopyLog)).all() == []
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
+
+
+def test_first_buy_health_warns_when_budget_skips_fetches(session) -> None:
+    service = IngestionService()
+    service._first_buy_stats["pools"] = 8
+    service._first_buy_stats["budget_skipped"] = 12
+
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "yellow"
+    assert "budget_skipped=12" in health.message
+    assert "gecko_failures=0" in health.message
+
+
+def test_first_buy_trade_budget_caps_gecko_calls_per_scan(monkeypatch) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 2)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ingestion_service.GeckoTerminalClient,
+        "pool_trades",
+        lambda self, chain, pool: calls.append(pool) or [],
+    )
+
+    def pair(address: str) -> NormalizedPair:
+        return NormalizedPair(
+            chain_slug="solana",
+            dex_id="raydium",
+            pair_address=address,
+            base_address="MintBudget",
+            base_symbol="BUDGET",
+            base_name="Budget Token",
+            quote_address="USDC",
+            quote_symbol="USDC",
+            quote_name="USD Coin",
+            pair_created_at=now,
+            price_usd=1.0,
+            volume_usd=0.0,
+            liquidity_usd=80000.0,
+            reserve_base=None,
+            reserve_quote=None,
+            buys=0,
+            sells=0,
+            trades=0,
+        )
+
+    service = IngestionService()
+    for index in range(3):
+        assert service._first_buy_swaps(pair(f"PoolBudget{index}"), now, set()) == []
+
+    assert calls == ["PoolBudget0", "PoolBudget1"]
+    assert service._first_buy_stats["pools"] == 2
+    assert service._first_buy_stats["budget_skipped"] == 1
+
+    service._reset_first_buy_stats()
+    assert service._first_buy_swaps(pair("PoolBudgetReset"), now, set()) == []
+    assert calls == ["PoolBudget0", "PoolBudget1", "PoolBudgetReset"]
+
+
+def test_first_buy_trade_rate_limit_backs_off_for_rest_of_scan(monkeypatch) -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+    calls: list[str] = []
+    fallback_calls: list[str] = []
+
+    def rate_limited(self, chain: str, pool: str):
+        calls.append(pool)
+        request = httpx.Request("GET", f"https://api.geckoterminal.com/{pool}")
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("429", request=request, response=response)
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+    monkeypatch.setattr(
+        ingestion_service,
+        "fetch_pool_swaps",
+        lambda *args, **kwargs: fallback_calls.append(kwargs["pool_address"]) or [],
+    )
+
+    def pair(address: str) -> NormalizedPair:
+        return NormalizedPair(
+            chain_slug="solana",
+            dex_id="raydium",
+            pair_address=address,
+            base_address="MintRateLimit",
+            base_symbol="LIMIT",
+            base_name="Rate Limit Token",
+            quote_address="USDC",
+            quote_symbol="USDC",
+            quote_name="USD Coin",
+            pair_created_at=now,
+            price_usd=1.0,
+            volume_usd=0.0,
+            liquidity_usd=80000.0,
+            reserve_base=None,
+            reserve_quote=None,
+            buys=0,
+            sells=0,
+            trades=0,
+        )
+
+    service = IngestionService()
+    assert service._first_buy_swaps(pair("PoolRateLimit0"), now, set()) == []
+    assert service._first_buy_swaps(pair("PoolRateLimit1"), now, set()) == []
+
+    assert calls == ["PoolRateLimit0"]
+    assert fallback_calls == ["PoolRateLimit0"]
+    assert service._first_buy_stats["gecko_failures"] == 1
+    assert service._first_buy_stats["backoff_skipped"] == 1
 
 
 def test_first_buy_ingestion_uses_real_pool_trades(session, monkeypatch) -> None:
@@ -241,7 +563,9 @@ def test_tracked_first_buy_ingestion_queues_pending_copy_only(session, monkeypat
     assert session.scalars(select(models.LiveFill)).all() == []
 
 
-def test_ingestion_rpc_fallback_queues_pending_copy(session, monkeypatch) -> None:
+def test_ingestion_rpc_fallback_queues_pending_copy_and_records_health(
+    session, monkeypatch
+) -> None:
     seed_reference(session)
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     assert source is not None
@@ -312,6 +636,7 @@ def test_ingestion_rpc_fallback_queues_pending_copy(session, monkeypatch) -> Non
 
     service = IngestionService()
     assert service._store_dexscreener_pair(session, source, payload) is True
+    service._record_first_buy_health(session)
     session.commit()
 
     assert requested_pools == [pair_address]
@@ -321,6 +646,17 @@ def test_ingestion_rpc_fallback_queues_pending_copy(session, monkeypatch) -> Non
     assert log.mint == mint
     assert session.scalars(select(models.LedgerOpenPosition)).all() == []
     assert session.scalars(select(models.LiveFill)).all() == []
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "yellow"
+    assert health.error_count == 1
+    assert "gecko_failures=1" in health.message
+    assert "rpc_fallback_hits=1" in health.message
+    assert "rpc_fallback_swaps=1" in health.message
+    assert "tracked_buys=1" in health.message
+    assert "pending_copy_logs=1" in health.message
 
 
 def test_geckoterminal_pool_ingest_creates_point_in_time_rows(session, monkeypatch) -> None:

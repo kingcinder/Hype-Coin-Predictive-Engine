@@ -120,12 +120,16 @@ def _update_copy_state(
     status: str,
     detail: str | None,
     require: str | None = None,
+    claimed_at: datetime | None = None,
 ) -> bool:
     """Conditionally update one copy log, returning whether it matched."""
+    values: dict[str, Any] = {"status": status, "detail": detail}
+    if claimed_at is not None:
+        values["claimed_at"] = claimed_at
     statement = (
         update(models.CopyLog)
         .where(models.CopyLog.id == log_id)
-        .values(status=status, detail=detail)
+        .values(**values)
         .execution_options(synchronize_session=False)
     )
     if require is not None:
@@ -134,7 +138,9 @@ def _update_copy_state(
     return cast(CursorResult[Any], result).rowcount == 1
 
 
-def _claim_pending_copy(session: Session, log_id: int) -> bool:
+def _claim_pending_copy(
+    session: Session, log_id: int, *, claimed_at: datetime | None = None
+) -> bool:
     """Atomically move one pending log to ``approving``.
 
     The conditional UPDATE is evaluated by the database, so two processes
@@ -146,7 +152,44 @@ def _claim_pending_copy(session: Session, log_id: int) -> bool:
         status="approving",
         detail=_APPROVAL_CLAIMED,
         require="pending",
+        claimed_at=claimed_at,
     )
+
+
+def _claim_is_stale(pending: models.CopyLog, now: datetime, settings: Any) -> bool:
+    """Whether a pre-submission approval claim is old enough to reclaim."""
+    if pending.detail != _APPROVAL_CLAIMED:
+        return False
+    if pending.claimed_at is None:
+        # Claims written before this field existed have no lease start; they are
+        # pre-submission rows and are safe to release like the old recover path.
+        return True
+    age = (ensure_utc(now) - ensure_utc(pending.claimed_at)).total_seconds()
+    return age >= settings.copy_approval_claim_timeout_seconds
+
+
+def _release_stale_claim(session: Session, log_id: int, claimed_at: datetime | None) -> bool:
+    """Release a stale pre-submission claim without disturbing a newer one."""
+
+    def _persist(write_session: Session) -> bool:
+        statement = update(models.CopyLog).where(
+            models.CopyLog.id == log_id,
+            models.CopyLog.status == "approving",
+            models.CopyLog.detail == _APPROVAL_CLAIMED,
+        )
+        if claimed_at is None:
+            statement = statement.where(models.CopyLog.claimed_at.is_(None))
+        else:
+            statement = statement.where(models.CopyLog.claimed_at == claimed_at)
+        statement = statement.values(
+            status="pending",
+            detail="recovered; awaiting human approval",
+            claimed_at=None,
+        )
+        result = write_session.execute(statement.execution_options(synchronize_session=False))
+        return cast(CursorResult[Any], result).rowcount == 1
+
+    return queued_write(_persist)
 
 
 def recover_copy_approval(
@@ -224,7 +267,11 @@ def approve_copy(
     if pending.status == "executed":
         return pending
     if pending.status == "approving":
-        raise TradeRefused("copy_approval_in_progress")
+        if _claim_is_stale(pending, now, settings):
+            _release_stale_claim(session, pending.id, pending.claimed_at)
+            session.refresh(pending)
+        if pending.status == "approving":
+            raise TradeRefused("copy_approval_in_progress")
     if pending.status == "failed":
         raise TradeRefused("copy_approval_failed")
     if pending.status != "pending":
@@ -272,7 +319,7 @@ def approve_copy(
     original_detail = pending.detail
 
     def _claim(write_session: Session) -> bool:
-        return _claim_pending_copy(write_session, pending.id)
+        return _claim_pending_copy(write_session, pending.id, claimed_at=now)
 
     if not queued_write(_claim):
         session.expire_all()

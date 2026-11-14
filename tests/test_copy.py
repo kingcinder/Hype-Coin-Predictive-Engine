@@ -62,6 +62,23 @@ def test_disabled_writes_nothing(session, queue, monkeypatch) -> None:
     assert _rows(session, models.CopyLog) == []
 
 
+@pytest.mark.parametrize(
+    "size",
+    [
+        Decimal("0"),
+        Decimal("-1"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+    ],
+    ids=["zero", "negative", "nan", "infinity", "negative-infinity"],
+)
+def test_maybe_queue_copy_rejects_invalid_sizes(session, queue, enabled, size) -> None:
+    """The queue boundary refuses non-positive and non-finite sizes outright."""
+    assert copy.maybe_queue_copy(session, "W", "M", size, now=NOW) is None
+    assert _rows(session, models.CopyLog) == []
+
+
 def test_closed_gate_is_paper_only(session, queue, enabled) -> None:
     seed_market_asset(session)
     row = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
@@ -201,7 +218,6 @@ def test_executed_state_persists_for_fresh_session(session, queue, enabled, monk
     monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
     session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
     session.commit()
-    seed_market_asset(session)
     pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
     assert pending is not None
     opened: list[int] = []
@@ -293,6 +309,41 @@ def test_conditional_claim_update_succeeds_only_once(session) -> None:
         assert copy._claim_pending_copy(second, log.id) is False
         second.rollback()
 
+    session.expire_all()
+    reloaded = session.get(models.CopyLog, log.id)
+    assert reloaded is not None
+    assert reloaded.status == "approving"
+    assert reloaded.detail == "approval_claimed"
+
+
+def test_concurrent_claim_update_succeeds_only_once(session) -> None:
+    log = models.CopyLog(
+        ts=NOW,
+        wallet="W",
+        mint="M",
+        size_sol=Decimal("1"),
+        status="pending",
+        detail="awaiting approval",
+    )
+    session.add(log)
+    session.commit()
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    barrier = Barrier(2)
+
+    def claim() -> bool:
+        with factory() as db:
+            barrier.wait(timeout=5)
+            claimed = copy._claim_pending_copy(db, log.id, claimed_at=NOW)
+            if claimed:
+                db.commit()
+            else:
+                db.rollback()
+            return claimed
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=10) for future in (pool.submit(claim), pool.submit(claim))]
+
+    assert sorted(results) == [False, True]
     session.expire_all()
     reloaded = session.get(models.CopyLog, log.id)
     assert reloaded is not None
@@ -395,6 +446,79 @@ def test_two_sessions_approve_same_log_open_one_live_trade(
     assert _rows(session, models.CopyLog)[0].status == "executed"
 
 
+def test_two_sessions_approve_same_log_create_one_live_position(
+    session, queue, enabled, monkeypatch, rules_file
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
+    session.commit()
+    seed_market_asset(session)
+    pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
+    assert pending is not None
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    barrier = Barrier(2)
+    buys: list[dict] = []
+
+    class FakePriceSource:
+        def price(self, mint: str, chain: str) -> PriceQuote:
+            return PriceQuote(price=Decimal("1"), ts=NOW + timedelta(seconds=60), source="test")
+
+    monkeypatch.setattr(copy, "MarketSnapshotPriceSource", lambda session: FakePriceSource())
+    monkeypatch.setattr(
+        copy,
+        "get_candidate",
+        lambda *args, **kwargs: {
+            "mint": "M",
+            "chain": "solana",
+            "evidence_ts": NOW,
+            "age_minutes": 5,
+        },
+    )
+
+    class FakeExecutor:
+        def __init__(self, session) -> None:
+            pass
+
+        def buy(self, **kwargs):
+            buys.append(kwargs)
+            time.sleep(0.2)
+            return SimpleNamespace(
+                status="filled",
+                price=Decimal("1"),
+                size_sol=kwargs["size_sol"],
+                fee_sol=Decimal("0"),
+            )
+
+    monkeypatch.setattr("trading.gmgn_exec.GmgnExecutor", FakeExecutor)
+
+    def approve(offset: int) -> str:
+        with factory() as db:
+            barrier.wait(timeout=5)
+            try:
+                return copy.approve_copy(db, pending.id, now=NOW + timedelta(seconds=offset)).status
+            except TradeRefused as exc:
+                return exc.reason
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [
+            future.result(timeout=10)
+            for future in (pool.submit(approve, 60), pool.submit(approve, 90))
+        ]
+
+    positions = _rows(session, models.LedgerOpenPosition)
+    assert len(positions) == 1
+    assert positions[0].mode == "live"
+    assert len(buys) == 1
+    assert outcomes.count("executed") >= 1
+    assert set(outcomes) <= {"executed", "copy_approval_in_progress"}
+    log = _rows(session, models.CopyLog)[0]
+    assert log.status == "executed"
+    assert log.detail == f"position_id={positions[0].id}"
+
+
 def test_unexpected_failure_keeps_claim(session, queue, enabled, monkeypatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "live_trading_enabled", "1")
@@ -466,6 +590,49 @@ def test_post_submit_refusal_keeps_claim_and_blocks_retry(
         copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=120))
     assert len(opened) == 1
     assert _rows(session, models.LedgerOpenPosition) == []
+
+
+def test_stale_pre_submission_claim_can_be_reapproved(session, queue, enabled, monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "copy_approval_claim_timeout_seconds", 300)
+    session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
+    session.commit()
+    seed_market_asset(session)
+    pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
+    assert pending is not None
+    log = _rows(session, models.CopyLog)[0]
+    log.status = "approving"
+    log.detail = copy._APPROVAL_CLAIMED
+    log.claimed_at = NOW
+    session.commit()
+
+    with pytest.raises(TradeRefused, match="copy_approval_in_progress"):
+        copy.approve_copy(session, log.id, now=NOW + timedelta(seconds=60))
+
+    session.expire_all()
+    log = session.scalars(select(models.CopyLog)).one()
+    log.claimed_at = NOW - timedelta(minutes=10)
+    session.commit()
+    opened: list[int] = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def open_trade(self, *args, **kwargs) -> int:
+            opened.append(1)
+            return 99
+
+    monkeypatch.setattr(copy, "get_candidate", lambda *args, **kwargs: {"mint": "M"})
+    monkeypatch.setattr("trading.ledger.TradeEngine", FakeEngine)
+
+    result = copy.approve_copy(session, log.id, now=NOW + timedelta(seconds=90))
+    assert result.status == "executed"
+    assert result.detail == "position_id=99"
+    assert len(opened) == 1
 
 
 def test_recover_pre_submission_claim_allows_retry(session, queue, enabled, monkeypatch) -> None:

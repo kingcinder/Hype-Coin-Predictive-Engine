@@ -729,14 +729,19 @@ class Settings(BaseSettings):
     # Fetch pool trades while a pair is inside its first-buy window so tracked
     # wallet buys can queue copy signals from real ingestion, not only the API.
     first_buy_trade_fetch_enabled: bool = True
-    first_buy_swap_tx_limit: int = 12
+    first_buy_trade_max_pools_per_scan: int = 8
+    first_buy_swap_tx_limit: int = 8
+    first_buy_swap_cache_seconds: float = 300.0
     geckoterminal_min_interval_seconds: float = 2.1
-    solana_swap_rpc_min_interval_seconds: float = 0.25
+    solana_swap_rpc_min_interval_seconds: float = 0.5
     provider_circuit_break_seconds: float = 60.0
     copy_trading_enabled: bool = False
     copy_max_size_sol: Decimal = Decimal("0.1")
     copy_max_risk_pct: Decimal = Decimal("1")
     copy_delay_seconds: int = 30
+    # An approval claims a log before opening the trade. If the process dies
+    # between the claim and submission, a retry may reclaim it after this lease.
+    copy_approval_claim_timeout_seconds: int = 300
     copy_requires_confirmation: bool = True
 
     @property

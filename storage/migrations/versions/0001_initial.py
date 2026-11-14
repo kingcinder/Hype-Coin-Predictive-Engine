@@ -58,6 +58,8 @@ _LATER_OWNED_TABLES: frozenset[str] = frozenset(
         # 0018_ensemble_state_and_cross_source
         "ensemble_state",
         "cross_source_signals",
+        # 0030_trading_execution (copy_log grows in 0033)
+        "copy_log",
     }
 )
 

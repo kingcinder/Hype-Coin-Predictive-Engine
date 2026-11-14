@@ -1334,3 +1334,4 @@ class CopyLog(Base):
     size_sol: Mapped[Decimal] = mapped_column(Numeric(30, 9), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     detail: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
