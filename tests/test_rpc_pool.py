@@ -167,6 +167,9 @@ def test_solana_client_picks_from_pool_and_marks_failure(monkeypatch) -> None:
 
 
 def test_solana_client_fallback_without_pool(monkeypatch) -> None:
+    from common.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "helius_api_key", None)
     monkeypatch.setattr(
         "ingestion.source_clients.get_rpc_pool",
         lambda chain_slug: RpcEndpointPool(POOL, failure_threshold=2),

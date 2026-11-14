@@ -78,6 +78,7 @@ from common.enums import AlertState
 from common.logging import get_logger
 from common.network import validate_network_exposure
 from common.time import utc_now
+from common.urls import redact_url
 from engine.activity_stream import activity_stream_broker, compute_activity_signal_score
 from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
@@ -1672,7 +1673,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
             degraded_count = sum(not row.down and row.health < HEALTH_START for row in rows)
             endpoints = [
                 RpcPoolEndpointRow(
-                    url=row.url,
+                    url=redact_url(row.url),
                     health=row.health,
                     consecutive_failures=row.consecutive_failures,
                     down=row.down,
@@ -1695,7 +1696,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
             degraded_count = sum(not state.down and state.health < HEALTH_START for state in states)
             endpoints = [
                 RpcPoolEndpointRow(
-                    url=state.url,
+                    url=redact_url(state.url),
                     health=state.health,
                     consecutive_failures=state.consecutive_failures,
                     down=state.down,

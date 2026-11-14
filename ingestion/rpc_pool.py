@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.time import utc_now
+from common.urls import redact_url
 from storage import models
 from storage.repository import record_health
 
@@ -251,7 +252,7 @@ class RpcEndpointPool:
                         RpcPoolAlert(
                             chain_slug=self.chain_slug,
                             kind="endpoint_down_cooldown",
-                            url=url,
+                            url=redact_url(url),
                             healthy_endpoints=healthy,
                             total_endpoints=len(self.endpoints),
                             down_for_seconds=down_for,
@@ -405,8 +406,10 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
     states = pool.snapshot()
     if not states:
         return
-    down = [state.url for state in states if state.down]
-    degraded = [state.url for state in states if state.health < HEALTH_START and not state.down]
+    down = [redact_url(state.url) for state in states if state.down]
+    degraded = [
+        redact_url(state.url) for state in states if state.health < HEALTH_START and not state.down
+    ]
     state = "red" if down else ("yellow" if degraded else "ok")
     message = (
         f"{chain_slug} rpc pool: {len(states)} endpoints, {len(down)} down, "
@@ -437,7 +440,7 @@ def persist_pool_snapshots(session: Session, *, ts: datetime | None = None) -> i
             session.add(
                 models.RpcPoolSnapshot(
                     chain_slug=chain_slug,
-                    url=state.url,
+                    url=redact_url(state.url),
                     ts=snapshot_ts,
                     health=state.health,
                     consecutive_failures=state.consecutive_failures,
