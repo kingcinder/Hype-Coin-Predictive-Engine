@@ -4,9 +4,16 @@ import os
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Database URL override sources, highest precedence first. ``SERPENT_DB_PATH``
@@ -17,6 +24,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``settings.database_url`` — session_scope() users, alembic migrations,
 # diagnose_retention's ``--db`` default, bootstrap_local's written config, the
 # watchdog's sqlite checks — binds the effective URL, not a per-layer guess.
+
+
+def _allows_none(annotation: object) -> bool:
+    """Whether a field annotation accepts ``None`` (``X | None``/``Optional``)."""
+    if annotation is type(None):
+        return True
+    return any(_allows_none(arg) for arg in get_args(annotation))
 
 
 def secret_value(value: SecretStr | str | None) -> str | None:
@@ -227,15 +241,22 @@ class Settings(BaseSettings):
     telegram_message_limit: int = 30
     telegram_rate_limit_pause_seconds: float = 2.0
 
-    @field_validator("telegram_api_id", mode="before")
+    @field_validator("*", mode="before")
     @classmethod
-    def _blank_telegram_api_id(cls, value: object) -> object:
-        """Treat an empty ``TELEGRAM_API_ID=`` line as unset, not invalid.
+    def _blank_optional_is_unset(cls, value: object, info: ValidationInfo) -> object:
+        """Treat an empty ``KEY=`` line on an optional field as unset, not invalid.
 
-        ``.env.example`` ships the placeholder blank; pydantic would otherwise
-        raise a validation error and the whole engine would fail to start.
+        ``.env.example`` ships placeholder blanks for optional numbers and API
+        keys (``TELEGRAM_API_ID``, ``LIVE_MAX_BANKROLL_SOL``, ``HELIUS_API_KEY``,
+        …). Pydantic would otherwise raise a ``decimal_parsing`` error — aborting
+        the whole engine — or hand consumers an empty ``SecretStr`` that looks
+        configured. Fields that cannot be ``None`` are left untouched.
         """
-        if isinstance(value, str) and not value.strip():
+        if not isinstance(value, str) or value.strip():
+            return value
+        field_name = info.field_name
+        field = cls.model_fields.get(field_name) if field_name else None
+        if field is not None and _allows_none(field.annotation):
             return None
         return value
 
