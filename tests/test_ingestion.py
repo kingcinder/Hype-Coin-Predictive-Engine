@@ -5,11 +5,13 @@ from decimal import Decimal
 
 import httpx
 import pytest
+import respx
 from sqlalchemy import func, select
 
 import ingestion.service as ingestion_service
 from common.config import get_settings
 from common.time import ensure_utc
+from ingestion.birdeye_client import BirdeyeClient
 from ingestion.contract_analyzer import ContractAnalysis
 from ingestion.normalizers import NormalizedPair
 from ingestion.provider_gate import CircuitOpen
@@ -1168,6 +1170,26 @@ def test_geckoterminal_new_pools_real_failure_stays_red(session, monkeypatch) ->
     assert health.state == "red"
     assert "502 Bad Gateway" in (health.message or "")
     assert health.error_count == 1
+
+
+def test_birdeye_new_tokens_uses_v2_endpoint_and_chain_header(monkeypatch) -> None:
+    """Regression: the old v3 path 404s; auth and chain ride in headers."""
+    client = BirdeyeClient(api_key="test-key")
+    try:
+        with respx.mock:
+            route = respx.get("https://public-api.birdeye.so/defi/v2/tokens/new_listing").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"success": True, "data": {"items": [{"address": "A"}]}},
+                )
+            )
+            assert client.new_tokens(limit=20) == [{"address": "A"}]
+        request = route.calls[0].request
+        assert request.headers["X-API-KEY"] == "test-key"
+        assert request.headers["x-chain"] == "solana"
+        assert request.url.params["limit"] == "20"
+    finally:
+        client.close()
 
 
 def test_birdeye_without_api_key_skips_feed_and_reports_configuration(session, monkeypatch) -> None:

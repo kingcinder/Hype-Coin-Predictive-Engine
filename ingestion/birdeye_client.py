@@ -16,8 +16,8 @@ class BirdeyeClient:
 
     BASE_URL = "https://public-api.birdeye.so"
 
-    def __init__(self, api_key: str | None = None) -> None:
-        headers: dict[str, str] = {}
+    def __init__(self, api_key: str | None = None, *, chain: str = "solana") -> None:
+        headers: dict[str, str] = {"x-chain": chain}
         if api_key:
             headers["X-API-KEY"] = api_key
         self.http = HttpClient(base_url=self.BASE_URL, headers=headers)
@@ -46,10 +46,15 @@ class BirdeyeClient:
         return None
 
     def new_tokens(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Get newly created tokens on Solana."""
+        """Get newly created tokens on Solana, most recent first.
+
+        Birdeye's new-listing endpoint is ``/defi/v2/tokens/new_listing`` (the
+        old ``/defi/v3/token/new_listing`` path is gone and answers 404); the
+        chain comes from the ``x-chain`` header and ordering is implicit.
+        """
         data = self.http.get_json(
-            "/defi/v3/token/new_listing",
-            params={"limit": limit, "sort_by": "created_time", "sort_type": "desc"},
+            "/defi/v2/tokens/new_listing",
+            params={"limit": limit},
         )
         if isinstance(data, dict) and data.get("success"):
             items = data.get("data", {}).get("items") or []
