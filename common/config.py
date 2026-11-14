@@ -788,7 +788,14 @@ class Settings(BaseSettings):
         if chain_slug == "base":
             return self.quicknode_evm_rpc_url or self.base_rpc_url
         if chain_slug == "ethereum":
-            return self.quicknode_evm_rpc_url or self.ethereum_rpc_url
+            # This Alchemy key is enabled for the Ethereum app only (Base and
+            # Solana return 403), so Alchemy is wired for Ethereum alone.
+            alchemy_key = secret_value(self.alchemy_api_key)
+            if self.quicknode_evm_rpc_url:
+                return self.quicknode_evm_rpc_url
+            if alchemy_key:
+                return f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}"
+            return self.ethereum_rpc_url
         return None
 
 
