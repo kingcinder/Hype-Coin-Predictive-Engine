@@ -292,8 +292,13 @@ def approve_copy(
             why_entered=f"copy:{pending.wallet}",
         )
     except TradeRefused as exc:
-        # A known refusal is safe to retry: release the claim so a later
-        # approval can re-run the checks.
+        if exc.reason == "fill_unconfirmed":
+            # The venue may have accepted the order even though the fill was
+            # not confirmed. Keep the claim so no retry submits a second live
+            # order; reconcile through the recovery endpoint instead.
+            raise
+        # A known pre-submission refusal is safe to retry: release the claim
+        # so a later approval can re-run the checks.
         _set_state("pending", original_detail, require="approving")
         return _refuse(exc.reason)
     except Exception:

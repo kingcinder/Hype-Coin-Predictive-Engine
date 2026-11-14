@@ -430,6 +430,43 @@ def test_unexpected_failure_keeps_claim(session, queue, enabled, monkeypatch) ->
     assert _rows(session, models.LedgerOpenPosition) == []
 
 
+def test_unconfirmed_fill_keeps_claim_and_blocks_retry(
+    session, queue, enabled, monkeypatch
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
+    session.commit()
+    seed_market_asset(session)
+    pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
+    assert pending is not None
+    opened: list[int] = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def open_trade(self, *args, **kwargs) -> int:
+            opened.append(1)
+            raise TradeRefused("fill_unconfirmed")
+
+    monkeypatch.setattr(copy, "get_candidate", lambda *args, **kwargs: {"mint": "M"})
+    monkeypatch.setattr("trading.ledger.TradeEngine", FakeEngine)
+
+    with pytest.raises(TradeRefused, match="fill_unconfirmed"):
+        copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=60))
+
+    held = _rows(session, models.CopyLog)[0]
+    assert held.status == "approving"
+    assert held.detail == "submission_started"
+    with pytest.raises(TradeRefused, match="copy_approval_in_progress"):
+        copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=120))
+    assert len(opened) == 1
+    assert _rows(session, models.LedgerOpenPosition) == []
+
+
 def test_recover_pre_submission_claim_allows_retry(session, queue, enabled, monkeypatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "live_trading_enabled", "1")
