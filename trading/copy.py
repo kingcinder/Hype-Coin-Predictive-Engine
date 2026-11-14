@@ -31,6 +31,7 @@ def _log(
     status: str,
     detail: str | None,
     now: datetime,
+    use_write_queue: bool,
 ) -> models.CopyLog:
     row = models.CopyLog(
         ts=now,
@@ -40,11 +41,17 @@ def _log(
         status=status,
         detail=detail,
     )
+    if use_write_queue:
 
-    def _persist(write_session: Session) -> None:
-        write_session.add(row)
+        def _persist(write_session: Session) -> None:
+            write_session.add(row)
 
-    queued_write(_persist)
+        queued_write(_persist)
+    else:
+        # The ingestion path already owns SQLite's write transaction; adding
+        # here commits with that stage instead of waiting on the writer thread.
+        session.add(row)
+        session.flush()
     return row
 
 
@@ -55,6 +62,7 @@ def maybe_queue_copy(
     size_sol: Decimal,
     *,
     now: datetime | None = None,
+    use_write_queue: bool = True,
 ) -> models.CopyLog | None:
     """Log a copy signal; never execute it."""
     settings = get_settings()
@@ -78,6 +86,7 @@ def maybe_queue_copy(
             status="paper_only",
             detail=f"{exc.reason}; risk_pct={risk_pct}",
             now=now,
+            use_write_queue=use_write_queue,
         )
     return _log(
         session,
@@ -87,6 +96,7 @@ def maybe_queue_copy(
         status="pending",
         detail=f"awaiting human approval; risk_pct={risk_pct}",
         now=now,
+        use_write_queue=use_write_queue,
     )
 
 
@@ -113,6 +123,7 @@ def approve_copy(
             status="refused",
             detail=exc.reason,
             now=now,
+            use_write_queue=True,
         )
     ready_at = ensure_utc(pending.ts) + timedelta(seconds=settings.copy_delay_seconds)
     if now < ready_at:
@@ -124,6 +135,7 @@ def approve_copy(
             status="refused",
             detail="copy_delay_not_elapsed",
             now=now,
+            use_write_queue=True,
         )
     price_source = MarketSnapshotPriceSource(session)
     candidate = get_candidate(session, pending.mint, now=now, price_source=price_source)
@@ -136,6 +148,7 @@ def approve_copy(
             status="refused",
             detail="candidate_not_found",
             now=now,
+            use_write_queue=True,
         )
     from trading.ledger import TradeEngine  # noqa: PLC0415 - avoids import cycle.
 
@@ -155,6 +168,7 @@ def approve_copy(
             status="refused",
             detail=exc.reason,
             now=now,
+            use_write_queue=True,
         )
     return _log(
         session,
@@ -164,4 +178,5 @@ def approve_copy(
         status="executed",
         detail=f"position_id={position_id}",
         now=now,
+        use_write_queue=True,
     )

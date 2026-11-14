@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from common.config import get_settings
 from radar.first_buys import record_first_buys
 from storage import models
 from tests.conftest import seed_market_asset
@@ -34,6 +35,25 @@ def test_first_window_stats_and_tracked_alert(session) -> None:
         select(models.Alert).where(models.Alert.alert_type == "tracked_wallet_first_buy")
     ).all()
     assert len(alerts) == 1
+
+
+def test_tracked_first_buy_queues_copy_without_trading(session, monkeypatch) -> None:
+    asset = seed_market_asset(session)
+    monkeypatch.setattr(get_settings(), "copy_trading_enabled", True)
+    monkeypatch.setattr("trading.copy.load_wallets", lambda: [{"address": "A", "chain": "solana"}])
+    record_first_buys(
+        session,
+        asset.id,
+        NOW,
+        [{"wallet": "A", "side": "buy", "size_sol": "2", "ts": NOW + timedelta(minutes=1)}],
+        {"A"},
+    )
+    session.commit()
+
+    log = session.scalars(select(models.CopyLog)).one()
+    assert log.status == "paper_only"
+    assert log.size_sol == Decimal("0.1")
+    assert session.scalars(select(models.LedgerOpenPosition)).all() == []
 
 
 def test_unknown_swaps_stay_none(session) -> None:

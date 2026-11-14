@@ -26,8 +26,11 @@ def record_first_buys(
     ``swaps=[]`` means the data was unavailable: buys, sells and ratio stay
     ``None`` (unknown), never zero.
     """
+    from trading.copy import maybe_queue_copy  # noqa: PLC0415 - avoids import cycle.
+
     settings = get_settings()
     created = ensure_utc(pair_created_at)
+    asset = session.get(models.Asset, asset_id)
     window = timedelta(minutes=settings.first_buy_window_minutes)
     in_window: list[dict[str, Any]] = []
     for swap in swaps:
@@ -109,5 +112,18 @@ def record_first_buys(
                         score_snapshot_ref=f"first_buy:{wallet}:{ts.isoformat()}",
                         message=f"Tracked wallet {wallet} made a first buy at {ts.isoformat()}.",
                     )
+                )
+            if asset is not None:
+                raw_size = swap.get("size_sol")
+                size_sol = (
+                    settings.copy_max_size_sol if raw_size is None else Decimal(str(raw_size))
+                )
+                maybe_queue_copy(
+                    session,
+                    wallet,
+                    asset.address,
+                    size_sol,
+                    now=ts,
+                    use_write_queue=False,
                 )
     session.flush()
