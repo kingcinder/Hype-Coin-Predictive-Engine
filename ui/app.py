@@ -1846,7 +1846,12 @@ def feed_health() -> None:
         if components.empty:
             st.info("No component health rows exist yet. Worker runs will populate this table.")
         else:
-            _state_emoji = {"ok": "🟢 ok", "yellow": "🟡 yellow", "red": "🔴 red"}
+            _state_emoji = {
+                "ok": "🟢 ok",
+                "yellow": "🟡 yellow",
+                "red": "🔴 red",
+                "stale": "⚪ stale (no recent update)",
+            }
             components["state"] = components["state"].map(
                 lambda s: _state_emoji.get(str(s), str(s))
             )

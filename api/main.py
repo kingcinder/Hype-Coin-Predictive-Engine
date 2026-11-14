@@ -82,6 +82,7 @@ from engine.activity_stream import activity_stream_broker, compute_activity_sign
 from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
+from ops.health_freshness import aged_state
 from ops.parity import latest_parity
 from ops.score_drift import latest_score_drift
 from risk_engine.rules import assess_risk, mask_unreliable_forecast
@@ -212,10 +213,13 @@ def health(session: DbSession) -> HealthResponse:
     except Exception as exc:  # noqa: BLE001
         log.warning("health_database_failed", error=str(exc))
         database = f"error: {exc}"
+    now = utc_now()
     components = [
         HealthComponent(
             component=row.component,
-            state=row.state,
+            # A row older than the component's own cadence is history, not a
+            # current failure: label it stale instead of red/yellow.
+            state=aged_state(row.component, row.state, row.ts, now=now),
             ts=row.ts,
             message=row.message,
             freshness_sec=row.freshness_sec,
@@ -260,9 +264,11 @@ def health(session: DbSession) -> HealthResponse:
             ),
         )
     )
+    # ``stale`` means unknown, not failing: an abandoned feed must not keep the
+    # whole API degraded after its component stopped reporting.
     status = (
         "ok"
-        if database == "ok" and all(c.state in {"ok", "yellow"} for c in components)
+        if database == "ok" and all(c.state in {"ok", "yellow", "stale"} for c in components)
         else "degraded"
     )
     return HealthResponse(status=status, database=database, components=components)

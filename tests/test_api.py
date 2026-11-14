@@ -307,6 +307,65 @@ def test_health_never_truncates_the_outcome_labels_component(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_health_labels_old_components_stale(session) -> None:
+    """A row older than its component's cadence is stale, not current red."""
+    from datetime import timedelta
+
+    from common.time import utc_now
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app, headers=_AUTH_HEADERS)
+        old = utc_now() - timedelta(hours=3)
+        # source:* reports every scan (1h window); parity runs weekly (7d).
+        record_health(session, component="source:birdeye", state="red", message="401", ts=old)
+        record_health(session, component="parity", state="red", message="mismatch", ts=old)
+        session.commit()
+
+        body = client.get("/health").json()
+        states = {c["component"]: c["state"] for c in body["components"]}
+
+        assert states["source:birdeye"] == "stale"
+        assert states["parity"] == "red"
+        assert body["status"] == "degraded"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stale_components_alone_do_not_degrade_health(session) -> None:
+    from datetime import timedelta
+
+    from common.time import utc_now
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app, headers=_AUTH_HEADERS)
+        record_health(
+            session,
+            component="source:lp_removal:base",
+            state="red",
+            message="403 Forbidden",
+            ts=utc_now() - timedelta(hours=5),
+        )
+        session.commit()
+
+        body = client.get("/health").json()
+        row = next(c for c in body["components"] if c["component"] == "source:lp_removal:base")
+
+        assert row["state"] == "stale"
+        assert body["status"] == "ok"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_densify_labels_endpoint_ignores_future_observed_price(session) -> None:
     asset = seed_market_asset(session, symbol="DENSEAPI")
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
