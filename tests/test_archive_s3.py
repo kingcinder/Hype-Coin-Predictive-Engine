@@ -7,7 +7,7 @@ import pytest
 from moto import mock_aws
 from sqlalchemy import select
 
-from common.config import Settings
+from common.config import Settings, secret_value
 from ops.archive import (
     LocalArchiveStore,
     RawEvidenceCompactor,
@@ -61,7 +61,7 @@ def s3(monkeypatch) -> None:
                 "s3",
                 region_name="us-east-1",
                 aws_access_key_id=self.settings.minio_access_key,
-                aws_secret_access_key=self.settings.minio_secret_key,
+                aws_secret_access_key=secret_value(self.settings.minio_secret_key),
             )
 
         monkeypatch.setattr(S3ArchiveStore, "_get_client", _moto_client)

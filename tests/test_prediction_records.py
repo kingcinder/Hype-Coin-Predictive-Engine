@@ -36,7 +36,15 @@ def test_no_update_or_delete_functions() -> None:
 
 
 def test_secrets_excluded_from_hash(session, monkeypatch) -> None:
+    from pydantic import SecretStr
+
     settings = get_settings()
-    monkeypatch.setattr(settings, "engine_api_token", "SECRETVALUE", raising=False)
+    monkeypatch.setattr(settings, "engine_api_token", SecretStr("SECRETVALUE"), raising=False)
+    monkeypatch.setattr(settings, "birdeye_api_key", SecretStr("BIRDEYESECRET"), raising=False)
+    monkeypatch.setattr(settings, "cmc_api_key", SecretStr("CMCSECRET"), raising=False)
     payload = _config_fingerprint_input()
     assert "SECRETVALUE" not in payload
+    assert "BIRDEYESECRET" not in payload
+    assert "CMCSECRET" not in payload
+    assert "engine_api_token" not in payload
+    assert "birdeye_api_key" not in payload

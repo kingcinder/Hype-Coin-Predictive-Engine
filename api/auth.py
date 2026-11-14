@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from common.config import Settings, get_settings
+from common.config import Settings, get_settings, secret_value
 from storage.database import get_session
 
 
@@ -24,7 +24,7 @@ def check_bearer_token(
     settings = settings or get_settings()
     if settings.engine_api_auth_bypass:
         return None
-    token = (settings.engine_api_token or "").strip()
+    token = (secret_value(settings.engine_api_token) or "").strip()
     if not token:
         return (
             403,

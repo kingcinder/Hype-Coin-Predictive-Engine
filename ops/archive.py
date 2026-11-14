@@ -18,7 +18,7 @@ from sqlalchemy import exists, extract, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from common.config import Settings, get_settings
+from common.config import Settings, get_settings, secret_value
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from storage import models
@@ -241,7 +241,7 @@ class S3ArchiveStore:
                 "s3",
                 endpoint_url=self.settings.minio_endpoint,
                 aws_access_key_id=self.settings.minio_access_key,
-                aws_secret_access_key=self.settings.minio_secret_key,
+                aws_secret_access_key=secret_value(self.settings.minio_secret_key),
                 region_name="us-east-1",
             )
         return self._client

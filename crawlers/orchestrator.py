@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from crawlers.base import BaseCrawler
@@ -80,12 +80,14 @@ class NightCrawlerOrchestrator:
         """Initialize all available crawlers."""
         self._crawlers["coingecko"] = CoinGeckoCrawler()
         if self.settings.nightcrawler_cmc_enabled:
-            self._crawlers["coinmarketcap"] = CMCCrawler(api_key=self.settings.cmc_api_key)
+            self._crawlers["coinmarketcap"] = CMCCrawler(
+                api_key=secret_value(self.settings.cmc_api_key)
+            )
         self._crawlers["pump_fun"] = PumpFunCrawler()
         self._crawlers["defillama"] = DeFiLlamaCrawler()
         self._crawlers["whale_tracker"] = WhaleTrackerCrawler()
         self._crawlers["explorer"] = ExplorerCrawler(
-            etherscan_api_key=self.settings.etherscan_api_key
+            etherscan_api_key=secret_value(self.settings.etherscan_api_key)
         )
         if self.settings.nightcrawler_nitter_enabled:
             _warn_policy_override_once("nitter", "NIGHTCRAWLER_ENABLE_NITTER")
@@ -93,7 +95,7 @@ class NightCrawlerOrchestrator:
         self._crawlers["presale"] = PresaleCrawler()
         if self.settings.nightcrawler_gas_tracker_enabled:
             self._crawlers["gas_tracker"] = GasTrackerCrawler(
-                etherscan_api_key=self.settings.etherscan_api_key,
+                etherscan_api_key=secret_value(self.settings.etherscan_api_key),
                 include_solana=self.settings.gas_tracker_solana_enabled,
                 include_pending_tx=self.settings.gas_tracker_pending_tx_enabled,
             )
@@ -102,7 +104,7 @@ class NightCrawlerOrchestrator:
         if self.settings.nightcrawler_github_trending_enabled:
             self._crawlers["github_trending"] = GitHubTrendingCrawler(
                 search_query=self.settings.github_trending_search_query,
-                token=self.settings.github_token,
+                token=secret_value(self.settings.github_token),
             )
         if self.settings.nightcrawler_x_trends_enabled:
             _warn_policy_override_once("x_trends", "NIGHTCRAWLER_ENABLE_X_TRENDS")

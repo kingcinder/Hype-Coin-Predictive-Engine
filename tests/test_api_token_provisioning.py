@@ -12,7 +12,7 @@ import stat
 
 import pytest
 
-from common.config import ensure_api_token, get_settings
+from common.config import ensure_api_token, get_settings, secret_value
 
 
 @pytest.fixture(autouse=True)
@@ -89,5 +89,5 @@ def test_provisioning_refreshes_settings_cached_before_token(tmp_path, monkeypat
     token = ensure_api_token(tmp_path / ".env")
 
     assert token is not None
-    assert get_settings().engine_api_token == token
+    assert secret_value(get_settings().engine_api_token) == token
     get_settings.cache_clear()

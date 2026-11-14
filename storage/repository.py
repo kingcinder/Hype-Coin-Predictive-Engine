@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import Callable, Iterable
 from datetime import datetime
@@ -862,19 +863,22 @@ def _code_sha() -> str:
     return _CODE_SHA
 
 
+# Any setting whose name matches this is treated as a credential and kept out
+# of the config fingerprint (C1): ``*_key``, ``*_secret``, ``*_token``,
+# ``*password*`` and ``*signer*`` cover the provider keys plus future additions
+# without maintaining a hand-written list.
+_SECRET_SETTING_NAME = re.compile(r"secret|key|token|password|signer", re.IGNORECASE)
+
+
 def _config_fingerprint_input() -> str:
-    """JSON input hashed into ``config_sha256``; secrets are excluded."""
+    """JSON input hashed into ``config_sha256``; secrets are excluded by name."""
     from common.config import get_settings  # noqa: PLC0415 - lazy, avoids import cycle.
 
-    settings_dict = get_settings().model_dump(
-        mode="json",
-        exclude={
-            "engine_api_token",
-            "gmgn_api_key",
-            "gmgn_signer_secret",
-            "gmgn_wallet_address",
-        },
-    )
+    settings_dict = {
+        name: value
+        for name, value in get_settings().model_dump(mode="json").items()
+        if not _SECRET_SETTING_NAME.search(name)
+    }
     return json.dumps(settings_dict, sort_keys=True, default=str)
 
 

@@ -10,7 +10,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
 from fingerprint.engine import FingerprintEngine
@@ -549,7 +549,7 @@ class IngestionService:
             base_url=BirdeyeClient.BASE_URL,
         )
         source = self._source(session, "birdeye")
-        api_key = (self.settings.birdeye_api_key or "").strip()
+        api_key = (secret_value(self.settings.birdeye_api_key) or "").strip()
         if not api_key:
             record_health(
                 session,
