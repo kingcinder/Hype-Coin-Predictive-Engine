@@ -65,6 +65,8 @@ class _Engine:
     proc: subprocess.Popen[bytes]
     db_path: Path
     log_path: Path
+    api_port: int
+    ui_port: int
 
     def log(self) -> str:
         return self.log_path.read_text(errors="replace")
@@ -126,7 +128,13 @@ def _boot_engine(tmp_path: Path) -> Iterator[_Engine]:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        engine = _Engine(proc=proc, db_path=db_path, log_path=log_path)
+        engine = _Engine(
+            proc=proc,
+            db_path=db_path,
+            log_path=log_path,
+            api_port=api_port,
+            ui_port=ui_port,
+        )
         try:
             if not _wait_until(
                 lambda: _port_accepts("127.0.0.1", api_port), STARTUP_TIMEOUT_SECONDS
@@ -378,3 +386,20 @@ def test_engine_stops_cleanly_on_sigint_mid_scan(tmp_path: Path) -> None:
             _fail("the shutdown was recorded as a scan failure instead of an interruption", engine)
         if not _can_take_write_lock(engine.db_path, timeout=5.0):
             _fail("the write lock was still held after shutdown", engine)
+        # A leftover Streamlit child would keep the UI port bound and block the
+        # next launch, so both listeners must be gone after the stop.
+        # The engine is already reaped here, so poll without passing ``engine``
+        # (that guard aborts as soon as the process exits).
+        if not _wait_until(
+            lambda: (
+                not _port_accepts("127.0.0.1", engine.api_port)
+                and not _port_accepts("127.0.0.1", engine.ui_port)
+            ),
+            timeout=15.0,
+        ):
+            _fail(
+                "listeners survived shutdown "
+                f"(api_open={_port_accepts('127.0.0.1', engine.api_port)}, "
+                f"ui_open={_port_accepts('127.0.0.1', engine.ui_port)})",
+                engine,
+            )
