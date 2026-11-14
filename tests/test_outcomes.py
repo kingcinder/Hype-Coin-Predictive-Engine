@@ -250,7 +250,8 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
     assert report.unresolved == 1
     rows = _health_rows()
     assert rows[-1].error_count == 1
-    assert rows[-1].state == "ok"  # first observation is a baseline, not growth
+    # Any backlog is at least yellow, even on the first (non-growing) pass.
+    assert rows[-1].state == "yellow"
 
     _seed_prediction(session, held, model_version="test-held")
     report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
@@ -261,13 +262,27 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
     assert rows[-1].state == "red"
     assert "GREW" in (rows[-1].message or "")
 
-    # No new withheld rows: still counted, no longer flagged as growing.
+    # No new withheld rows: no longer growing, but a backlog still exists, so
+    # it must not drop back to ok.
     report = evaluate_outcomes(
         session, decision_ts=EVAL_TS + timedelta(hours=1), window_hours=WINDOW_HOURS
     )
     assert report.unresolved == 2
     rows = _health_rows()
     assert rows[-1].error_count == 2
+    assert rows[-1].state == "yellow"
+    assert "GREW" not in (rows[-1].message or "")
+
+    # Backfill lifecycle state inside both windows: the backlog resolves and
+    # the component finally returns to ok.
+    for target in (asset, held):
+        _seed_lifecycle(session, target, "collapse", SCORED_AT + timedelta(hours=1))
+    report = evaluate_outcomes(
+        session, decision_ts=EVAL_TS + timedelta(hours=2), window_hours=WINDOW_HOURS
+    )
+    assert report.unresolved == 0
+    rows = _health_rows()
+    assert rows[-1].error_count == 0
     assert rows[-1].state == "ok"
 
 
