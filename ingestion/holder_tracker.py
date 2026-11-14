@@ -138,19 +138,6 @@ def get_evm_holders(
             client.close()
 
 
-def compute_holder_growth(
-    current: HolderSnapshot,
-    previous: HolderSnapshot,
-) -> float | None:
-    """Compute holder growth rate from two snapshots."""
-    if current.holder_count is None or previous.holder_count is None:
-        return None
-    if previous.holder_count == 0:
-        return None
-    growth = (current.holder_count - previous.holder_count) / previous.holder_count
-    return round(growth, 4)
-
-
 def record_holder_metrics(
     session: Session,
     asset_id: int,

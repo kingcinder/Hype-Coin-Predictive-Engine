@@ -269,14 +269,6 @@ def evaluate_probabilities(
     return cells
 
 
-def _asset_groups(outcomes: list[OutcomeRow]) -> list[list[OutcomeRow]]:
-    """One group per asset so bootstrap CIs do not treat rows as independent."""
-    grouped: dict[int, list[OutcomeRow]] = {}
-    for outcome in outcomes:
-        grouped.setdefault(outcome.asset_id, []).append(outcome)
-    return [grouped[asset_id] for asset_id in sorted(grouped)]
-
-
 def evaluate_band_outcomes(
     outcomes: list[OutcomeRow],
     *,
