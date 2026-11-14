@@ -16,6 +16,7 @@ import numpy as np
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
+from common.config import get_settings
 from storage import models
 from validation.baselines import (
     base_rate_proportion,
@@ -638,6 +639,26 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
     return out
 
 
+def load_unresolved_outcome_count(session: Session) -> int:
+    """Count outcome rows past their window that still have no label.
+
+    An unresolved row keeps ``evaluated_at IS NULL`` because no lifecycle phase
+    inside its window established collapse or survival. It is withheld from
+    every metric, so the count is reported rather than silently dropped.
+    """
+    window = timedelta(hours=get_settings().risk_outcome_window_hours)
+    now = datetime.now(UTC)
+    scored_ats = session.scalars(
+        select(models.RiskOutcome.scored_at).where(models.RiskOutcome.evaluated_at.is_(None))
+    ).all()
+    count = 0
+    for ts in scored_ats:
+        scored_at = _as_utc(ts)
+        if scored_at is not None and scored_at + window <= now:
+            count += 1
+    return count
+
+
 def load_forecasts(session: Session) -> list[ForecastRow]:
     rows = session.scalars(select(models.Forecast)).all()
     out: list[ForecastRow] = []
@@ -1032,6 +1053,7 @@ def run_harness(
 ) -> ValidationReport:
     """Run the full benchmark over the engine's persisted rows (read-only)."""
     outcomes = load_outcomes(session)
+    unresolved_outcomes = load_unresolved_outcome_count(session)
     forecasts = load_forecasts(session)
     forecast_outcomes = load_forecast_outcomes(session)
     ensemble_history = load_ensemble_history(session)
@@ -1082,6 +1104,7 @@ def run_harness(
             "forecasts": len(forecasts),
             "labels": _count(session, models.Label),
             "lifecycle_events": _count(session, models.LifecycleEvent),
+            "unresolved_outcomes": unresolved_outcomes,
         },
         partition={
             "cutoff": cutoff.isoformat() if cutoff else None,
@@ -1092,7 +1115,14 @@ def run_harness(
             "embargoed_rows": len(embargoed_rows),
             "reference_rows": len(reference_rows),
         },
+        unresolved_outcomes=unresolved_outcomes,
     )
+    if unresolved_outcomes:
+        report.notes.append(
+            f"{unresolved_outcomes} unresolved outcome row(s) are past their "
+            "observation window with no established label; they are excluded from "
+            "every metric and stay unevaluated until the window is backfilled."
+        )
 
     report.cells.extend(evaluate_band_outcomes(eval_rows, regime=regime, min_samples=min_samples))
 

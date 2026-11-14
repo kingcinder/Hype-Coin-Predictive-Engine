@@ -19,6 +19,7 @@ from common.enums import RiskBand
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from storage import models
+from storage.repository import record_health
 
 log = get_logger(__name__)
 
@@ -64,6 +65,10 @@ class RiskOutcomeReport:
 #: window end (including no event at all) cannot label a prediction.
 _COLLAPSE_PHASES = frozenset({"collapse", "dead", "rugged"})
 _SURVIVAL_PHASES = frozenset({"survivor", "parabolic", "saturation"})
+
+#: ``SystemHealth`` component carrying the unresolved-label backlog, so
+#: withheld outcomes are visible in ``/health`` without grepping logs.
+UNRESOLVED_OUTCOME_COMPONENT = "outcome_labels"
 
 
 def _lifecycle_phase_as_of(session: Session, asset_id: int, as_of: datetime) -> str | None:
@@ -262,6 +267,27 @@ def evaluate_outcomes(
         unresolved=unresolved,
     )
 
+    # Publish the backlog to engine health and flag growth, so withheld labels
+    # cannot accumulate silently between passes.
+    previous_unresolved = session.scalar(
+        select(models.SystemHealth.error_count)
+        .where(models.SystemHealth.component == UNRESOLVED_OUTCOME_COMPONENT)
+        .order_by(models.SystemHealth.ts.desc())
+        .limit(1)
+    )
+    grew = previous_unresolved is not None and unresolved > previous_unresolved
+    record_health(
+        session,
+        component=UNRESOLVED_OUTCOME_COMPONENT,
+        state="yellow" if grew else "ok",
+        error_count=unresolved,
+        message=(
+            f"unresolved={unresolved} "
+            f"previous={previous_unresolved if previous_unresolved is not None else 'none'}"
+            f"{' GREW' if grew else ''}"
+        ),
+    )
+
     for band in RiskBand:
         band_outcomes = session.scalars(
             select(models.RiskOutcome).where(
@@ -345,6 +371,7 @@ def evaluate_outcomes(
         "risk_outcome_evaluation",
         evaluated=evaluated,
         unresolved=report.unresolved,
+        unresolved_grew=grew,
         total_flagged=report.total_flagged,
         total_collapsed=report.total_collapsed,
         overall_precision=round(report.overall_precision, 4),

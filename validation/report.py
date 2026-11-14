@@ -49,6 +49,9 @@ class ValidationReport:
     cells: list[MetricCell] = field(default_factory=list)
     suspicious_results: list[dict[str, object]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Outcome rows past their window that still have no established label.
+    # They are withheld from every metric; the count makes the backlog visible.
+    unresolved_outcomes: int = 0
 
     def to_json(self) -> str:
         return json.dumps(
@@ -62,6 +65,7 @@ class ValidationReport:
                 "cells": [cell.as_dict() for cell in self.cells],
                 "suspicious_results": self.suspicious_results,
                 "notes": self.notes,
+                "unresolved_outcomes": self.unresolved_outcomes,
             },
             indent=2,
             default=str,

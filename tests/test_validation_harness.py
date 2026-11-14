@@ -202,6 +202,63 @@ def test_base_rate_brier() -> None:
     assert base_rate_brier(labels) == pytest.approx(0.09)
 
 
+def test_run_harness_reports_unresolved_outcome_backlog(session) -> None:
+    """Unresolved outcome rows are counted in the report and its notes."""
+    from datetime import UTC, datetime, timedelta
+
+    from storage import models
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+    from validation.harness import run_harness
+
+    chain, _source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="Unresolved11111111111111111111111111111111",
+        symbol="UNR",
+        name="Unresolved Fixture",
+        first_seen_at=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    # Far older than any configured observation window, and never evaluated.
+    scored_at = datetime.now(UTC) - timedelta(days=10)
+    score = models.Score(
+        asset_id=asset.id,
+        decision_ts=scored_at,
+        observed_at=scored_at,
+        hype=0.5,
+        ethos=0.5,
+        risk=0.5,
+        liquidity_access=0.5,
+        manipulation=0.1,
+        confidence=0.8,
+        uncertainty=0.2,
+        catalyst=0.3,
+        exit_risk=0.4,
+        research_priority=0.5,
+        risk_band="YELLOW",
+        model_version="test-unresolved",
+    )
+    session.add(score)
+    session.flush()
+    session.add(
+        models.RiskOutcome(
+            asset_id=asset.id,
+            score_id=score.id,
+            risk_band="YELLOW",
+            scored_at=scored_at,
+            lifecycle_phase_at_score="seeding",
+        )
+    )
+    session.commit()
+
+    report = run_harness(session, min_samples=1)
+
+    assert report.unresolved_outcomes == 1
+    assert report.database_digest["unresolved_outcomes"] == 1
+    assert any("unresolved" in note for note in report.notes)
+
+
 # ── run_harness leakage-audit wiring (H24) ──────────────────────────────────
 
 

@@ -14,7 +14,11 @@ import pytest
 from sqlalchemy import select
 
 from common.time import ensure_utc
-from risk_engine.outcomes import evaluate_outcomes, record_risk_outcome
+from risk_engine.outcomes import (
+    UNRESOLVED_OUTCOME_COMPONENT,
+    evaluate_outcomes,
+    record_risk_outcome,
+)
 from storage import models
 from storage.repository import insert_market_snapshot_once
 from tests.conftest import seed_market_asset
@@ -218,6 +222,52 @@ def test_report_counts_unresolved_rows_past_their_window(session) -> None:
         session, decision_ts=EVAL_TS + timedelta(days=1), window_hours=WINDOW_HOURS
     )
     assert report_again.unresolved == 1
+
+
+def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
+    """The backlog is a health component, and growth turns it yellow."""
+    asset = seed_market_asset(session)
+    _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
+
+    held = seed_market_asset(
+        session,
+        address="Held111111111111111111111111111111111111",
+        pair_address="HeldPair11111111111111111111111111111111",
+    )
+    _seed_lifecycle(session, held, "collapse", SCORED_AT + timedelta(days=4))
+
+    def _health_rows() -> list[models.SystemHealth]:
+        return list(
+            session.scalars(
+                select(models.SystemHealth)
+                .where(models.SystemHealth.component == UNRESOLVED_OUTCOME_COMPONENT)
+                .order_by(models.SystemHealth.ts.asc())
+            )
+        )
+
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+    assert report.unresolved == 1
+    rows = _health_rows()
+    assert rows[-1].error_count == 1
+    assert rows[-1].state == "ok"  # first observation is a baseline, not growth
+
+    _seed_prediction(session, held, model_version="test-held")
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+    assert report.unresolved == 2
+    rows = _health_rows()
+    assert rows[-1].error_count == 2
+    assert rows[-1].state == "yellow"
+    assert "GREW" in (rows[-1].message or "")
+
+    # No new withheld rows: still counted, no longer flagged as growing.
+    report = evaluate_outcomes(
+        session, decision_ts=EVAL_TS + timedelta(hours=1), window_hours=WINDOW_HOURS
+    )
+    assert report.unresolved == 2
+    rows = _health_rows()
+    assert rows[-1].error_count == 2
+    assert rows[-1].state == "ok"
 
 
 def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -> None:

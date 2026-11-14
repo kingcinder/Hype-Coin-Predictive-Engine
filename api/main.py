@@ -313,6 +313,7 @@ def latest_validation_report() -> ValidationReportResponse | JSONResponse:
         git_sha=str(report.get("git_sha") or ""),
         model_version=str(report.get("model_version") or ""),
         leakage_crosscheck_ran=guarded["leakage_crosscheck_ran"],
+        unresolved_outcomes=int(report.get("unresolved_outcomes") or 0),
         cells=guarded["cells"],
         suspicious_results=report.get("suspicious_results") or [],
         notes=report.get("notes") or [],

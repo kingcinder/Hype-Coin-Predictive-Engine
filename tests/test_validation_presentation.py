@@ -118,3 +118,5 @@ def test_validation_api_surfaces_crosschecked_warning(
     payload = response.json()
     assert payload["leakage_crosscheck_ran"] is True
     assert payload["cells"][0]["status"] == "flagged_suspicious"
+    # Reports written before the backlog field default to zero, not a 500.
+    assert payload["unresolved_outcomes"] == 0

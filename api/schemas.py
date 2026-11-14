@@ -89,6 +89,7 @@ class ValidationReportResponse(BaseModel):
     git_sha: str
     model_version: str
     leakage_crosscheck_ran: bool
+    unresolved_outcomes: int = 0
     cells: list[ValidationMetricCell]
     suspicious_results: list[dict[str, Any]]
     notes: list[str]

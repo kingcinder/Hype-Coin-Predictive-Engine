@@ -1542,6 +1542,13 @@ def validation_integrity_view() -> None:
             "The point-in-time leakage cross-check is absent. Near-perfect concordance "
             "values are suppressed by the API."
         )
+    unresolved = int(report.get("unresolved_outcomes") or 0)
+    if unresolved:
+        st.warning(
+            f"{unresolved} outcome label(s) are unresolved: past their observation window "
+            "with no established outcome. They are withheld from every validation metric "
+            "until the window is backfilled."
+        )
     cells = report.get("cells") or []
     for cell in cells:
         if cell.get("status") == "suppressed_missing_crosscheck":
