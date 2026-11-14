@@ -13,8 +13,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.main import health as health_endpoint
 from common.config import get_settings
 from common.logging import configure_logging, get_logger
+from ingestion import service as ingestion_service
+from ingestion.service import IngestionService
 from storage.database import get_session
 
 _MARKERS = {
@@ -94,3 +97,45 @@ def test_status_payload_and_logs_contain_no_credential_markers(
     for marker in _MARKERS.values():
         assert marker not in response.text
         assert marker not in logs
+
+
+def test_provider_http_failure_does_not_leak_url_key_to_logs_or_health_payload(
+    session, credentialed_settings, monkeypatch, capfd
+) -> None:
+    """Provider HTTP errors include request URLs; both telemetry surfaces redact keys."""
+    import httpx
+
+    marker = _MARKERS["BIRDEYE_API_KEY"]
+    request = httpx.Request(
+        "GET",
+        f"https://public-api.birdeye.so/defi/tokens/new_listing?api-key={marker}",
+    )
+    response = httpx.Response(500, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as provider_error:
+        response.raise_for_status()
+    assert marker in str(provider_error.value)
+
+    class FailingBirdeyeClient:
+        BASE_URL = "https://public-api.birdeye.so"
+
+        def __init__(self, api_key: str | None = None) -> None:
+            assert api_key == marker
+
+        def new_tokens(self, limit: int = 20) -> list[dict]:
+            raise provider_error.value
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ingestion_service, "BirdeyeClient", FailingBirdeyeClient)
+    service = IngestionService()
+    assert service._ingest_birdeye_solana(session) == 0
+
+    payload = health_endpoint(session).model_dump_json()
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err
+    assert "birdeye_ingestion_failed" in logs
+    assert marker not in payload
+    assert marker not in logs
+    assert "api-key=***" in payload
+    assert "api-key=***" in logs

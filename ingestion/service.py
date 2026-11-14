@@ -593,6 +593,7 @@ class IngestionService:
             )
         except Exception as exc:  # noqa: BLE001
             status = getattr(getattr(exc, "response", None), "status_code", None)
+            safe_error = redact_url(str(exc))
             if status in (401, 403):
                 # A rejected key is configuration, not an outage: name the
                 # variable an operator must fix so this never reads as flaky.
@@ -611,10 +612,10 @@ class IngestionService:
                     session,
                     component="source:birdeye",
                     state="red",
-                    message=str(exc),
+                    message=safe_error,
                     error_count=1,
                 )
-                log.warning("birdeye_ingestion_failed", error=str(exc))
+                log.warning("birdeye_ingestion_failed", error=safe_error)
         finally:
             client.close()
         return count
