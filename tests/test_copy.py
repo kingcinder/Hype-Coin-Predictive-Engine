@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -12,6 +12,7 @@ from storage import models
 from storage.write_queue import start_write_queue, stop_write_queue
 from tests.conftest import seed_market_asset
 from trading import copy
+from trading.errors import TradeRefused
 
 NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
@@ -80,3 +81,76 @@ def test_open_gate_queues_pending_and_approve_delay(session, queue, enabled, mon
     session.commit()
     killed = copy.approve_copy(session, pending.id, now=NOW)
     assert killed.status == "refused"
+
+
+def test_second_approve_is_idempotent(session, queue, enabled, monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
+    session.commit()
+    seed_market_asset(session)
+    pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
+    assert pending is not None
+
+    opened: list[int] = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def open_trade(self, *args, **kwargs) -> int:
+            opened.append(1)
+            return 99
+
+    monkeypatch.setattr(copy, "get_candidate", lambda *args, **kwargs: {"mint": "M"})
+    monkeypatch.setattr("trading.ledger.TradeEngine", FakeEngine)
+
+    first = copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=60))
+    second = copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=120))
+
+    assert first.id == second.id == pending.id
+    assert first.status == second.status == "executed"
+    assert first.detail == second.detail == "position_id=99"
+    assert len(opened) == 1
+    assert len(_rows(session, models.CopyLog)) == 1
+    assert _rows(session, models.LedgerOpenPosition) == []
+
+
+def test_overlapping_approve_cannot_open_twice(session, queue, enabled, monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "live_trading_enabled", "1")
+    monkeypatch.setattr(settings, "live_max_bankroll_sol", Decimal("1"))
+    monkeypatch.setattr(settings, "live_daily_loss_limit_sol", Decimal("1"))
+    session.add(models.LiveGateState(ts=NOW, kind="armed", reason="test"))
+    session.commit()
+    seed_market_asset(session)
+    pending = copy.maybe_queue_copy(session, "W", "M", Decimal("1"), now=NOW)
+    assert pending is not None
+
+    opened: list[int] = []
+    refused: list[str] = []
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def open_trade(self, *args, **kwargs) -> int:
+            opened.append(1)
+            try:
+                copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=90))
+            except TradeRefused as exc:
+                refused.append(exc.reason)
+            return 99
+
+    monkeypatch.setattr(copy, "get_candidate", lambda *args, **kwargs: {"mint": "M"})
+    monkeypatch.setattr("trading.ledger.TradeEngine", FakeEngine)
+
+    result = copy.approve_copy(session, pending.id, now=NOW + timedelta(seconds=60))
+
+    assert result.status == "executed"
+    assert len(opened) == 1
+    assert refused == ["copy_approval_in_progress"]
+    assert len(_rows(session, models.CopyLog)) == 1
+    assert _rows(session, models.LedgerOpenPosition) == []

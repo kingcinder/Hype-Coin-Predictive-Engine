@@ -110,7 +110,13 @@ def approve_copy(
     settings = get_settings()
     now = ensure_utc(now or utc_now())
     pending = session.get(models.CopyLog, log_id)
-    if pending is None or pending.status != "pending":
+    if pending is None:
+        raise TradeRefused("no_pending_copy")
+    if pending.status == "executed":
+        return pending
+    if pending.status == "approving":
+        raise TradeRefused("copy_approval_in_progress")
+    if pending.status != "pending":
         raise TradeRefused("no_pending_copy")
     try:
         require_open(session)
@@ -150,6 +156,36 @@ def approve_copy(
             now=now,
             use_write_queue=True,
         )
+    original_detail = pending.detail
+
+    def _claim(write_session: Session) -> bool:
+        row = write_session.get(models.CopyLog, pending.id)
+        if row is None or row.status != "pending":
+            return False
+        row.status = "approving"
+        row.detail = "approval_in_progress"
+        return True
+
+    if not queued_write(_claim):
+        session.expire_all()
+        current = session.get(models.CopyLog, pending.id)
+        if current is not None and current.status == "executed":
+            return current
+        raise TradeRefused("copy_approval_in_progress")
+    pending.status = "approving"
+    pending.detail = "approval_in_progress"
+
+    def _release_claim() -> None:
+        def _persist(write_session: Session) -> None:
+            row = write_session.get(models.CopyLog, pending.id)
+            if row is not None:
+                row.status = "pending"
+                row.detail = original_detail
+
+        queued_write(_persist)
+        pending.status = "pending"
+        pending.detail = original_detail
+
     from trading.ledger import TradeEngine  # noqa: PLC0415 - avoids import cycle.
 
     try:
@@ -160,6 +196,7 @@ def approve_copy(
             why_entered=f"copy:{pending.wallet}",
         )
     except TradeRefused as exc:
+        _release_claim()
         return _log(
             session,
             wallet=pending.wallet,
@@ -170,13 +207,18 @@ def approve_copy(
             now=now,
             use_write_queue=True,
         )
-    return _log(
-        session,
-        wallet=pending.wallet,
-        mint=pending.mint,
-        size_sol=pending.size_sol,
-        status="executed",
-        detail=f"position_id={position_id}",
-        now=now,
-        use_write_queue=True,
-    )
+    except Exception:
+        _release_claim()
+        raise
+    detail = f"position_id={position_id}"
+
+    def _mark_executed(write_session: Session) -> None:
+        row = write_session.get(models.CopyLog, pending.id)
+        if row is not None:
+            row.status = "executed"
+            row.detail = detail
+
+    queued_write(_mark_executed)
+    pending.status = "executed"
+    pending.detail = detail
+    return pending
