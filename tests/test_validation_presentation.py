@@ -120,3 +120,40 @@ def test_validation_api_surfaces_crosschecked_warning(
     assert payload["cells"][0]["status"] == "flagged_suspicious"
     # Reports written before the backlog field default to zero, not a 500.
     assert payload["unresolved_outcomes"] == 0
+
+
+def test_validation_api_returns_report_unresolved_backlog(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A newest report carrying a backlog surfaces it unchanged on /validation/latest."""
+    monkeypatch.setenv("ENGINE_API_TOKEN", "test-api-token-not-a-secret")
+    get_settings.cache_clear()
+    monkeypatch.setattr(api_main, "VALIDATION_REPORTS_DIR", tmp_path)
+    (tmp_path / "validation-with-backlog.json").write_text(
+        json.dumps(
+            {
+                "generated_at_utc": "2026-11-14T00:00:00+00:00",
+                "git_sha": "test",
+                "model_version": "fixture",
+                "cells": [],
+                "suspicious_results": [],
+                "notes": [
+                    "7 unresolved outcome row(s) are past their observation window "
+                    "with no established label"
+                ],
+                "unresolved_outcomes": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        response = TestClient(
+            app, headers={"Authorization": "Bearer test-api-token-not-a-secret"}
+        ).get("/validation/latest")
+    finally:
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["unresolved_outcomes"] == 7
+    assert any("unresolved" in note for note in payload["notes"])
