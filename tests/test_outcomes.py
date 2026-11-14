@@ -257,7 +257,8 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
     assert report.unresolved == 2
     rows = _health_rows()
     assert rows[-1].error_count == 2
-    assert rows[-1].state == "yellow"
+    # Red, so /health reports degraded instead of ok.
+    assert rows[-1].state == "red"
     assert "GREW" in (rows[-1].message or "")
 
     # No new withheld rows: still counted, no longer flagged as growing.

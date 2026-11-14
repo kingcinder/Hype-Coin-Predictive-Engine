@@ -239,6 +239,36 @@ def test_confidence_calibration_status_reports_active_fallback(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_growing_unresolved_backlog_degrades_health_status(session) -> None:
+    """A red outcome-label backlog must degrade /health, not sit under ok."""
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app, headers=_AUTH_HEADERS)
+        assert client.get("/health").json()["status"] == "ok"
+
+        record_health(
+            session,
+            component="outcome_labels",
+            state="red",
+            message="unresolved=4 previous=2 GREW",
+            error_count=4,
+        )
+        session.commit()
+
+        body = client.get("/health").json()
+        assert body["status"] == "degraded"
+        row = next(c for c in body["components"] if c["component"] == "outcome_labels")
+        assert row["state"] == "red"
+        assert row["error_count"] == 4
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_densify_labels_endpoint_ignores_future_observed_price(session) -> None:
     asset = seed_market_asset(session, symbol="DENSEAPI")
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))

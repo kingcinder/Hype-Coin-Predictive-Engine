@@ -276,10 +276,12 @@ def evaluate_outcomes(
         .limit(1)
     )
     grew = previous_unresolved is not None and unresolved > previous_unresolved
+    # Growth is red, not yellow: /health treats yellow as acceptable, so a
+    # yellow-only flag would leave the overall status ok forever.
     record_health(
         session,
         component=UNRESOLVED_OUTCOME_COMPONENT,
-        state="yellow" if grew else "ok",
+        state="red" if grew else "ok",
         error_count=unresolved,
         message=(
             f"unresolved={unresolved} "
