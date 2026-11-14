@@ -193,6 +193,33 @@ def test_price_change_ignores_snapshots_after_window_end(session) -> None:
     assert outcome.price_change_pct == pytest.approx(1.0)
 
 
+def test_report_counts_unresolved_rows_past_their_window(session) -> None:
+    asset = seed_market_asset(session)
+    withheld = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
+    # A later prediction whose 48h window has not elapsed yet is not unresolved.
+    _seed_prediction(session, asset, decision_ts=SCORED_AT + timedelta(days=4))
+
+    resolved_asset = seed_market_asset(
+        session,
+        address="Resolved111111111111111111111111111111111",
+        pair_address="ResolvedPair11111111111111111111111111111",
+    )
+    _seed_prediction(session, resolved_asset, model_version="test-resolved")
+    _seed_lifecycle(session, resolved_asset, "collapse", SCORED_AT + timedelta(hours=24))
+
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert withheld.evaluated_at is None
+    assert report.unresolved == 1
+
+    # The backlog stays visible on later passes instead of vanishing.
+    report_again = evaluate_outcomes(
+        session, decision_ts=EVAL_TS + timedelta(days=1), window_hours=WINDOW_HOURS
+    )
+    assert report_again.unresolved == 1
+
+
 def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -> None:
     inside = seed_market_asset(
         session,

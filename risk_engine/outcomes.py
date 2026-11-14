@@ -47,6 +47,10 @@ class RiskOutcomeReport:
     overall_precision: float = 0.0
     total_flagged: int = 0
     total_collapsed: int = 0
+    # Predictions past their window that still have no established outcome
+    # (evaluated_at IS NULL). A growing count means withheld labels are
+    # accumulating instead of being resolved.
+    unresolved: int = 0
     # ML-specific band outcomes, keyed by the band the ML scorer predicted
     # (from RiskOutcome.details["ml_risk_band"]).  These feed the calibrator's
     # ML probability thresholds so the ML scorer calibrates independently of
@@ -221,6 +225,7 @@ def evaluate_outcomes(
     ).all()
 
     evaluated = 0
+    unresolved = 0
     for outcome in outcomes:
         score_time = ensure_utc(outcome.scored_at)
         window_end = score_time + window
@@ -233,7 +238,9 @@ def evaluate_outcomes(
             # Unresolved: no lifecycle state in the window, or a phase that is
             # neither collapse nor survival.  Do NOT stamp evaluated_at — an
             # outcome that cannot be established must not become a failure.
+            # Count it so a growing withheld-label backlog is visible.
             outcome.lifecycle_phase_at_eval = phase or "unknown"
+            unresolved += 1
             continue
         outcome.lifecycle_phase_at_eval = phase
         outcome.price_change_pct = _price_change_since(
@@ -252,6 +259,7 @@ def evaluate_outcomes(
     report = RiskOutcomeReport(
         window_hours=window.total_seconds() / 3600,
         observation_ts=decision_ts,
+        unresolved=unresolved,
     )
 
     for band in RiskBand:
@@ -336,6 +344,7 @@ def evaluate_outcomes(
     log.info(
         "risk_outcome_evaluation",
         evaluated=evaluated,
+        unresolved=report.unresolved,
         total_flagged=report.total_flagged,
         total_collapsed=report.total_collapsed,
         overall_precision=round(report.overall_precision, 4),
