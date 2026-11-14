@@ -56,19 +56,44 @@ class RiskOutcomeReport:
     ml_total_collapsed: int = 0
 
 
-def _latest_lifecycle_phase(session: Session, asset_id: int) -> str | None:
-    """Return the most recent lifecycle phase for an asset."""
+#: Lifecycle phases that establish an outcome.  A phase outside both sets at
+#: window end (including no event at all) cannot label a prediction.
+_COLLAPSE_PHASES = frozenset({"collapse", "dead", "rugged"})
+_SURVIVAL_PHASES = frozenset({"survivor", "parabolic", "saturation"})
+
+
+def _lifecycle_phase_as_of(session: Session, asset_id: int, as_of: datetime) -> str | None:
+    """Return the most recent lifecycle phase at or before ``as_of``.
+
+    The bound is the point: a label for a prediction scored at ``T0`` may only
+    see events inside its observation window ``[T0, T0 + window]``.  An
+    unbounded "latest" lookup would label a Day-0 prediction with a collapse
+    that happened after the window ended.
+    """
     event = session.scalar(
         select(models.LifecycleEvent)
-        .where(models.LifecycleEvent.asset_id == asset_id)
+        .where(
+            models.LifecycleEvent.asset_id == asset_id,
+            models.LifecycleEvent.ts <= ensure_utc(as_of),
+        )
         .order_by(models.LifecycleEvent.ts.desc())
         .limit(1)
     )
     return event.phase if event else None
 
 
-def _price_change_since(session: Session, asset_id: int, since: datetime) -> float | None:
-    """Return the percentage price change from `since` to the latest snapshot."""
+def _price_change_since(
+    session: Session,
+    asset_id: int,
+    since: datetime,
+    *,
+    until: datetime,
+) -> float | None:
+    """Return the price change from `since` to the last snapshot at/before `until`.
+
+    ``until`` is the observation window end: a price snapshot after it must not
+    stand in for the price at window end.
+    """
     # Use the same pair lookup pattern as the rest of the codebase: first pair
     # matching base_asset_id with a USDC-like quote.  Fall back to any pair.
     pair = session.scalar(
@@ -102,6 +127,7 @@ def _price_change_since(session: Session, asset_id: int, since: datetime) -> flo
         .where(
             models.MarketSnapshot.pair_id == pair,
             models.MarketSnapshot.ts > since,
+            models.MarketSnapshot.ts <= ensure_utc(until),
             models.MarketSnapshot.price_usd.is_not(None),
             models.MarketSnapshot.price_usd > 0,
         )
@@ -151,7 +177,9 @@ def record_risk_outcome(
             risk_band=risk_band,
             score_id=score_id,
             scored_at=ensure_utc(decision_ts),
-            lifecycle_phase_at_score=(_latest_lifecycle_phase(session, asset_id) or "unknown"),
+            lifecycle_phase_at_score=(
+                _lifecycle_phase_as_of(session, asset_id, decision_ts) or "unknown"
+            ),
             details={
                 "ml_risk_band": ml_risk_band,
                 "ml_prediction": ml_risk_band is not None,
@@ -174,6 +202,13 @@ def evaluate_outcomes(
     For each RiskOutcome row whose scored_at + window is in the past,
     check what happened: did the token collapse? rugged? survive?
     Update the outcome row and compute band-level precision metrics.
+
+    Labels are bounded to each prediction's own observation window
+    ``[scored_at, scored_at + window]``: only lifecycle state at or before
+    window end may label the row.  When no lifecycle phase inside that window
+    establishes collapse or survival, the row is left unresolved
+    (``evaluated_at`` stays NULL) so it is never counted as a non-survival and
+    a later pass can retry it if backfilled data resolves the window.
     """
     settings = get_settings()
     decision_ts = ensure_utc(decision_ts or utc_now())
@@ -188,17 +223,26 @@ def evaluate_outcomes(
     evaluated = 0
     for outcome in outcomes:
         score_time = ensure_utc(outcome.scored_at)
-        if score_time + window > decision_ts:
+        window_end = score_time + window
+        if window_end > decision_ts:
             continue
-        # Evaluate: check lifecycle phase and price change
-        phase = _latest_lifecycle_phase(session, outcome.asset_id)
-        price_change = _price_change_since(session, outcome.asset_id, score_time)
-        outcome.lifecycle_phase_at_eval = phase or "unknown"
-        outcome.price_change_pct = price_change
+        # Only lifecycle state inside [score_time, window_end] may label this
+        # prediction.
+        phase = _lifecycle_phase_as_of(session, outcome.asset_id, window_end)
+        if phase not in _COLLAPSE_PHASES and phase not in _SURVIVAL_PHASES:
+            # Unresolved: no lifecycle state in the window, or a phase that is
+            # neither collapse nor survival.  Do NOT stamp evaluated_at — an
+            # outcome that cannot be established must not become a failure.
+            outcome.lifecycle_phase_at_eval = phase or "unknown"
+            continue
+        outcome.lifecycle_phase_at_eval = phase
+        outcome.price_change_pct = _price_change_since(
+            session, outcome.asset_id, score_time, until=window_end
+        )
         outcome.evaluated_at = decision_ts
-        outcome.collapsed = phase in ("collapse", "dead", "rugged")
+        outcome.collapsed = phase in _COLLAPSE_PHASES
         outcome.rugged = phase == "rugged"
-        outcome.survived = phase in ("survivor", "parabolic", "saturation")
+        outcome.survived = phase in _SURVIVAL_PHASES
         evaluated += 1
 
     if evaluated > 0:

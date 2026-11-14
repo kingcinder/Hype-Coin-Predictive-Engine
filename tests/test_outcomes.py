@@ -1,0 +1,218 @@
+"""Outcome labels must be bounded to their prediction's observation window.
+
+Regression coverage for the red-team finding that ``evaluate_outcomes`` used an
+unbounded "latest lifecycle event" lookup: a token that collapsed after its
+window ended was labelled collapsed, leaking post-window knowledge into band
+calibration, the validation metrics, and the ensemble feedback loop.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select
+
+from common.time import ensure_utc
+from risk_engine.outcomes import evaluate_outcomes, record_risk_outcome
+from storage import models
+from storage.repository import insert_market_snapshot_once
+from tests.conftest import seed_market_asset
+
+SCORED_AT = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+WINDOW_HOURS = 48.0
+WINDOW_END = SCORED_AT + timedelta(hours=WINDOW_HOURS)
+EVAL_TS = SCORED_AT + timedelta(days=5)
+
+
+def _seed_score(
+    session,
+    asset: models.Asset,
+    *,
+    decision_ts: datetime = SCORED_AT,
+    model_version: str = "test-outcomes",
+) -> models.Score:
+    score = models.Score(
+        asset_id=asset.id,
+        decision_ts=decision_ts,
+        observed_at=decision_ts,
+        hype=0.5,
+        ethos=0.5,
+        risk=90.0,
+        liquidity_access=0.5,
+        manipulation=0.1,
+        confidence=80.0,
+        uncertainty=0.2,
+        catalyst=0.3,
+        exit_risk=0.9,
+        research_priority=0.5,
+        risk_band="BLACK",
+        model_version=model_version,
+    )
+    session.add(score)
+    session.flush()
+    return score
+
+
+def _seed_lifecycle(
+    session, asset: models.Asset, phase: str, ts: datetime
+) -> models.LifecycleEvent:
+    event = models.LifecycleEvent(
+        asset_id=asset.id,
+        phase=phase,
+        event_type="phase_transition",
+        ts=ts,
+        observed_at=ts,
+        confidence=0.9,
+        details={},
+    )
+    session.add(event)
+    session.flush()
+    return event
+
+
+def _seed_prediction(
+    session,
+    asset: models.Asset,
+    *,
+    decision_ts: datetime = SCORED_AT,
+    model_version: str = "test-outcomes",
+) -> models.RiskOutcome:
+    score = _seed_score(session, asset, decision_ts=decision_ts, model_version=model_version)
+    record_risk_outcome(
+        session,
+        asset_id=asset.id,
+        risk_band="BLACK",
+        score_id=score.id,
+        decision_ts=decision_ts,
+    )
+    outcome = session.scalar(
+        select(models.RiskOutcome).where(models.RiskOutcome.score_id == score.id)
+    )
+    assert outcome is not None
+    return outcome
+
+
+def test_post_window_collapse_does_not_label_prediction(session) -> None:
+    """Score Day 0, window ends Day 2, collapse Day 4 -> unresolved, not collapsed."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is False
+    assert outcome.survived is False
+    assert outcome.evaluated_at is None
+    assert outcome.lifecycle_phase_at_eval == "unknown"
+
+
+def test_collapse_inside_window_labels_collapsed(session) -> None:
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is True
+    assert outcome.rugged is False
+    assert outcome.survived is False
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+    assert outcome.lifecycle_phase_at_eval == "collapse"
+
+
+def test_rug_inside_window_labels_rugged_and_collapsed(session) -> None:
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "rugged", SCORED_AT + timedelta(hours=12))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.rugged is True
+    assert outcome.collapsed is True
+    assert outcome.survived is False
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+
+
+def test_survival_phase_at_window_end_labels_survived(session) -> None:
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "survivor", SCORED_AT + timedelta(hours=30))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.survived is True
+    assert outcome.collapsed is False
+    assert outcome.rugged is False
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+    assert outcome.lifecycle_phase_at_eval == "survivor"
+
+
+def test_no_lifecycle_events_in_window_stays_unresolved(session) -> None:
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is False
+    assert outcome.survived is False
+    assert outcome.evaluated_at is None
+    assert outcome.lifecycle_phase_at_eval == "unknown"
+
+
+def test_price_change_ignores_snapshots_after_window_end(session) -> None:
+    """The last in-window snapshot is the exit price; later ones are ignored."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "survivor", SCORED_AT + timedelta(hours=40))
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert pair is not None
+    assert source is not None
+
+    # seed_market_asset's last entry snapshot is 1.10 at SCORED_AT.
+    for hours, price in ((24, 2.20), (72, 11.0)):
+        ts = SCORED_AT + timedelta(hours=hours)
+        insert_market_snapshot_once(
+            session,
+            pair_id=pair.id,
+            source_id=source.id,
+            ts=ts,
+            observed_at=ts,
+            price_usd=price,
+            volume_usd=50_000,
+            buys=30,
+            sells=5,
+            trades=35,
+        )
+    session.flush()
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    # (2.20 - 1.10) / 1.10; the 11.0 post-window snapshot must not be used.
+    assert outcome.price_change_pct == pytest.approx(1.0)
+
+
+def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -> None:
+    inside = seed_market_asset(
+        session,
+        address="BoundaryInside1111111111111111111111111111",
+        pair_address="BoundaryInsidePair111111111111111111111111",
+    )
+    after = seed_market_asset(
+        session,
+        address="BoundaryAfter11111111111111111111111111111",
+        pair_address="BoundaryAfterPair1111111111111111111111111",
+    )
+    inside_outcome = _seed_prediction(session, inside, model_version="test-boundary-inside")
+    after_outcome = _seed_prediction(session, after, model_version="test-boundary-after")
+    _seed_lifecycle(session, inside, "collapse", WINDOW_END)
+    _seed_lifecycle(session, after, "collapse", WINDOW_END + timedelta(seconds=1))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert inside_outcome.collapsed is True
+    assert ensure_utc(inside_outcome.evaluated_at) == EVAL_TS
+    assert after_outcome.collapsed is False
+    assert after_outcome.evaluated_at is None
+    assert after_outcome.lifecycle_phase_at_eval == "unknown"

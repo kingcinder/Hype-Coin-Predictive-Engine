@@ -141,14 +141,15 @@ def test_ensemble_pipeline_stores_separate_bands_and_learns(session, monkeypatch
     assert details.get("heuristic_band") == "GREEN"
     assert outcome.risk_band == "BLACK"  # rule band is its own column
 
-    # Token collapses after the observation window.
+    # Token collapses inside the 48h observation window (a collapse after the
+    # window would now leave the outcome unresolved, by design).
     eval_ts = DECISION + timedelta(hours=49)
     session.add(
         models.LifecycleEvent(
             asset_id=asset.id,
             phase="collapse",
             event_type="phase_transition",
-            ts=eval_ts,
+            ts=DECISION + timedelta(hours=40),
             observed_at=eval_ts,
             confidence=0.9,
             details={},
