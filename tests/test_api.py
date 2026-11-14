@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from api.main import app
+from api.main import app, rpc_pool_states
 from common.config import get_settings
 from fingerprint.engine import FingerprintEngine
 from pump_physics import run_lifecycle
@@ -460,6 +460,23 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
     session.add(
         models.RpcPoolSnapshot(
             chain_slug="base",
+            url="https://retired-base.example.com",
+            ts=decision_ts - timedelta(minutes=5),
+            health=1.0,
+            consecutive_failures=0,
+            down=False,
+            last_probe_at=None,
+            last_probe_ok=None,
+            probe_count=0,
+            probe_successes=0,
+            probe_failures=0,
+            request_count=23,
+            probe_history=[],
+        )
+    )
+    session.add(
+        models.RpcPoolSnapshot(
+            chain_slug="base",
             url="https://persisted-base.example.com",
             ts=decision_ts,
             health=0.25,
@@ -470,31 +487,26 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
             probe_count=4,
             probe_successes=1,
             probe_failures=3,
+            request_count=7,
             probe_history=[{"ts": decision_ts.isoformat(), "ok": False}],
         )
     )
     session.commit()
 
-    def override_session():
-        yield session
-
-    app.dependency_overrides[get_session] = override_session
-    try:
-        client = TestClient(app, headers=_AUTH_HEADERS)
-        base = next(row for row in client.get("/rpc/pool").json() if row["chain"] == "base")
-        assert base["state"] == "red"
-        endpoint = base["endpoints"][0]
-        assert endpoint["url"] == "https://persisted-base.example.com"
-        assert endpoint["health"] == 0.25
-        assert endpoint["consecutive_failures"] == 3
-        assert endpoint["down"] is True
-        assert endpoint["last_probe_ok"] is False
-        assert endpoint["probe_count"] == 4
-        assert endpoint["probe_successes"] == 1
-        assert endpoint["probe_failures"] == 3
-        assert endpoint["probe_history"][0]["ok"] is False
-    finally:
-        app.dependency_overrides.clear()
+    base = next(row for row in rpc_pool_states(session) if row.chain == "base")
+    assert base.state == "red"
+    assert [endpoint.url for endpoint in base.endpoints] == ["https://persisted-base.example.com"]
+    endpoint = base.endpoints[0]
+    assert endpoint.url == "https://persisted-base.example.com"
+    assert endpoint.health == 0.25
+    assert endpoint.consecutive_failures == 3
+    assert endpoint.down is True
+    assert endpoint.last_probe_ok is False
+    assert endpoint.probe_count == 4
+    assert endpoint.probe_successes == 1
+    assert endpoint.probe_failures == 3
+    assert endpoint.request_count == 7
+    assert endpoint.probe_history[0].ok is False
 
 
 def test_velocity_features_endpoint_reports_live_values(session) -> None:

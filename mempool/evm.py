@@ -79,6 +79,8 @@ class EVMFactoryWatcher:
     # ------------------------------------------------------------------- helpers
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
+        if self._pool is not None:
+            self._pool.record_request(self._pool_url)
         try:
             data = self.http.post_json(
                 "/",

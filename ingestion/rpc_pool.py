@@ -40,6 +40,7 @@ class EndpointState:
     probe_successes: int = 0
     probe_failures: int = 0
     probe_history: tuple[ProbeRecord, ...] = ()
+    request_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class RpcEndpointPool:
         }
         self._probe_counts: dict[str, int] = {url: 0 for url in self.endpoints}
         self._probe_successes: dict[str, int] = {url: 0 for url in self.endpoints}
+        self._request_counts: dict[str, int] = {url: 0 for url in self.endpoints}
 
     @property
     def enabled(self) -> bool:
@@ -154,6 +156,12 @@ class RpcEndpointPool:
                 self._health[url] = min(1.0, self._health[url] + HEALTH_SUCCESS_BOOST)
             self._consecutive_failures[url] = 0
 
+    def record_request(self, url: str) -> None:
+        """Count one attempted JSON-RPC request, excluding pool probes."""
+        with self._lock:
+            if url in self._request_counts:
+                self._request_counts[url] += 1
+
     def mark_failure(self, url: str) -> None:
         with self._lock:
             if url not in self._health:
@@ -185,6 +193,7 @@ class RpcEndpointPool:
                     probe_successes=self._probe_successes[url],
                     probe_failures=self._probe_counts[url] - self._probe_successes[url],
                     probe_history=tuple(self._probe_history[url]),
+                    request_count=self._request_counts[url],
                 )
                 for url in self.endpoints
             ]
@@ -454,6 +463,7 @@ def persist_pool_snapshots(session: Session, *, ts: datetime | None = None) -> i
                         {"ts": probe.ts.isoformat(), "ok": probe.ok}
                         for probe in state.probe_history
                     ],
+                    request_count=state.request_count,
                 )
             )
             count += 1

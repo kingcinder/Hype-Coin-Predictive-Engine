@@ -155,6 +155,8 @@ class LiquidityRemovalWatcher:
         pool_addresses: list[str],
     ) -> list[dict[str, Any]]:
         with HttpClient(base_url=rpc_url) as http:
+            if pool is not None:
+                pool.record_request(rpc_url)
             latest_payload = http.post_json(
                 "/",
                 json={
@@ -168,6 +170,8 @@ class LiquidityRemovalWatcher:
             if latest is None:
                 raise RuntimeError(f"{chain_slug}: invalid eth_blockNumber response")
             start = max(0, latest - max(1, self.settings.liquidity_removal_lookback_blocks))
+            if pool is not None:
+                pool.record_request(rpc_url)
             payload = http.post_json(
                 "/",
                 json={

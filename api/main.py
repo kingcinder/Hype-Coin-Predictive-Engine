@@ -1641,23 +1641,21 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
     """Per-chain RPC pool state, preferring the worker's persisted snapshots.
 
     The worker and API commonly run in separate processes. The API therefore
-    reads the latest endpoint snapshot from the database and only falls back to
-    its local in-memory pool before the first worker scan.
+    reads every endpoint from each chain's latest scan snapshot and only falls
+    back to its local in-memory pool before the first worker scan.
     """
     latest = (
         select(
             models.RpcPoolSnapshot.chain_slug,
-            models.RpcPoolSnapshot.url,
             func.max(models.RpcPoolSnapshot.ts).label("max_ts"),
         )
-        .group_by(models.RpcPoolSnapshot.chain_slug, models.RpcPoolSnapshot.url)
+        .group_by(models.RpcPoolSnapshot.chain_slug)
         .subquery()
     )
     persisted = session.scalars(
         select(models.RpcPoolSnapshot).join(
             latest,
             (models.RpcPoolSnapshot.chain_slug == latest.c.chain_slug)
-            & (models.RpcPoolSnapshot.url == latest.c.url)
             & (models.RpcPoolSnapshot.ts == latest.c.max_ts),
         )
     ).all()
@@ -1682,6 +1680,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_count=row.probe_count,
                     probe_successes=row.probe_successes,
                     probe_failures=row.probe_failures,
+                    request_count=row.request_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe["ts"], ok=bool(probe["ok"]))
                         for probe in (row.probe_history or [])
@@ -1705,6 +1704,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_count=state.probe_count,
                     probe_successes=state.probe_successes,
                     probe_failures=state.probe_failures,
+                    request_count=state.request_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe.ts, ok=probe.ok) for probe in state.probe_history
                     ],

@@ -192,6 +192,8 @@ class SolanaRpcClient:
         self.http.close()
 
     def rpc(self, method: str, params: list[Any] | None = None) -> Any:
+        if self._pool is not None:
+            self._pool.record_request(self._pool_url or self.http.base_url)
         try:
             data = self.http.post_json(
                 "/",
