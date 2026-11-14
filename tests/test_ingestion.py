@@ -1120,6 +1120,72 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert "2 holder rows across 1 chains" in (health.message or "")
 
 
+def test_birdeye_without_api_key_skips_feed_and_reports_configuration(session, monkeypatch) -> None:
+    """No key is a configuration state: skip the request, say so, stay yellow."""
+    seed_reference(session)
+    monkeypatch.setattr(get_settings(), "birdeye_api_key", None)
+
+    class UnexpectedClient:
+        BASE_URL = "https://public-api.birdeye.so"
+
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("Birdeye was called without BIRDEYE_API_KEY")
+
+    monkeypatch.setattr(ingestion_service, "BirdeyeClient", UnexpectedClient)
+    service = IngestionService()
+
+    assert service._ingest_birdeye_solana(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "yellow"
+    assert "BIRDEYE_API_KEY" in (health.message or "")
+    assert "not set" in (health.message or "")
+    assert "skipped" in (health.message or "")
+    assert health.error_count == 0
+
+
+def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkeypatch) -> None:
+    """A set-but-rejected key must read as misconfiguration, not an outage."""
+    seed_reference(session)
+    monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
+    request = httpx.Request("GET", "https://public-api.birdeye.so/defi/v3/token/new_listing")
+    response = httpx.Response(401, request=request)
+
+    class RejectedKeyClient:
+        BASE_URL = "https://public-api.birdeye.so"
+
+        def __init__(self, api_key: str | None = None) -> None:
+            assert api_key == "test-birdeye-key"
+
+        def new_tokens(self, limit: int = 20):
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ingestion_service, "BirdeyeClient", RejectedKeyClient)
+    service = IngestionService()
+
+    assert service._ingest_birdeye_solana(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "red"
+    assert "misconfigured" in (health.message or "")
+    assert "BIRDEYE_API_KEY" in (health.message or "")
+    assert "401" in (health.message or "")
+    assert health.error_count == 0
+
+
 def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     """The ingestion worker must not compact: it reports the archive stage as
     skipped (archive=0 in scan results) and writes no parquet files — the

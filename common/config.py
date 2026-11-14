@@ -128,6 +128,9 @@ class Settings(BaseSettings):
 
     helius_api_key: str | None = None
     alchemy_api_key: str | None = None
+    # Optional Birdeye enhancement; without it the feed is skipped instead of
+    # recording a 401 as a transient failure on every scan.
+    birdeye_api_key: str | None = None
     quicknode_evm_rpc_url: str | None = None
     etherscan_api_key: str | None = None
     reddit_client_id: str | None = None

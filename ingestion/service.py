@@ -532,7 +532,13 @@ class IngestionService:
         return {"analyzed": len(results), "flagged": flagged}
 
     def _ingest_birdeye_solana(self, session: Session) -> int:
-        """Ingest new tokens from Birdeye API as a third Solana data source."""
+        """Ingest new tokens from Birdeye API as a third Solana data source.
+
+        Birdeye is optional and key-gated. Without ``BIRDEYE_API_KEY`` every
+        request returns 401, which is a configuration state rather than a
+        transient outage: the feed is skipped and reported as disabled instead
+        of painting a red failure on every scan.
+        """
         if "solana" not in self.settings.target_chains:
             return 0
         get_or_create_source(
@@ -543,7 +549,17 @@ class IngestionService:
             base_url=BirdeyeClient.BASE_URL,
         )
         source = self._source(session, "birdeye")
-        client = BirdeyeClient()
+        api_key = (self.settings.birdeye_api_key or "").strip()
+        if not api_key:
+            record_health(
+                session,
+                component="source:birdeye",
+                state="yellow",
+                message="disabled: BIRDEYE_API_KEY is not set; feed skipped",
+            )
+            log.info("birdeye_disabled", reason="BIRDEYE_API_KEY is not set")
+            return 0
+        client = BirdeyeClient(api_key=api_key)
         count = 0
         try:
             new_tokens = client.new_tokens(limit=20)
@@ -575,14 +591,29 @@ class IngestionService:
                 message=f"{count} new tokens",
             )
         except Exception as exc:  # noqa: BLE001
-            record_health(
-                session,
-                component="source:birdeye",
-                state="red",
-                message=str(exc),
-                error_count=1,
-            )
-            log.warning("birdeye_ingestion_failed", error=str(exc))
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (401, 403):
+                # A rejected key is configuration, not an outage: name the
+                # variable an operator must fix so this never reads as flaky.
+                record_health(
+                    session,
+                    component="source:birdeye",
+                    state="red",
+                    message=(
+                        f"misconfigured: Birdeye rejected BIRDEYE_API_KEY ({status}); "
+                        "update the key or unset it to skip the feed"
+                    ),
+                )
+                log.warning("birdeye_key_rejected", status=status)
+            else:
+                record_health(
+                    session,
+                    component="source:birdeye",
+                    state="red",
+                    message=str(exc),
+                    error_count=1,
+                )
+                log.warning("birdeye_ingestion_failed", error=str(exc))
         finally:
             client.close()
         return count
