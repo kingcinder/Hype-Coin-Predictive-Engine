@@ -14,6 +14,7 @@ from typing import Any
 from common.config import get_settings, secret_value
 from common.http import HttpClient
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -230,7 +231,7 @@ def _analyze_solana_contract(
                 result.ownership_renounced = True  # No mint authority
 
     except Exception as exc:  # noqa: BLE001
-        log.debug("solana_analysis_error", address=address, error=str(exc))
+        log.debug("solana_analysis_error", address=address, error=redact_url(str(exc)))
     finally:
         if http is None:
             client.close()

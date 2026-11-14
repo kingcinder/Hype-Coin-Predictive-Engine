@@ -29,6 +29,23 @@ def test_redact_url_masks_alchemy_path_token() -> None:
     assert redact_url(alchemy) == "https://eth-mainnet.g.alchemy.com/v2/***"
 
 
+def test_redact_url_masks_credentials_inside_http_error_text() -> None:
+    """httpx errors embed the URL, so log messages need the same treatment."""
+    alchemy = (
+        "Client error '400 Bad Request' for url "
+        "'https://eth-mainnet.g.alchemy.com/v2/fake-key-for-tests/'"
+    )
+    helius = (
+        "Client error '401 Unauthorized' for url "
+        "'https://mainnet.helius-rpc.com/?api-key=fake-helius-key-for-tests'"
+    )
+
+    assert "fake-key-for-tests" not in redact_url(alchemy)
+    assert "/v2/***" in redact_url(alchemy)
+    assert "fake-helius-key-for-tests" not in redact_url(helius)
+    assert "api-key=***" in redact_url(helius)
+
+
 def _configure_helius(monkeypatch, settings) -> None:
     monkeypatch.setattr(settings, "helius_api_key", SECRET)
     monkeypatch.setattr(settings, "rpc_pool_enabled", True)

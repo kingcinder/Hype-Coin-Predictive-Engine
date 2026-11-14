@@ -13,6 +13,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -227,7 +228,7 @@ class WhaleTrackerCrawler(BaseCrawler):
                         )
                     time.sleep(0.1)  # Rate limit
             except Exception as exc:  # noqa: BLE001
-                log.debug("whale_sol_error", account=account, error=str(exc))
+                log.debug("whale_sol_error", account=account, error=redact_url(str(exc)))
         return items
 
 

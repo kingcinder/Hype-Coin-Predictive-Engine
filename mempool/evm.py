@@ -10,6 +10,7 @@ from common.config import get_settings
 from common.http import HttpClient
 from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
+from common.urls import redact_url
 from ingestion.source_clients import get_rpc_url, rpc_pool_for
 from storage import models
 from storage.repository import (
@@ -360,7 +361,9 @@ def run_evm_watch(session: Session, *, decision_ts: datetime | None = None) -> d
         except Exception as exc:  # noqa: BLE001 - preserve per-chain failure.
             session.rollback()
             errors += 1
-            log.warning("mempool_evm_failed", chain=chain_slug, error=str(exc))
+            # HTTP error text embeds the RPC URL, which carries the Alchemy key
+            # or a Helius ``api-key`` query value; redact before logging.
+            log.warning("mempool_evm_failed", chain=chain_slug, error=redact_url(str(exc)))
         # Per-chain commit: the next chain's watch() is network RPC and must not
         # run inside this chain's open write transaction.
         session.commit()

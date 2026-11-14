@@ -19,6 +19,7 @@ from common.config import get_settings, secret_value
 from common.http import HttpClient
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from storage import models
 
 log = get_logger(__name__)
@@ -81,7 +82,7 @@ def get_solana_holders(mint: str, *, http: HttpClient | None = None) -> HolderSn
             top_holder_concentration=round(concentration, 4) if concentration is not None else None,
         )
     except Exception as exc:  # noqa: BLE001
-        log.debug("solana_holder_error", mint=mint, error=str(exc))
+        log.debug("solana_holder_error", mint=mint, error=redact_url(str(exc)))
         return HolderSnapshot()
     finally:
         if http is None:

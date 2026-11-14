@@ -19,6 +19,7 @@ from typing import Any
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -238,7 +239,7 @@ class GasTrackerCrawler(BaseCrawler):
                 },
             }
         except Exception as exc:  # noqa: BLE001
-            log.debug("gas_tracker_solana_failed", error=str(exc))
+            log.debug("gas_tracker_solana_failed", error=redact_url(str(exc)))
             return None
 
 

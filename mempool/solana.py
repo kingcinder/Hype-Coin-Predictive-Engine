@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from common.enums import IgnitionEventType
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from ingestion.source_clients import SolanaRpcClient, get_rpc_url
 from radar.ignition import IgnitionRadar
 from storage import models
@@ -72,7 +73,7 @@ class SolanaMempoolWatcher:
                 "burst": burst,
             }
         except Exception as exc:  # noqa: BLE001 - preserve exact RPC failure.
-            log.warning("mempool_solana_failed", asset=asset.address, error=str(exc))
+            log.warning("mempool_solana_failed", asset=asset.address, error=redact_url(str(exc)))
             return {"error": str(exc)}
         finally:
             client.close()
