@@ -675,3 +675,45 @@ def test_score_formulas_normalize_weighted_averages() -> None:
     assert result.hype == 100.0
     assert result.catalyst <= 100.0
     assert result.exit_risk <= 100.0
+
+
+def test_missing_liquidity_is_not_black() -> None:
+    """PITFIX R3 P1-2: missing liquidity_depth must not hard-reject to BLACK.
+    Unknown liquidity is evidence of absence, not evidence of zero liquidity."""
+    features = _collapse_features(0.1)
+    del features["liquidity_depth"]
+    result = compute_scores(features, ["liquidity_depth"])
+    assert result.risk_band.value != "BLACK"
+
+
+def test_explicit_zero_liquidity_is_still_black() -> None:
+    """PITFIX R3 P1-2: an explicitly observed zero liquidity still hard-rejects
+    to BLACK. Only the missing case changed, not the zero case."""
+    features = _collapse_features(0.1)
+    features["liquidity_depth"] = 0.0
+    result = compute_scores(features, [])
+    assert result.risk_band.value == "BLACK"
+
+
+def test_many_missing_inputs_never_green() -> None:
+    """PITFIX R3 P1-2: a token with most rule inputs missing cannot be GREEN.
+    The continuous missingness penalty must keep it at YELLOW or worse."""
+    features = {
+        "liquidity_depth": 200_000.0,
+        "pair_age_minutes": 120.0,
+    }
+    missing = [
+        "top_holder_concentration",
+        "suspicious_contract_flags",
+        "collapse_probability_24h",
+        "spread_estimate",
+        "buy_sell_ratio",
+        "holder_count",
+        "volatility",
+        "liquidity_withdrawal_signal",
+        "lp_removal_signal",
+        "recidivism_score",
+        "lifecycle_phase",
+    ]
+    result = compute_scores(features, missing)
+    assert result.risk_band.value != "GREEN"

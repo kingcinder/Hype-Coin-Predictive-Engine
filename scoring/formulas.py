@@ -79,7 +79,8 @@ def compute_scores(
     # -> hard BLACK. Strip missing keys here so missing is missing, live
     # and in rescore alike. compute_scores still uses the full dict below
     # for its own components, which handle 0.0 defaults explicitly.
-    _assess_features = {k: v for k, v in features.items() if k not in set(missing_features)}
+    _missing = set(missing_features)
+    _assess_features = {k: v for k, v in features.items() if k not in _missing}
     risk_assessment = assess_risk(_assess_features, session=session)
     # E1: the honest coverage set is the union of factory-flagged missing
     # features and the inputs that silently hit their rule-engine default

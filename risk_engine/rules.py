@@ -374,16 +374,18 @@ def assess_risk(
         risk_points += pts
         reasons.append(f"Extreme short-window volatility: {volatility:.2f}")
 
-    # PITFIX 2026-11-13: insufficient evidence cannot be GREEN. A token with
-    # many rule inputs missing was previously scored GREEN (10 pts from the
-    # unknown-liquidity penalty alone) once the missing-liquidity hard-reject
-    # was removed. Add a continuous missingness penalty instead of a hard
-    # floor (a floor would spike 59% of tokens at exactly 25.0): +2 pts per
-    # missing rule input, capped at 20, so unknown reads as riskier in
-    # proportion to how much is unknown, without creating a new degenerate
-    # value. Explicit evidence still drives the band above this.
+    # PITFIX 2026-11-13, strengthened in R3 P1-2: insufficient evidence
+    # cannot be GREEN. A token with many rule inputs missing was previously
+    # scored GREEN (10 pts from the unknown-liquidity penalty alone) once the
+    # missing-liquidity hard-reject was removed. The original +2 pts/input
+    # capped at 20 did not guarantee that: 11 of 13 inputs missing with clean
+    # present features scored 20.0, still GREEN. Use +3 pts per missing rule
+    # input, capped at 30, so 9+ missing inputs on their own reach the YELLOW
+    # threshold (25.0). The penalty stays continuous - no hard floor spiking
+    # tokens at exactly 25.0 - and explicit evidence still drives the band
+    # above this.
     if defaulted:
-        missing_penalty = min(20.0, len(defaulted) * 2.0)
+        missing_penalty = min(30.0, len(defaulted) * 3.0)
         risk_points += missing_penalty
         reasons.append(
             "Insufficient evidence: "

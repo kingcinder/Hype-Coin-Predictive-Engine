@@ -503,3 +503,50 @@ has enough data. The source audit did not change metrics, thresholds, or
 calibration. The historical values cannot be repaired into trustworthy
 point-in-time rows without acquisition-time evidence that is absent from this
 DB; future ingests and replays now retain conservative availability.
+
+## 16. 2026-11-13 addendum - PITFIX validation and R3 P1-2 penalty strengthening
+
+### Before / after score distribution (scripts/score_distribution.py, read-only)
+
+| Snapshot | Distinct risk values | Mean risk | Range | Top mode | Score bands |
+|---|---|---|---|---|---|
+| Before PITFIX (`serpent.db.pre-pitfix-2026-11-13`) | 2-4 per day (57.5: 1,727; 45.0: 1,147; 0.0: 287) | - | 0-100 | 57.5 | BLACK 4,357 / GREEN 458 / ORANGE 11 / YELLOW 33 |
+| After PITFIX rescore (2026-11-13 15:02 PST) | 422 | 40.35 | 8-100 | 30.00: 2,524 | YELLOW 2,866 / BLACK 1,490 / GREEN 485 / ORANGE 18 |
+| After R3 P1-2 rescore (2026-11-13 16:21 PST) | 507 | 47.89 | 12-100 | 40.00: 2,574 | YELLOW 2,950 / BLACK 1,490 / GREEN 401 / ORANGE 18 |
+
+The R3 P1-2 change strengthened the missingness penalty in
+`risk_engine/rules.py` from +2 pts per missing rule input (cap 20) to +3 pts
+(cap 30), because the original rate did not guarantee the review-required
+property: 11 of 13 inputs missing with clean present features scored 20.0,
+still GREEN. After the change that case scores 30+ and is YELLOW; 84 tokens
+moved GREEN to YELLOW. `scoring/formulas.py` now hoists the missing set out
+of the per-item comprehension. New tests: missing liquidity is not BLACK,
+explicit zero liquidity is still BLACK, many-missing is never GREEN.
+
+### Before / after validation (validation harness, self-test passed)
+
+| Metric | Before PITFIX (14:37) | After PITFIX (15:02) | After R3 P1-2 (16:21) | Baseline | Verdict |
+|---|---|---|---|---|---|
+| RiskBand ordinal distance (n=396) | 2.2020 | 2.2020 | 2.2020 | 1.7980 | worse than baseline |
+| BLACK collapse precision (n=2013) | 0.0884 | 0.0884 | 0.0884 | 0.0884 | indistinguishable |
+| risk_score concordance (n=396) | 0.9687 | 0.9719 | 0.9719 | 0.5000 | better on paper, leakage_suspected |
+| exit_risk concordance (n=396) | 0.9687 | 0.9719 | 0.9719 | 0.5000 | better on paper, leakage_suspected |
+| Confidence calibration error (n=2013) | 0.0798 | 0.3761 | 0.3761 | 0.1000 | worse than baseline |
+| Uncertainty error correlation (n=2013) | - | -0.0607 | -0.6617 | 0.0000 | worse than baseline |
+| feature_leakage suspected features | 2 | 0 | 0 | 0 | fixed by PITFIX |
+
+Reports: `reports/validation-2026-11-13-fresh.json`,
+`reports/validation-2026-11-13-pitfix.json`,
+`reports/validation-2026-11-13-r3-p12.json`. DB backup before the R3
+rescore: `serpent.db.pre-r3-p12-2026-11-13`.
+
+RiskBand and BLACK precision are unchanged across all three runs because
+rescore updates Score, not RiskOutcome, so those cells still evaluate the
+old BLACK predictions; syncing RiskOutcome bands is an out-of-sample
+question, not a silent rewrite (see the separate out-of-sample proposal).
+Confidence remains regressed at 0.3761: YELLOW confidence is far above the
+~11% observed survival in evaluated outcomes. The uncertainty cell regressed
+in the R3 run (-0.0607 to -0.6617): uncertainty now anti-correlates with
+prediction error, because the higher penalty lowered confidence for
+many-missing tokens. That is a real regression to watch, not a reporting
+artifact. No scoring output beats its naive baseline yet.
