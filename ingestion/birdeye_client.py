@@ -26,7 +26,11 @@ class BirdeyeClient:
         self.http.close()
 
     def token_overview(self, address: str) -> dict[str, Any] | None:
-        """Get token overview: price, volume, liquidity, holder count."""
+        """Get token overview: price, volume, liquidity, holder count.
+
+        Audited against the live API (2026-11): ``/defi/token_overview`` is
+        current and returns the token snapshot directly under ``data``.
+        """
         data = self.http.get_json(
             "/defi/token_overview",
             params={"address": address},
@@ -62,23 +66,43 @@ class BirdeyeClient:
         return []
 
     def trending_tokens(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Get trending tokens by volume change."""
+        """Get the ranked trending-token list (``data.tokens``).
+
+        The old ``/defi/v3/token/trending`` path is gone (404). The live
+        endpoint is ``/defi/token_trending``, capped at 20 tokens per page.
+        """
         data = self.http.get_json(
-            "/defi/v3/token/trending",
-            params={"limit": limit},
+            "/defi/token_trending",
+            params={
+                "sort_by": "rank",
+                "sort_type": "asc",
+                "offset": 0,
+                "limit": min(max(limit, 1), 20),
+            },
         )
         if isinstance(data, dict) and data.get("success"):
-            items = data.get("data", {}).get("items") or []
-            return items if isinstance(items, list) else []
+            payload = data.get("data")
+            tokens = payload.get("tokens") if isinstance(payload, dict) else None
+            return tokens if isinstance(tokens, list) else []
         return []
 
     def top_gainers(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Get top gaining tokens."""
+        """Get top gaining tokens by 24h price change (``data.items``).
+
+        The old ``/defi/v3/token/top_gainer`` path is gone (404); the live
+        screener endpoint is ``/defi/v3/token/list`` sorted by
+        ``price_change_24h_percent``.
+        """
         data = self.http.get_json(
-            "/defi/v3/token/top_gainer",
-            params={"limit": limit},
+            "/defi/v3/token/list",
+            params={
+                "sort_by": "price_change_24h_percent",
+                "sort_type": "desc",
+                "limit": min(max(limit, 1), 100),
+            },
         )
         if isinstance(data, dict) and data.get("success"):
-            items = data.get("data", {}).get("items") or []
+            payload = data.get("data")
+            items = payload.get("items") if isinstance(payload, dict) else None
             return items if isinstance(items, list) else []
         return []
