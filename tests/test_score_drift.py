@@ -239,7 +239,10 @@ class TestRunScoreDrift:
         live_risks = [_oracle(session, features) for features in feature_sets]
         # Stale: everything persisted at two band values, wildly off the live
         # formula (the pre-rescore quantization symptom).
-        persisted = [25.0, 25.0, 25.0, 80.0, 80.0, 80.0]
+        # R3 P1-2 raised the missingness penalty, so live risks for these
+        # sparse feature sets now sit near 70-86; the stale persisted values
+        # must stay far from live for the fixture premise to hold.
+        persisted = [10.0, 10.0, 10.0, 40.0, 40.0, 40.0]
         assert all(abs(p - live) > 10 for p, live in zip(persisted, live_risks, strict=True))
         _seed_fleet(session, feature_sets=feature_sets, persisted_risk=persisted)
 
