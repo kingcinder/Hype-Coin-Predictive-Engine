@@ -1120,6 +1120,56 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert "2 holder rows across 1 chains" in (health.message or "")
 
 
+def test_geckoterminal_new_pools_cooldown_is_yellow_not_red(session, monkeypatch) -> None:
+    """An active provider cooldown is pacing, so the feed degrades to yellow."""
+    service = IngestionService()
+    service.ensure_reference_data(session)
+
+    def cooling(self, chain_slug: str):
+        raise CircuitOpen("provider cooling down for 53.4s")
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "new_pools", cooling)
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "close", lambda self: None)
+
+    assert service._ingest_geckoterminal_new_pools(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:geckoterminal_new_pools")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "yellow"
+    assert "pacing" in (health.message or "")
+    assert "cooling down" in (health.message or "")
+    assert "deferred" in (health.message or "")
+    assert health.error_count == 0
+
+
+def test_geckoterminal_new_pools_real_failure_stays_red(session, monkeypatch) -> None:
+    """Only genuine provider failures keep the component red."""
+    service = IngestionService()
+    service.ensure_reference_data(session)
+
+    def broken(self, chain_slug: str):
+        raise RuntimeError("502 Bad Gateway")
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "new_pools", broken)
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "close", lambda self: None)
+
+    assert service._ingest_geckoterminal_new_pools(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:geckoterminal_new_pools")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "red"
+    assert "502 Bad Gateway" in (health.message or "")
+    assert health.error_count == 1
+
+
 def test_birdeye_without_api_key_skips_feed_and_reports_configuration(session, monkeypatch) -> None:
     """No key is a configuration state: skip the request, say so, stay yellow."""
     seed_reference(session)

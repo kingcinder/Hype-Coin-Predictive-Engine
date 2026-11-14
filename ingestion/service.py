@@ -742,6 +742,21 @@ class IngestionService:
                 state="ok",
                 message=f"{count} normalized pools",
             )
+        except CircuitOpen as exc:
+            # Pacing, not a failure: the shared provider gate is inside its
+            # cooldown window (often opened by this scan's first-buy fetches),
+            # so the feed is deferred. Degrade to yellow; red stays reserved for
+            # requests the provider actually rejected or that broke.
+            record_health(
+                session,
+                component="source:geckoterminal_new_pools",
+                state="yellow",
+                message=(
+                    f"pacing: {exc}; {count} pools ingested before cooldown, "
+                    "remaining chains deferred to a later scan"
+                ),
+            )
+            log.info("geckoterminal_new_pools_deferred", reason=str(exc), pools=count)
         except Exception as exc:  # noqa: BLE001
             record_health(
                 session,
