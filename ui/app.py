@@ -101,6 +101,7 @@ NAV_SECTIONS: list[tuple[str, list[str]]] = [
             "Validation Integrity",
             "Feed Health",
             "Live Ops Console",
+            "Trading",
             "Alerts",
         ],
     ),
@@ -136,6 +137,7 @@ VIEW_ICONS: dict[str, str] = {
     "Validation Integrity": "🛡️",
     "Feed Health": "❤️",
     "Live Ops Console": "🖥️",
+    "Trading": "💸",
     "Alerts": "🔔",
 }
 
@@ -2728,6 +2730,10 @@ def render_active_view(view: str) -> None:
         feed_health()
     elif view == "Live Ops Console":
         live_ops_console()
+    elif view == "Trading":
+        from ui.trading_view import trading_view
+
+        trading_view()
     elif view == "Alerts":
         alerts_view()
 

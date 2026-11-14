@@ -171,11 +171,23 @@ class HttpClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def get_json(self, path: str, *, params: Mapping[str, Any] | None = None) -> Any:
-        return self._request_json("GET", path, params=params)
+    def get_json(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        return self._request_json("GET", path, params=params, headers=headers)
 
-    def post_json(self, path: str, *, json: Mapping[str, Any] | None = None) -> Any:
-        return self._request_json("POST", path, json=json)
+    def post_json(
+        self,
+        path: str,
+        *,
+        json: Mapping[str, Any] | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
+        return self._request_json("POST", path, json=json, headers=headers)
 
     @retry(
         retry=retry_if_exception_type(

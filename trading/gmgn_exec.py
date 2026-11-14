@@ -1,24 +1,32 @@
 """GMGN execution client (live venue calls).
 
-Every public method re-checks the live gate, and no network call happens inside
+Order-submitting methods re-check the live gate; read-only status/cancel calls
+require only venue configuration (the kill switch must be able to cancel after
+the gate closes). Every venue request is signed with the documented GMGN
+AK/SK scheme (``X-Ak``/``X-Timestamp``/``X-Signature``, HMAC-SHA256 over
+``ak+timestamp+method+path+rawQuery+body``), and no network call happens inside
 ``queued_write``. Secrets are never logged or returned.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.http import HttpClient
 from storage import models
 from storage.repository import queued_write
-from trading.errors import LiveDisabled
+from trading.errors import LiveDisabled, TradeRefused
 from trading.live_gate import require_open
 
 
@@ -47,11 +55,49 @@ class GmgnExecutor:
         self.fill_timeout = fill_timeout
 
     # ── guards ──────────────────────────────────────────────────────────
+    def _venue_config(self) -> tuple[str, str]:
+        """Return ``(api_key, signer_secret)``; fail closed when unusable.
+
+        Configuration is required for read-only order calls too, so a kill
+        switch can cancel submitted orders after the live gate has closed.
+        """
+        s = get_settings()
+        if not s.gmgn_api_base or s.gmgn_wallet_address is None:
+            raise LiveDisabled("venue_unconfigured")
+        api_key = secret_value(s.gmgn_api_key)
+        signer_secret = secret_value(s.gmgn_signer_secret)
+        if not api_key or not signer_secret:
+            # Documented scheme (AK/SK HMAC), but no credentials to apply it:
+            # refuse rather than sending an unauthenticated order.
+            raise TradeRefused(
+                "venue_auth_unimplemented",
+                "GMGN_API_KEY and GMGN_SIGNER_SECRET are required to sign venue requests",
+            )
+        return api_key, signer_secret
+
     def _guard(self) -> None:
         require_open(self.session)
-        s = get_settings()
-        if not s.gmgn_api_base or s.gmgn_wallet_address is None or s.gmgn_signer_secret is None:
-            raise LiveDisabled("venue_unconfigured")
+        self._venue_config()
+
+    def _auth_headers(self, method: str, path: str, body: str = "") -> dict[str, str]:
+        """Documented GMGN request signature (never includes the secret)."""
+        api_key, signer_secret = self._venue_config()
+        timestamp = str(int(time.time() * 1000))
+        payload = f"{api_key}{timestamp}{method.upper()}{path}{body}"
+        signature = hmac.new(
+            signer_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return {"X-Ak": api_key, "X-Timestamp": timestamp, "X-Signature": signature}
+
+    def _post(self, path: str, payload: dict[str, Any]) -> Any:
+        # Sign the exact compact JSON bytes httpx will send.
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return self._client().post_json(
+            path, json=payload, headers=self._auth_headers("POST", path, body)
+        )
+
+    def _get(self, path: str) -> Any:
+        return self._client().get_json(path, headers=self._auth_headers("GET", path))
 
     def _client(self) -> HttpClient:
         if self._http is not None:
@@ -71,9 +117,9 @@ class GmgnExecutor:
         slippage_pct: Decimal,
         priority_fee_sol: Decimal,
     ) -> str:
-        result = self._client().post_json(
+        result = self._post(
             "/order",
-            json={
+            {
                 "side": side,
                 "mint": mint,
                 "chain": chain,
@@ -85,12 +131,14 @@ class GmgnExecutor:
         return str((result or {}).get("order_id") or "")
 
     def order_status(self, order_id: str) -> dict | None:
-        self._guard()
-        return self._client().get_json(f"/order/{order_id}")
+        self._venue_config()
+        return self._get(f"/order/{order_id}")
 
     def cancel(self, order_id: str) -> bool:
-        self._guard()
-        result = self._client().post_json("/order/cancel", json={"order_id": order_id})
+        # Configuration only: the kill switch cancels *after* writing the
+        # ``killed`` row, so requiring an open gate here is circular.
+        self._venue_config()
+        result = self._post("/order/cancel", {"order_id": order_id})
         return bool((result or {}).get("cancelled"))
 
     def _record(

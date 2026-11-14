@@ -58,7 +58,14 @@ def test_candidates_endpoint(client, session) -> None:
     response = client.get("/paper/candidates")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"candidates", "excluded_no_evidence", "generated_at"}
+    assert set(body) == {
+        "candidates",
+        "excluded_no_evidence",
+        "generated_at",
+        "scores_validated",
+        "scores_validation_reason",
+        "scores_validation_report",
+    }
     assert body["candidates"][0]["mint"] == asset.address
     assert set(body["candidates"][0]) == set(CANDIDATE_KEYS)
 

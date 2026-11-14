@@ -16,6 +16,7 @@ from trading.errors import DrawdownReview, LiveDisabled, RulesIncomplete, TradeR
 from trading.ledger import TradeEngine
 from trading.price_sources import MarketSnapshotPriceSource
 from trading.scorecard import build_scorecard
+from validation.status import scores_validation_status
 
 router = APIRouter()
 
@@ -172,6 +173,7 @@ async def paper_candidates(session: DbSession, limit: int = 10) -> dict:
         ],
         "excluded_no_evidence": result["excluded_no_evidence"],
         "generated_at": result["generated_at"],
+        **scores_validation_status(),
     }
 
 
@@ -255,7 +257,7 @@ async def trading_arm(body: ArmBody, session: DbSession) -> dict:
         write_session.add(models.LiveGateState(ts=now, kind="armed", reason="manual_arm"))
 
     queued_write(_persist)
-    return {"status": "armed"}
+    return {"status": "armed", **scores_validation_status()}
 
 
 @router.get("/trading/status")
@@ -276,6 +278,7 @@ async def trading_status(session: DbSession) -> dict:
         "live_max_bankroll_sol": (
             None if settings.live_max_bankroll_sol is None else str(settings.live_max_bankroll_sol)
         ),
+        **scores_validation_status(),
     }
 
 
@@ -294,14 +297,19 @@ async def trading_kill(session: DbSession) -> dict:
         select(models.LiveFill).where(models.LiveFill.status == "submitted")
     ).all()
     cancelled = 0
-    failed = 0
+    uncancelled: list[str] = []
     for fill in submitted:
         try:
             GmgnExecutor(session).cancel(fill.order_id)
             cancelled += 1
         except Exception:  # noqa: BLE001 - kill must survive any executor failure.
-            failed += 1
-    return {"killed": True, "cancelled": cancelled, "failed": failed}
+            uncancelled.append(fill.order_id)
+    return {
+        "killed": True,
+        "cancelled": cancelled,
+        "failed": len(uncancelled),
+        "uncancelled": uncancelled,
+    }
 
 
 @router.post("/trading/copy/signal", status_code=202)
@@ -312,7 +320,12 @@ async def trading_copy_signal(body: CopySignalBody, session: DbSession) -> dict:
     row = maybe_queue_copy(session, body.wallet, body.mint, body.size_sol)
     if row is None:
         raise HTTPException(422, {"error": "copy_not_queued"})
-    return {"status": row.status, "log_id": row.id, "detail": row.detail}
+    return {
+        "status": row.status,
+        "log_id": row.id,
+        "detail": row.detail,
+        **scores_validation_status(),
+    }
 
 
 @router.post("/trading/copy/{log_id}/approve")
@@ -323,7 +336,12 @@ async def trading_copy_approve(log_id: int, session: DbSession) -> dict:
         row = approve_copy(session, log_id)
     except TradeRefused as exc:
         _raise_mapped(exc)
-    return {"status": row.status, "log_id": row.id, "detail": row.detail}
+    return {
+        "status": row.status,
+        "log_id": row.id,
+        "detail": row.detail,
+        **scores_validation_status(),
+    }
 
 
 @router.post("/trading/copy/{log_id}/recover")
@@ -343,7 +361,12 @@ async def trading_copy_recover(
         )
     except TradeRefused as exc:
         _raise_mapped(exc)
-    return {"status": row.status, "log_id": row.id, "detail": row.detail}
+    return {
+        "status": row.status,
+        "log_id": row.id,
+        "detail": row.detail,
+        **scores_validation_status(),
+    }
 
 
 @router.post("/trading/execute")
