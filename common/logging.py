@@ -10,6 +10,11 @@ from common.config import get_settings
 
 def configure_logging() -> None:
     settings = get_settings()
+    # httpx logs "HTTP Request: GET <url>" at INFO, and provider URLs carry
+    # API keys (Helius api-key query, Alchemy /v2/<key>, Etherscan apikey).
+    # Keep request-line logging off the default INFO surface.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,

@@ -162,21 +162,22 @@ def _analyze_evm_contract(
             result.suspicious_flags += 1
             result.reasons.append("Contract source code not verified")
 
-        # Fetch deployer info
-        tx_data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "account",
-                "action": "txlist",
-                "address": address,
-                "startblock": 0,
-                "endblock": 99999999,
-                "page": 1,
-                "offset": 1,
-                "sort": "asc",
-            },
-        )
+        # Fetch deployer info. V2 requires the key on every endpoint, not just
+        # getsourcecode; without it this silently lost deployer age/history.
+        tx_params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": address,
+            "startblock": 0,
+            "endblock": 99999999,
+            "page": 1,
+            "offset": 1,
+            "sort": "asc",
+        }
+        if api_key:
+            tx_params["apikey"] = api_key
+        tx_data = client.get_json("/v2/api", params=tx_params)
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list) and txs:
@@ -245,20 +246,21 @@ def _check_deployer_history(
 ) -> None:
     """Check if deployer has prior rug-pull history."""
     try:
-        tx_data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "account",
-                "action": "txlist",
-                "address": deployer,
-                "startblock": 0,
-                "endblock": 99999999,
-                "page": 1,
-                "offset": 5,
-                "sort": "desc",
-            },
-        )
+        params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "txlist",
+            "address": deployer,
+            "startblock": 0,
+            "endblock": 99999999,
+            "page": 1,
+            "offset": 5,
+            "sort": "desc",
+        }
+        api_key = secret_value(get_settings().etherscan_api_key)
+        if api_key:
+            params["apikey"] = api_key
+        tx_data = client.get_json("/v2/api", params=params)
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list):

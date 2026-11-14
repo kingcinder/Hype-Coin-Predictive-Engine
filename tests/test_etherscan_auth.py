@@ -7,7 +7,11 @@ from httpx import Response
 
 from common.config import get_settings
 from crawlers.sources.gas_tracker import GasTrackerCrawler
-from ingestion.contract_analyzer import ContractAnalysis, _analyze_evm_contract
+from ingestion.contract_analyzer import (
+    ContractAnalysis,
+    _analyze_evm_contract,
+    _check_deployer_history,
+)
 from ingestion.holder_tracker import get_evm_holders
 
 KEY = "test-etherscan-key"
@@ -49,6 +53,21 @@ def test_contract_source_lookup_sends_chain_id_and_key(monkeypatch) -> None:
     assert path == "/v2/api"
     assert params["chainid"] == "8453"
     assert params["action"] == "getsourcecode"
+    assert params["apikey"] == KEY
+    # The deployer txlist follow-up hit V2 unauthenticated before this fix.
+    assert http.calls[1][1]["action"] == "txlist"
+    for _, call_params in http.calls:
+        assert call_params["apikey"] == KEY
+
+
+def test_deployer_history_lookup_sends_key(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
+    http = FakeHttp({"status": "1", "result": []})
+
+    _check_deployer_history("0xdeployer", http, "1", ContractAnalysis())
+
+    _, params = http.calls[0]
+    assert params["chainid"] == "1"
     assert params["apikey"] == KEY
 
 

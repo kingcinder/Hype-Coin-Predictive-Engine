@@ -7,12 +7,14 @@ JSON returned by ``GET /trading/status`` with every provider credential set.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
 from common.config import get_settings
-from common.logging import get_logger
+from common.logging import configure_logging, get_logger
 from storage.database import get_session
 
 _MARKERS = {
@@ -56,6 +58,13 @@ def client(session, credentialed_settings, monkeypatch):
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
+
+
+def test_http_request_lines_cannot_log_provider_urls() -> None:
+    """httpx INFO lines embed full URLs (and their keys); keep them suppressed."""
+    configure_logging()
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).level >= logging.WARNING
 
 
 def test_status_payload_and_logs_contain_no_credential_markers(
