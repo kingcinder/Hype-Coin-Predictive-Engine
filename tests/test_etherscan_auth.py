@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import respx
 from httpx import Response
 
@@ -35,7 +37,7 @@ def test_holder_lookup_sends_chain_id_and_key(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
     http = FakeHttp({"status": "1", "result": []})
 
-    get_evm_holders("0xtoken", "ethereum", http=http)
+    get_evm_holders("0xtoken", "ethereum", http=cast(Any, http))
 
     path, params = http.calls[0]
     assert path == "/v2/api"
@@ -48,7 +50,7 @@ def test_contract_source_lookup_sends_chain_id_and_key(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
     http = FakeHttp({"status": "1", "result": [{"SourceCode": ""}]})
 
-    _analyze_evm_contract("0xtoken", "base", ContractAnalysis(), http)
+    _analyze_evm_contract("0xtoken", "base", ContractAnalysis(), cast(Any, http))
 
     path, params = http.calls[0]
     assert path == "/v2/api"
@@ -65,7 +67,7 @@ def test_deployer_history_lookup_sends_key(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
     http = FakeHttp({"status": "1", "result": []})
 
-    _check_deployer_history("0xdeployer", http, "1", ContractAnalysis())
+    _check_deployer_history("0xdeployer", cast(Any, http), "1", ContractAnalysis())
 
     _, params = http.calls[0]
     assert params["chainid"] == "1"
