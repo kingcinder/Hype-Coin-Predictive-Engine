@@ -11,11 +11,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from common.config import get_settings
 from common.logging import get_logger
+from ingestion.provider_gate import CircuitOpen, ProviderGate
 
 log = get_logger(__name__)
 
 _MIN_TOKEN_DELTA = 1e-12
+_rpc_gate = ProviderGate()
+
+
+def reset_solana_swap_gate() -> None:
+    _rpc_gate.reset()
 
 
 def _amount(entry: dict[str, Any]) -> float:
@@ -80,11 +87,26 @@ def fetch_pool_swaps(
     base_mint: str,
     limit: int = 20,
     price_usd: float | None = None,
+    tracked: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch and normalize wallet swaps for a Solana pool, oldest first."""
+    """Fetch and normalize wallet swaps for a Solana pool, oldest first.
+
+    Pacing and a 403/429 circuit keep a rate-limited RPC from stalling the
+    whole scan. Once a tracked-wallet buy is reconstructed, the walk stops:
+    that is the signal the copy queue needs.
+    """
+    settings = get_settings()
+    _rpc_gate.configure(
+        min_interval=settings.solana_swap_rpc_min_interval_seconds,
+        cooldown=settings.provider_circuit_break_seconds,
+    )
     try:
+        _rpc_gate.before()
         signatures = rpc.get_signatures_for_address(pool_address, limit=limit)
+    except CircuitOpen:
+        return []
     except Exception as exc:  # noqa: BLE001 - ingestion must survive an RPC outage.
+        _rpc_gate.record_failure(exc)
         log.warning("solana_swap_signatures_failed", pool=pool_address, error=str(exc))
         return []
 
@@ -96,21 +118,30 @@ def fetch_pool_swaps(
         if not isinstance(signature, str) or not signature:
             continue
         try:
+            _rpc_gate.before()
             transaction = rpc.get_transaction(signature)
+        except CircuitOpen:
+            break
         except Exception as exc:  # noqa: BLE001 - skip one bad historical transaction.
+            _rpc_gate.record_failure(exc)
             log.warning(
                 "solana_swap_transaction_failed",
                 pool=pool_address,
                 signature=signature,
                 error=str(exc),
             )
+            if _rpc_gate.is_open():
+                break
             continue
-        swaps.extend(
-            swaps_from_transaction(
-                transaction,
-                pool_address=pool_address,
-                base_mint=base_mint,
-                price_usd=price_usd,
-            )
+        tx_swaps = swaps_from_transaction(
+            transaction,
+            pool_address=pool_address,
+            base_mint=base_mint,
+            price_usd=price_usd,
         )
+        swaps.extend(tx_swaps)
+        if tracked and any(
+            swap["side"] == "buy" and swap["wallet"] in tracked for swap in tx_swaps
+        ):
+            break
     return swaps

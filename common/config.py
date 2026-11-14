@@ -104,10 +104,7 @@ class Settings(BaseSettings):
     # rotation and automatic failover when a public endpoint rate-limits or dies
     rpc_pool_enabled: bool = True
     solana_rpc_pool_csv: str = (
-        "https://api.mainnet-beta.solana.com,"
-        "https://solana-rpc.publicnode.com,"
-        "https://rpc.ankr.com/solana,"
-        "https://api.mainnet.rpcpool.com"
+        "https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com"
     )
     base_rpc_pool_csv: str = (
         "https://mainnet.base.org,"
@@ -732,6 +729,10 @@ class Settings(BaseSettings):
     # Fetch pool trades while a pair is inside its first-buy window so tracked
     # wallet buys can queue copy signals from real ingestion, not only the API.
     first_buy_trade_fetch_enabled: bool = True
+    first_buy_swap_tx_limit: int = 12
+    geckoterminal_min_interval_seconds: float = 2.1
+    solana_swap_rpc_min_interval_seconds: float = 0.25
+    provider_circuit_break_seconds: float = 60.0
     copy_trading_enabled: bool = False
     copy_max_size_sol: Decimal = Decimal("0.1")
     copy_max_risk_pct: Decimal = Decimal("1")

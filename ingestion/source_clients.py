@@ -7,6 +7,7 @@ import httpx
 
 from common.config import get_settings
 from common.http import HttpClient
+from ingestion.provider_gate import ProviderGate
 from ingestion.rpc_pool import POOL_CHAINS, RpcEndpointPool, get_rpc_pool
 from ops.notifier import notify_rpc_pool_event
 
@@ -115,6 +116,13 @@ class DexScreenerClient:
         return []
 
 
+_gecko_gate = ProviderGate()
+
+
+def reset_geckoterminal_gate() -> None:
+    _gecko_gate.reset()
+
+
 class GeckoTerminalClient:
     NETWORKS = {"solana": "solana", "base": "base", "ethereum": "eth"}
 
@@ -124,9 +132,22 @@ class GeckoTerminalClient:
     def close(self) -> None:
         self.http.close()
 
+    def _get_json(self, path: str) -> Any:
+        settings = get_settings()
+        _gecko_gate.configure(
+            min_interval=settings.geckoterminal_min_interval_seconds,
+            cooldown=settings.provider_circuit_break_seconds,
+        )
+        _gecko_gate.before()
+        try:
+            return self.http.get_json(path)
+        except Exception as exc:
+            _gecko_gate.record_failure(exc)
+            raise
+
     def new_pools(self, chain_slug: str) -> list[dict[str, Any]]:
         network = self.NETWORKS.get(chain_slug, chain_slug)
-        data = self.http.get_json(f"/api/v2/networks/{network}/new_pools")
+        data = self._get_json(f"/api/v2/networks/{network}/new_pools")
         if isinstance(data, dict):
             items = data.get("data") or []
             return items if isinstance(items, list) else []
@@ -137,7 +158,7 @@ class GeckoTerminalClient:
         network = self.NETWORKS.get(chain_slug)
         if network is None:
             return []
-        data = self.http.get_json(f"/api/v2/networks/{network}/pools/{pool_address}/trades")
+        data = self._get_json(f"/api/v2/networks/{network}/pools/{pool_address}/trades")
         if isinstance(data, dict):
             items = data.get("data") or []
             return items if isinstance(items, list) else []

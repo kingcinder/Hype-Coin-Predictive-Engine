@@ -1006,8 +1006,8 @@ class IngestionService:
         observed_at = utc_now()
         # Fetch trades before the first write below, so the provider round-trip
         # never runs while this session holds SQLite's write lock.
-        swaps = self._first_buy_swaps(normalized, observed_at)
         tracked = self._tracked_wallets(normalized.chain_slug)
+        swaps = self._first_buy_swaps(normalized, observed_at, tracked)
         first_seen_at = normalized.pair_created_at or observed_at
         base_asset = upsert_asset(
             session,
@@ -1103,7 +1103,10 @@ class IngestionService:
         return True
 
     def _first_buy_swaps(
-        self, normalized: NormalizedPair, observed_at: Any
+        self,
+        normalized: NormalizedPair,
+        observed_at: Any,
+        tracked: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Real wallet trades for a pool while its first-buy window is open."""
         created = normalized.pair_created_at
@@ -1139,7 +1142,9 @@ class IngestionService:
                 rpc,
                 pool_address=normalized.pair_address,
                 base_mint=normalized.base_address,
+                limit=self.settings.first_buy_swap_tx_limit,
                 price_usd=normalized.price_usd,
+                tracked=tracked,
             )
         except Exception as exc:  # noqa: BLE001 - pair ingest must survive an RPC outage.
             log.warning(

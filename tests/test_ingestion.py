@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -10,8 +11,10 @@ import ingestion.service as ingestion_service
 from common.config import get_settings
 from common.time import ensure_utc
 from ingestion.contract_analyzer import ContractAnalysis
+from ingestion.provider_gate import CircuitOpen
 from ingestion.service import IngestionService, _analysis_findings
-from ingestion.source_clients import GeckoTerminalClient
+from ingestion.solana_swaps import fetch_pool_swaps, reset_solana_swap_gate
+from ingestion.source_clients import GeckoTerminalClient, reset_geckoterminal_gate
 from ops.archive import LocalArchiveStore
 from storage import models
 from storage.repository import (
@@ -20,6 +23,15 @@ from storage.repository import (
     upsert_pool_and_pair,
 )
 from tests.conftest import seed_market_asset, seed_reference
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_circuits():
+    reset_geckoterminal_gate()
+    reset_solana_swap_gate()
+    yield
+    reset_geckoterminal_gate()
+    reset_solana_swap_gate()
 
 
 def test_dexscreener_pair_ingest_is_idempotent(session) -> None:
@@ -50,7 +62,8 @@ def test_dexscreener_pair_ingest_is_idempotent(session) -> None:
     assert session.scalar(select(func.count()).select_from(models.LiquiditySnapshot)) == 1
 
 
-def test_geckoterminal_pool_trades_reads_recent_wallet_trades() -> None:
+def test_geckoterminal_pool_trades_reads_recent_wallet_trades(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "geckoterminal_min_interval_seconds", 0)
     client = GeckoTerminalClient()
     requested: list[str] = []
 
@@ -64,6 +77,46 @@ def test_geckoterminal_pool_trades_reads_recent_wallet_trades() -> None:
     finally:
         client.close()
     assert requested == ["/api/v2/networks/solana/pools/PoolABC/trades"]
+
+
+def test_geckoterminal_429_opens_circuit(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "geckoterminal_min_interval_seconds", 0)
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 3600)
+    client = GeckoTerminalClient()
+    calls: list[str] = []
+
+    def rate_limited(path: str):
+        calls.append(path)
+        request = httpx.Request("GET", f"https://api.geckoterminal.com{path}")
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("429", request=request, response=response)
+
+    client.http.get_json = rate_limited  # type: ignore[method-assign]
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.pool_trades("solana", "Pool429")
+        with pytest.raises(CircuitOpen):
+            client.pool_trades("solana", "Pool429")
+    finally:
+        client.close()
+    assert len(calls) == 1
+
+
+def test_solana_rpc_429_opens_circuit(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "solana_swap_rpc_min_interval_seconds", 0)
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 3600)
+    calls: list[str] = []
+
+    class RateLimitedRpc:
+        def get_signatures_for_address(self, address: str, *, limit: int):
+            calls.append(address)
+            request = httpx.Request("POST", "https://solana-rpc.publicnode.com")
+            response = httpx.Response(429, request=request)
+            raise httpx.HTTPStatusError("429", request=request, response=response)
+
+    assert fetch_pool_swaps(RateLimitedRpc(), pool_address="Pool429", base_mint="Mint") == []
+    assert fetch_pool_swaps(RateLimitedRpc(), pool_address="Pool429", base_mint="Mint") == []
+    assert calls == ["Pool429"]
 
 
 def test_first_buy_ingestion_uses_real_pool_trades(session, monkeypatch) -> None:
