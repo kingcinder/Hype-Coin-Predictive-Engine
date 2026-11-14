@@ -10,10 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.config import get_settings, secret_value
 from common.http import HttpClient
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
@@ -100,19 +102,22 @@ def get_evm_holders(
     client = http or HttpClient(base_url="https://api.etherscan.io")
     try:
         chain_id = "1" if chain == "ethereum" else "8453"
+        params: dict[str, Any] = {
+            "chainid": chain_id,
+            "module": "account",
+            "action": "tokentx",
+            "contractaddress": token_address,
+            "page": 1,
+            "offset": 100,
+            "sort": "desc",
+        }
+        # Etherscan V2 rejects unauthenticated requests ("Missing/Invalid API
+        # Key"), so pass the configured key when there is one.
+        api_key = secret_value(get_settings().etherscan_api_key)
+        if api_key:
+            params["apikey"] = api_key
         # Fetch recent Transfer events to estimate unique holders
-        data = client.get_json(
-            "/v2/api",
-            params={
-                "chainid": chain_id,
-                "module": "account",
-                "action": "tokentx",
-                "contractaddress": token_address,
-                "page": 1,
-                "offset": 100,
-                "sort": "desc",
-            },
-        )
+        data = client.get_json("/v2/api", params=params)
         txs = data.get("result", []) if isinstance(data, dict) else []
         if not isinstance(txs, list):
             txs = []
@@ -131,7 +136,9 @@ def get_evm_holders(
             holder_count=holder_count,
         )
     except Exception as exc:  # noqa: BLE001
-        log.debug("evm_holder_error", address=token_address, error=str(exc))
+        # Class name only: an HTTPStatusError message embeds the request URL,
+        # which carries the Etherscan ``apikey`` query parameter.
+        log.debug("evm_holder_error", address=token_address, error=type(exc).__name__)
         return HolderSnapshot()
     finally:
         if http is None:
