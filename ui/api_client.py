@@ -12,14 +12,14 @@ from typing import Any
 import httpx
 import streamlit as st
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
 def api_auth_headers() -> dict[str, str]:
     """Return the configured bearer credential without exposing it in logs."""
-    token = (get_settings().engine_api_token or "").strip()
+    token = (secret_value(get_settings().engine_api_token) or "").strip()
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 

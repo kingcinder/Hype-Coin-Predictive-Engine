@@ -14,7 +14,20 @@ Test coverage trajectory (backend core, weekly):
 
 Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It separates hype from structural danger and stores point-in-time evidence so scans can be replayed without future leakage.
 
-This is not an auto-trader, wallet, custody system, or guaranteed-profit bot.
+This is research software, not a wallet, custody system, or guaranteed-profit
+bot — it never holds keys or funds, and it makes no profit claims. Trading code
+does exist, and it is off by default:
+
+- The **paper ledger** records simulated trades and is the default path.
+- **Live orders** require `LIVE_TRADING_ENABLED=1`, the explicit arm phrase, a
+  bankroll cap, and a daily-loss cap. The kill switch cancels submitted orders
+  and closes the gate. GMGN venue calls require `GMGN_API_KEY` and
+  `GMGN_SIGNER_SECRET` and have not been verified against the live venue.
+- **Copy trading** is off by default and always logs a signal for human
+  approval; it never auto-executes.
+- The engine's risk **scores are not validated** (the latest report ranks worse
+  than its baselines); the Trading view and trading API payloads report
+  `scores_validated: false`.
 
 ## One-command startup
 

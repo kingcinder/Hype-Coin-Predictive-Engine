@@ -133,6 +133,23 @@ sudo serpent restart
 > browser/curl visit is the gate working, not an outage — use
 > `sudo serpent status` for a token-free status check.
 
+## Trading (off by default)
+
+The engine ships a paper ledger plus a disabled live path:
+
+- Paper trades are simulated and need no venue credentials.
+- Live orders stay disabled unless `LIVE_TRADING_ENABLED=1`, the arm phrase is
+  sent to `/trading/arm`, and `LIVE_MAX_BANKROLL_SOL` plus
+  `LIVE_DAILY_LOSS_LIMIT_SOL` are set. `/trading/kill` closes the gate and
+  cancels submitted orders; it reports any order it could not cancel.
+- GMGN venue calls are signed with `GMGN_API_KEY` + `GMGN_SIGNER_SECRET` and
+  refuse with `venue_auth_unimplemented` when either is missing. Venue
+  behavior has not been verified against the live GMGN API.
+- Copy trading is off by default and only logs signals for human approval.
+- `/trading/status` and the Trading view report `scores_validated: false`
+  while the latest validation report is worse than its baselines. Do not treat
+  these scores as predictive edge.
+
 ## Docker & Compose (optional container deployment)
 
 Prefer containers? The stack runs API + GUI + worker in one container, plus an
