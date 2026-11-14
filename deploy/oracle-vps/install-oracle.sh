@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Serpent Circle — Zero-Config Oracle VPS Installer (francisco-build)
+# Serpent Circle — Zero-Config Oracle VPS Installer
 #
 # Goal: as little configuration as possible between a fresh Ubuntu VPS
 # (e.g. Oracle Cloud Always Free, ARM or x86) and a running engine whose
@@ -10,7 +10,7 @@
 #   1. Installs the OS prerequisites (git, Python 3.12, venv, build tools)
 #      if they are missing.
 #   2. Runs the shipped system installer (packaging/install.sh) tracking
-#      the francisco-build branch — service user, venv, SQLite database,
+#      the selected branch — service user, venv, SQLite database,
 #      systemd unit, `serpent` CLI.
 #   3. Fills in the ONLY settings a phone-first deployment needs, in
 #      /opt/serpent/.env, without asking questions:
@@ -33,7 +33,7 @@
 #      never in the process list).
 #
 # Usage (on the VPS, as a sudo-capable user):
-#   git clone -b francisco-build \
+#   git clone -b main \
 #     https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
 #   cd Hype-Coin-Predictive-Engine
 #   sudo bash deploy/oracle-vps/install-oracle.sh
@@ -41,12 +41,11 @@
 # Optional environment:
 #   NTFY_TOPIC   use this ntfy topic instead of generating one
 #   HOOK_URL     also register this webhook URL for all event types
-#   BRANCH       branch for the system installer to track (default:
-#                francisco-build)
+#   BRANCH       branch for the system installer to track (default: main)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-BRANCH="${BRANCH:-francisco-build}"
+BRANCH="${BRANCH:-main}"
 PREFIX="${PREFIX:-/opt/serpent}"
 ENV_FILE="$PREFIX/.env"
 REPO_URL="${REPO_URL:-https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git}"

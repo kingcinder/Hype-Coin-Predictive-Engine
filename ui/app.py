@@ -2820,9 +2820,8 @@ def main() -> None:
     st.set_page_config(
         page_title="Serpent Circle Hype-Coin Engine",
         page_icon="🐍",
-        # francisco-build: phone-first instantiation — the dashboard's
-        # primary screen is a modern smartphone, so a single centered
-        # column with the sidebar collapsed, not a wide desktop grid.
+        # Phone-first instantiation: a single centered column with the
+        # sidebar collapsed for the primary smartphone screen.
         layout="centered",
         initial_sidebar_state="collapsed",
     )

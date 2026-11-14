@@ -30,9 +30,7 @@ def main() -> int:
 
     with SessionLocal() as session:
         existing = (
-            session.query(models.WebhookConfig)
-            .filter(models.WebhookConfig.url == url)
-            .first()
+            session.query(models.WebhookConfig).filter(models.WebhookConfig.url == url).first()
         )
         if existing is not None:
             existing.event_types = list(DEFAULT_EVENT_TYPES)
@@ -47,15 +45,14 @@ def main() -> int:
         register_webhook(
             session,
             url=url,
-            name="francisco-build: all event types",
+            name="oracle-vps: all event types",
             event_types=list(DEFAULT_EVENT_TYPES),
         )
         session.commit()
 
     print(
         f"webhook registered for {url} "
-        f"with all {len(DEFAULT_EVENT_TYPES)} event types: "
-        + ", ".join(DEFAULT_EVENT_TYPES)
+        f"with all {len(DEFAULT_EVENT_TYPES)} event types: " + ", ".join(DEFAULT_EVENT_TYPES)
     )
     return 0
 

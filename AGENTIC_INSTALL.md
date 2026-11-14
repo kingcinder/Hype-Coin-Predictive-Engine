@@ -68,12 +68,12 @@ the engine's floor (2 GB RAM, 10 GB disk). Notes for that host:
   Prefer the tunnel or the mesh VPN; never expose the dashboard to the
   public internet without the token gate in place.
 
-### Option 1A — Zero-config Oracle VPS (the francisco-build quick path)
+### Option 1A — Zero-config Oracle VPS
 
-On the `francisco-build` branch, Option 1 collapses to **one command**.
+The main branch's Option 1 collapses to **one command**.
 The branch ships `deploy/oracle-vps/install-oracle.sh`, which is the
 whole install: it installs OS prerequisites, runs the system installer
-(Step 3B) tracking this branch, then fills in the only settings a
+(Step 3B) tracking `main`, then fills in the only settings a
 phone-first deployment needs — an auto-generated `ENGINE_API_TOKEN`
 (never printed), ntfy push notifications enabled with **all five alert
 event types** and a generated private topic, and the LLM layer off
@@ -83,7 +83,7 @@ it also registers that webhook for **every** webhook event type via
 service and running the authenticated health check.
 
 ```bash
-git clone -b francisco-build \
+git clone -b main \
   https://github.com/kingcinder/Hype-Coin-Predictive-Engine.git
 cd Hype-Coin-Predictive-Engine
 sudo bash deploy/oracle-vps/install-oracle.sh
@@ -95,7 +95,7 @@ The script's final screen is the deliverable: report the **ntfy topic**
 alert reaches their phone) and the dashboard instructions. Do not print
 the API token; it lives only in `/opt/serpent/.env`.
 
-**Phone GUI on this branch:** the dashboard is instantiated phone-first
+**Phone GUI for this install:** the dashboard is instantiated phone-first
 — a centered single-column layout with the sidebar collapsed
 (`ui/app.py` page config) and a dark high-contrast Streamlit theme
 (`.streamlit/config.toml`) — because on this deployment the phone *is*
