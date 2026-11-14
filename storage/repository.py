@@ -783,7 +783,14 @@ def latest_scan_result(session: Session) -> models.ScanResult | None:
     return session.scalar(select(models.ScanResult).order_by(desc(models.ScanResult.ts)).limit(1))
 
 
-def latest_health(session: Session, *, limit: int = 25) -> list[models.SystemHealth]:
+def latest_health(session: Session, *, limit: int | None = None) -> list[models.SystemHealth]:
+    """Return the latest health row per component.
+
+    No limit by default: truncating this list silently drops components from
+    ``/health``, and a dropped row (e.g. the ``outcome_labels`` backlog) can
+    hide degraded state. Callers that only need a bounded sample pass
+    ``limit`` explicitly.
+    """
     sub = (
         select(models.SystemHealth.component, func.max(models.SystemHealth.ts).label("max_ts"))
         .group_by(models.SystemHealth.component)
@@ -799,8 +806,9 @@ def latest_health(session: Session, *, limit: int = 25) -> list[models.SystemHea
             ),
         )
         .order_by(models.SystemHealth.component)
-        .limit(limit)
     )
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list(session.scalars(stmt))
 
 

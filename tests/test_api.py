@@ -269,6 +269,44 @@ def test_growing_unresolved_backlog_degrades_health_status(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_health_never_truncates_the_outcome_labels_component(session) -> None:
+    """More than 25 components must not drop the backlog row from /health.
+
+    ``outcome_labels`` sorts after the filler names, so the old limit=25
+    truncated it away and the red backlog could never degrade the status.
+    """
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        for index in range(30):
+            record_health(
+                session,
+                component=f"aaa_component_{index:02d}",
+                state="ok",
+                message="filler",
+            )
+        record_health(
+            session,
+            component="outcome_labels",
+            state="red",
+            message="unresolved=4 previous=2 GREW",
+            error_count=4,
+        )
+        session.commit()
+
+        body = TestClient(app, headers=_AUTH_HEADERS).get("/health").json()
+
+        assert body["status"] == "degraded"
+        assert any(c["component"] == "outcome_labels" for c in body["components"])
+        assert len(body["components"]) >= 31
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_densify_labels_endpoint_ignores_future_observed_price(session) -> None:
     asset = seed_market_asset(session, symbol="DENSEAPI")
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
