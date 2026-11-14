@@ -289,25 +289,6 @@ class Settings(BaseSettings):
     skip_alert_max_alerts: int = 5
     skip_alert_max_minutes: float = 720.0
 
-    # Phase wedge re-alert: wall-clock elapsed time since first timeout
-    # replaces consecutive-skip counting. After this many seconds from the
-    # phase's first timeout the phase re-alerts (a fresh red watchdog row)
-    # so a long-running wedge keeps surfacing instead of going dark; 0
-    # disables re-alerting entirely.
-    phase_wedge_wallclock_timeout_seconds: float = 900.0
-    # Re-alert caps per wedge episode (a completed run — or an engine restart —
-    # starts a fresh episode with fresh caps): PHASE_WEDGE_MAX_ALERTS bounds how
-    # many re-alert rows one episode may record, and PHASE_WEDGE_MAX_MINUTES
-    # bounds how long re-alerting continues, measured from the episode's first
-    # timeout. Whichever limit is hit first mutes further re-alerts (an
-    # ``engine_stage_watchdog_skip_muted`` log marks the cutoff), so a phase
-    # wedged for many cycles eventually stops paging instead of re-alerting
-    # forever. The initial timeout alarm and the live
-    # ``watchdog.phases`` SSE state are never capped. Set either knob to 0 to
-    # lift that cap (unlimited).
-    phase_wedge_max_alerts: int = 5
-    phase_wedge_max_minutes: float = 720.0
-
     # lake-vs-SQL parity CI: daily comparison of the DuckDB lake read path
     # against the live SQL path over the archived evidence, paging a mismatch
     # via ntfy. PARITY_COMPARE_HOURS_AGO is the decision-time horizon for the

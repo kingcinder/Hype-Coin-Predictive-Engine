@@ -36,10 +36,11 @@ Less common: one retention pass wedged for another reason (hung object-store/Min
 
 The phase watchdog (`_run_watchdog_phase` in `engine/run.py`) now protects all blocking engine phases:
 
-### Wall-clock timeout (new)
-- **`phase_wedge_wallclock_timeout_seconds`** (default 900s / 15 min): After this many seconds from the phase's first timeout, the phase re-alerts (fresh red watchdog row) so a long-running wedge keeps surfacing instead of going dark
-- **`phase_wedge_max_alerts`** (default 5): Bounds how many re-alert rows one episode may record
-- **`phase_wedge_max_minutes`** (default 720 / 12 hours): Bounds how long re-alerting continues, measured from the episode's first timeout
+### Consecutive-skip re-alert (count-based)
+- **`skip_alert_cycles`** (default 20): After this many consecutive skipped iterations the phase re-alerts (fresh red watchdog row) so a long-running wedge keeps surfacing instead of going dark
+- **`skip_alert_max_alerts`** (default 5): Bounds how many re-alert rows one episode may record
+- **`skip_alert_max_minutes`** (default 720 / 12 hours): Bounds how long re-alerting continues, measured from the episode first skip. Whichever cap is hit first mutes further re-alerts.
+- Note: an earlier wall-clock variant of this re-alerting was reverted in R3 P0-2 - it reinterpreted the skip-count threshold as seconds, so skip_alert_cycles=20 meant 20 seconds. The count semantics above are the current behaviour.
 
 ### Per-phase timeouts (existing)
 - `PHASE_TIMEOUT_SECONDS` (default 900s): Shared ceiling for forecast, parity, data_lake, nightcrawler

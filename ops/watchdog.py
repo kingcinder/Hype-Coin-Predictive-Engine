@@ -26,11 +26,6 @@ from storage.repository import record_health
 
 log = get_logger(__name__)
 
-# Module-level episode state for phase wedge re-alerting
-# (wall-clock elapsed time since first timeout, not consecutive-skip count)
-_phase_wedge_start: dict[str, float] = {}
-_phase_alert_fires: dict[str, int] = {}
-
 _MAX_CONSECUTIVE_FAILURES = 5
 # Consecutive failures before the engine enters degraded mode
 _DISK_WARN_PCT = 85.0
@@ -250,61 +245,47 @@ def _in_flight_alive(stage: str) -> bool:
 
 def note_phase_skip(
     stage: str,
-    threshold: int | float | None = None,
-    max_alerts: int = 5,
-    max_duration_seconds: float = 900.0,
-    max_duration_cap_seconds: float = 720.0 * 60.0,
+    threshold: int,
+    max_alerts: int = 0,
+    max_duration_seconds: float = 0.0,
 ) -> Literal["counted", "alert", "muted_alerts", "muted_duration"]:
-    """Track one wall-clock elapsed time for ``stage``; report whether to re-alert.
+    """Track one consecutive skip for ``stage``; report whether to re-alert.
 
     A wedged phase alarms on its first timeout, then *skips* each iteration
-    while the abandoned run is still in flight. Tracking wall-clock elapsed time
-    since the phase's first timeout lets the caller re-alert once the duration
-    exceeds ``max_duration_seconds``, so a long wedge keeps surfacing instead
-    of going dark for its whole duration. On exceeding the duration the counter
-    resets, so re-alerts repeat every ``max_duration_seconds`` — unless the wedge
-    episode has hit its cap:
+    while the abandoned run is still in flight. Incrementing a per-stage skip
+    counter lets the caller re-alert once the count reaches ``threshold``,
+    so a long wedge doesn't stay silent for its whole duration. On hitting the
+    threshold the counter resets, so re-alerts repeat every ``threshold``
+    skips — unless the wedge episode has hit its cap:
 
-    - ``max_duration_seconds`` bounds how long the phase can be wedged before
-      re-alerting (measured from the episode's first timeout); 0 disables
-      re-alerting entirely.
-    - ``max_alerts`` bounds the re-alert rows one episode may record; 0 lifts
-      that cap (unlimited).
-    - ``max_duration_cap_seconds`` is a secondary ceiling: if the wedge has
-      persisted longer than this (measured from the episode's first timeout)
-      further re-alerts are muted even if ``max_alerts`` hasn't been hit yet.
+    - ``max_alerts`` bounds the re-alert rows one episode may record;
+    - ``max_duration_seconds`` bounds how long re-alerting continues, measured
+      from the episode's first skip (0 on either lifts that cap).
 
-    ``threshold`` is accepted for backward compatibility (old consecutive-skip
-    count). If provided it is treated as ``max_duration_seconds``.
-
-    Returns one of: ``"counted"`` (below the duration threshold — or
-    ``max_duration_seconds <= 0``, which disables re-alerting entirely: never
-    counts, never fires); ``"alert"`` (the duration was exceeded and the
-    caps exceeded-alert)``"muted_alerts"`` (the duration was exceeded but the episode has already
-    re-alerted ``max_alerts`` times: stay quiet); ``"muted_duration"`` (the
-    duration cap ``max_duration_cap_seconds`` has been reached: stay quiet). A
+    Returns one of: ``"counted"`` (below the threshold — or ``threshold <= 0``,
+    which disables re-alerting entirely: never counts, never fires);
+    ``"alert"`` (the threshold was reached and the episode is within its caps:
+    record a fresh re-alert row); ``"muted_alerts"`` / ``"muted_duration"``
+    (the threshold was reached but the episode has already re-alerted
+    ``max_alerts`` times or run past ``max_duration_seconds``: stay quiet). A
     completed run (``reset_phase_skip``) or engine restart
     (``reset_phase_skip_tracking``) starts a fresh episode and lifts the caps.
     """
-    # Backward compatibility: if threshold is provided (old consecutive-skip style),
-    # treat it as max_duration_seconds.
-    if threshold is not None:
-        max_duration_seconds = float(threshold)
-    if max_duration_seconds <= 0:
+    if threshold <= 0:
         return "counted"
     with _in_flight_lock:
         now = time.monotonic()
-        # Record the wedge episode start time if not already set.
-        _phase_wedge_start.setdefault(stage, now)
-        elapsed = now - _phase_wedge_start[stage]
-        if elapsed < max_duration_seconds:
+        _skip_alert_started.setdefault(stage, now)
+        n = _skip_counts.get(stage, 0) + 1
+        if n < threshold:
+            _skip_counts[stage] = n
             return "counted"
-        # Duration exceeded — check caps.
-        if max_alerts > 0 and _phase_alert_fires.get(stage, 0) >= max_alerts:
+        _skip_counts[stage] = 0  # cycle complete; decide whether to fire
+        if max_alerts > 0 and _skip_alert_fires.get(stage, 0) >= max_alerts:
             return "muted_alerts"
-        if max_duration_cap_seconds > 0 and elapsed >= max_duration_cap_seconds:
+        if max_duration_seconds > 0 and now - _skip_alert_started[stage] >= max_duration_seconds:
             return "muted_duration"
-        _phase_alert_fires[stage] = _phase_alert_fires.get(stage, 0) + 1
+        _skip_alert_fires[stage] = _skip_alert_fires.get(stage, 0) + 1
         return "alert"
 
 
