@@ -100,6 +100,17 @@ or `STATE.md` existed before 2026-09-09.
   slippage threshold instead of a hardcoded 30%. `api/main.py` now uses the
   single `api.auth` bearer check instead of a duplicate implementation.
 
+## DEBUG AUDIT — 2026-11-14 (post A–G)
+
+- Full `make gate` exit 0: ruff, format, mypy (181 files), broken imports,
+  declared dependencies, lock sync, and pytest all pass. Coverage 78.74%.
+- Fresh SQLite Alembic upgrade to `0031_whale_telemetry`, downgrade one revision,
+  and re-upgrade all exit 0.
+- `pip check` reports no broken requirements; OpenAPI generation succeeds with
+  84 paths, including both new F5/F6 routes.
+- Fixed the invalid escape `SyntaxWarning` in `tests/test_no_secrets_in_repo.py`
+  by making its regex-documenting docstring raw.
+
 ## RESOLVED — 2026-11-14 (Phase F: whale/smart-money telemetry)
 
 - **F1** — added `0031_whale_telemetry` (chained from `0030_trading_execution`

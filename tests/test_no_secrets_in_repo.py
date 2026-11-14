@@ -1,4 +1,4 @@
-"""Secret scan test (Phase D5).
+r"""Secret scan test (Phase D5).
 
 Walks every tracked text file (git ls-files; skip binary, skip .env)
 and fails if any line matches:
