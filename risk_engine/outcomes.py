@@ -234,10 +234,24 @@ def evaluate_outcomes(
         .where(models.RiskOutcome.evaluated_at.is_(None))
         .order_by(models.RiskOutcome.scored_at.asc())
     ).all()
+    # Append-only relabels add a bounded-version row per score. When that row
+    # already exists, stamping the legacy row's ``label_version`` too violates
+    # ``uq_risk_outcomes_score_label`` and aborts the whole scan (surfacing as a
+    # red worker health row). These scores are already covered.
+    current_version_scores = set(
+        session.scalars(
+            select(models.RiskOutcome.score_id).where(
+                models.RiskOutcome.label_version == LABEL_VERSION
+            )
+        )
+    )
 
     evaluated = 0
     unresolved = 0
     for outcome in outcomes:
+        if outcome.label_version != LABEL_VERSION and outcome.score_id in current_version_scores:
+            # Superseded legacy row: leave it untouched as v1 history.
+            continue
         score_time = ensure_utc(outcome.scored_at)
         window_end = score_time + window
         if window_end > decision_ts:

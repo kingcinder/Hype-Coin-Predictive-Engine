@@ -309,6 +309,44 @@ def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -
     assert after_outcome.lifecycle_phase_at_eval == "unknown"
 
 
+def test_legacy_row_with_existing_bounded_row_does_not_break_evaluation(session) -> None:
+    """Regression: relabelling a superseded v1 row crashed the whole scan.
+
+    ``evaluate_outcomes`` stamps the current label version when it evaluates a
+    row. If the append-only relabel already wrote a bounded row for the same
+    score, that UPDATE violates ``uq_risk_outcomes_score_label``; the scan
+    rolled back and left a red worker health row. The bounded row must be
+    evaluated and the superseded v1 row left untouched.
+    """
+    asset = seed_market_asset(session)
+    bounded_row = _seed_prediction(session, asset, model_version="test-legacy-dup")
+    score_id = bounded_row.score_id
+    legacy = models.RiskOutcome(
+        asset_id=asset.id,
+        score_id=score_id,
+        risk_band="BLACK",
+        scored_at=SCORED_AT,
+        lifecycle_phase_at_score="unknown",
+        label_version="v1_unbounded",
+        details={},
+    )
+    session.add(legacy)
+    session.flush()
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert bounded_row.collapsed is True
+    assert ensure_utc(bounded_row.evaluated_at) == EVAL_TS
+    assert bounded_row.label_version == "v2_bounded"
+    assert legacy.evaluated_at is None
+    assert legacy.label_version == "v1_unbounded"
+    rows = session.scalars(
+        select(models.RiskOutcome).where(models.RiskOutcome.score_id == score_id)
+    ).all()
+    assert len(rows) == 2
+
+
 def test_evaluated_outcome_is_labelled_v2_bounded(session) -> None:
     """A freshly evaluated outcome carries the bounded label version."""
     from risk_engine.outcomes import LABEL_VERSION
