@@ -80,7 +80,7 @@ class NightCrawlerOrchestrator:
         """Initialize all available crawlers."""
         self._crawlers["coingecko"] = CoinGeckoCrawler()
         if self.settings.nightcrawler_cmc_enabled:
-            self._crawlers["coinmarketcap"] = CMCCrawler()
+            self._crawlers["coinmarketcap"] = CMCCrawler(api_key=self.settings.cmc_api_key)
         self._crawlers["pump_fun"] = PumpFunCrawler()
         self._crawlers["defillama"] = DeFiLlamaCrawler()
         self._crawlers["whale_tracker"] = WhaleTrackerCrawler()

@@ -1,7 +1,10 @@
 """CoinMarketCap Night Crawler — new listings, trending tokens, market data.
 
-Uses the CoinMarketCap free API (no key required for basic endpoints) to track
-new token listings, trending tokens, and market cap data. This crawler feeds
+With ``CMC_API_KEY`` configured the crawler uses the CoinMarketCap Pro API
+(``pro-api``); without a key it keeps the legacy keyless ``data-api`` path.
+Pro's dedicated trending/new-listing endpoints are plan-gated (403 on a Basic
+key), so trending is taken from the highest-volume listings and new listings
+from the ``date_added`` field of the same listings call. This crawler feeds
 the signal scoring engine with market intelligence from a second major source,
 providing corroboration alongside CoinGecko data.
 """
@@ -18,9 +21,11 @@ log = get_logger(__name__)
 
 
 class CMCCrawler(BaseCrawler):
-    """CoinMarketCap free API crawler — trending, listings, market data."""
+    """CoinMarketCap crawler — trending, listings, market data."""
 
     BASE_URL = "https://api.coinmarketcap.com/data-api/v3"
+    PRO_BASE_URL = "https://pro-api.coinmarketcap.com"
+    PRO_LISTINGS_PATH = "/v1/cryptocurrency/listings/latest"
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
@@ -40,11 +45,98 @@ class CMCCrawler(BaseCrawler):
         return headers
 
     def fetch_items(self) -> list[dict[str, Any]]:
+        if self._api_key:
+            return self._fetch_pro_items()
         items: list[dict[str, Any]] = []
         items.extend(self._fetch_trending())
         items.extend(self._fetch_new_listings())
         items.extend(self._fetch_top_gainers())
         return items
+
+    def _fetch_pro_items(self) -> list[dict[str, Any]]:
+        """One Pro listings call, split into new, trending, and gaining coins."""
+        try:
+            resp = self.client.get(
+                f"{self.PRO_BASE_URL}{self.PRO_LISTINGS_PATH}",
+                params={"start": "1", "limit": "250", "convert": "USD"},
+            )
+            payload = resp.json()
+        except Exception as exc:
+            log.debug("cmc_pro_listings_failed", error=str(exc))
+            return []
+        coins = [coin for coin in (payload.get("data") or []) if isinstance(coin, dict)]
+        if not coins:
+            return []
+
+        items: list[dict[str, Any]] = []
+        newest = sorted(coins, key=lambda coin: str(coin.get("date_added") or ""), reverse=True)
+        items.extend(self._pro_item(coin, "new_listing") for coin in newest[:50])
+        by_volume = sorted(coins, key=self._pro_volume, reverse=True)
+        items.extend(self._pro_item(coin, "trending") for coin in by_volume[:25])
+        gainers = [
+            coin
+            for coin in coins
+            if self._pro_change(coin) > 10 and self._pro_volume(coin) > 100_000
+        ][:20]
+        items.extend(self._pro_item(coin, "gainer") for coin in gainers)
+        return items
+
+    @staticmethod
+    def _pro_quote(coin: dict[str, Any]) -> dict[str, Any]:
+        quote = coin.get("quote")
+        if not isinstance(quote, dict):
+            return {}
+        usd = quote.get("USD")
+        return usd if isinstance(usd, dict) else {}
+
+    @classmethod
+    def _pro_number(cls, coin: dict[str, Any], key: str) -> float:
+        try:
+            return float(cls._pro_quote(coin).get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _pro_change(cls, coin: dict[str, Any]) -> float:
+        return cls._pro_number(coin, "percent_change_24h")
+
+    @classmethod
+    def _pro_volume(cls, coin: dict[str, Any]) -> float:
+        return cls._pro_number(coin, "volume_24h")
+
+    def _pro_item(self, coin: dict[str, Any], kind: str) -> dict[str, Any]:
+        symbol = str(coin.get("symbol") or "")
+        name = str(coin.get("name") or symbol)
+        slug = str(coin.get("slug") or "")
+        change = self._pro_change(coin)
+        metrics: dict[str, Any] = {
+            "cmc_slug": slug,
+            "symbol": symbol,
+            "current_price": self._pro_number(coin, "price"),
+            "market_cap": self._pro_number(coin, "market_cap"),
+            "volume_24h": self._pro_number(coin, "volume_24h"),
+            "market_cap_rank": coin.get("cmc_rank"),
+            "date_added": coin.get("date_added"),
+            "price_change_24h_pct": change,
+        }
+        if kind == "new_listing":
+            text = f"{name} ({symbol}) listed on CoinMarketCap"
+            metrics["new_listing"] = True
+        elif kind == "gainer":
+            text = f"{name} ({symbol}) up {change:.1f}% in 24h on CoinMarketCap"
+            metrics["gainer"] = True
+        else:
+            text = f"{name} ({symbol}) trending on CoinMarketCap"
+            metrics["trending"] = True
+        return {
+            "title": name,
+            "text": text,
+            "url": f"https://coinmarketcap.com/currencies/{slug}/",
+            "published": utc_now(),
+            "source_domain": "coinmarketcap.com",
+            "source_type": "market_data",
+            "metrics": metrics,
+        }
 
     def _fetch_trending(self) -> list[dict[str, Any]]:
         """Fetch trending cryptocurrencies from CMC."""
