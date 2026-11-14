@@ -37,7 +37,7 @@ def _enable_ntfy(notifier: NtfyNotifier, *, digest: bool = False) -> None:
 
 def test_default_ntfy_alert_types_cover_all_push_types() -> None:
     """Guard against the ntfy allowlist type regressing: the default settings
-    must expose exactly the five alert types the notifier can push, or pushes
+    must expose exactly the push-alert types the notifier can push, or pushes
     silently stop matching (R3 P0-1)."""
     expected = [
         "ignition_detected",
@@ -45,6 +45,7 @@ def test_default_ntfy_alert_types_cover_all_push_types() -> None:
         "syndicate_recidivism",
         "lifecycle_transition",
         "phase_wedge_timeout",
+        "tracked_wallet_first_buy",
     ]
     assert NtfyNotifier().settings.ntfy_alert_types == expected
 

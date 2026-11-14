@@ -11,3 +11,7 @@
 11. Verdict is inconclusive if sample minimums are unmet or any CI overlaps its baseline; inconclusive means no deployment.
 12. Deployment needs a separate human authorization: the human writes APPROVED: <date> <initials> in docs/deployment-authorization.md; no code ever reads that file.
 13. Red-team coverage: write the heading ## Red-team attacks (22) and amendments (6) and under it exactly one line: TODO(human): paste the red-team list here. The coder must not invent entries.
+
+## Red-team attacks (22) and amendments (6)
+
+TODO(human): paste the red-team list here. The coder must not invent entries.

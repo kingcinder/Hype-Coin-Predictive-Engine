@@ -258,6 +258,10 @@ def test_run_harness_reports_unresolved_outcome_backlog(session) -> None:
     assert report.unresolved_outcomes == 1
     assert report.database_digest["unresolved_outcomes"] == 1
     assert any("unresolved" in note for note in report.notes)
+    # B4 top-of-file label accounting: no v2 row resolved, one still unresolved.
+    assert report.resolved == 0
+    assert report.censored == 1
+    assert report.retrospective_exploratory["text"] == "no confirmatory claim"
 
 
 # ── run_harness leakage-audit wiring (H24) ──────────────────────────────────

@@ -87,9 +87,28 @@ class TradeEngine:
         if mode not in ("paper", "live"):
             raise TradeRefused("bad_mode")
         if mode == "live":
-            from trading.live_gate import require_open  # noqa: PLC0415 - Phase D module.
+            from trading.live_gate import (  # noqa: PLC0415 - Phase D module.
+                daily_loss_sol,
+                require_open,
+            )
 
             require_open(session)
+            loss = daily_loss_sol(session, now=self._now())
+            limit = self.settings.live_daily_loss_limit_sol
+            if limit is not None and loss >= limit:
+                killed_at = self._now()
+
+                def _kill(write_session: Session) -> None:
+                    write_session.add(
+                        models.LiveGateState(
+                            ts=killed_at,
+                            kind="killed",
+                            reason="daily_loss_limit",
+                        )
+                    )
+
+                queued_write(_kill)
+                raise TradeRefused("daily_loss_limit")
         if not why_entered.strip():
             raise TradeRefused("why_required")
 

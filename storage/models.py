@@ -1274,6 +1274,56 @@ class TradeDivergence(Base, TimestampMixin):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class FirstBuy(Base):
+    __tablename__ = "first_buys"
+    __table_args__ = (Index("ix_first_buys_asset_ts", "asset_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    wallet: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_usd: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=True)
+    seconds_after_pair_creation: Mapped[int | None] = mapped_column(Integer)
+    is_tracked_wallet: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PairFirstWindowStats(Base):
+    __tablename__ = "pair_first_window_stats"
+    __table_args__ = (UniqueConstraint("asset_id", name="uq_pair_first_window_asset"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    window_minutes: Mapped[int | None] = mapped_column(Integer)
+    buys: Mapped[int | None] = mapped_column(Integer)
+    sells: Mapped[int | None] = mapped_column(Integer)
+    buy_sell_ratio: Mapped[Any] = mapped_column(Numeric(18, 6), nullable=True)
+    computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DevWalletStats(Base):
+    __tablename__ = "dev_wallet_stats"
+    __table_args__ = (UniqueConstraint("asset_id", name="uq_dev_wallet_stats_asset"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    deployer: Mapped[str | None] = mapped_column(String(64))
+    dev_holding_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=True)
+    dev_sold: Mapped[bool | None] = mapped_column(Boolean)
+    last_checked_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class HolderMetric(Base):
+    __tablename__ = "holder_metrics"
+    __table_args__ = (Index("ix_holder_metrics_asset_ts", "asset_id", "ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    top10_pct: Mapped[Any] = mapped_column(Numeric(10, 4), nullable=True)
+    holder_count: Mapped[int | None] = mapped_column(Integer)
+    holder_growth_per_hour: Mapped[Any] = mapped_column(Numeric(18, 6), nullable=True)
+
+
 class CopyLog(Base):
     __tablename__ = "copy_log"
 

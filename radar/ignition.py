@@ -156,6 +156,8 @@ class IgnitionRadar:
             "pool_address": min(pool.address for pool in pools),
             "chain": self._chain_slug(session, asset.chain_id),
             "window_start": window_start.isoformat(),
+            "event_ts": anchor.isoformat(),
+            "signal_id": f"ignition:{asset.id}:{int(anchor.timestamp())}",
         }
         source_id = session.scalar(
             select(models.MarketSnapshot.source_id)
@@ -254,6 +256,11 @@ class IgnitionRadar:
     ) -> bool:
         if source_id <= 0:
             return False
+        if event_type == IgnitionEventType.SNIPER_BURST.value:
+            event_ts = ensure_utc(ts)
+            details = dict(details)
+            details.setdefault("event_ts", event_ts.isoformat())
+            details.setdefault("signal_id", f"ignition:{asset.id}:{int(event_ts.timestamp())}")
         existing = session.scalar(
             select(models.IgnitionEvent).where(
                 models.IgnitionEvent.asset_id == asset.id,

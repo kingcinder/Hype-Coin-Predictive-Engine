@@ -182,6 +182,34 @@ async def trade_candidate(mint: str, body: CandidateTradeBody, session: DbSessio
     return {"status": "opened", "position_id": position_id}
 
 
+@router.get("/paper/signals/attribution")
+async def signal_attribution(session: DbSession) -> list[dict]:
+    trades = session.scalars(
+        select(models.LedgerTrade).order_by(models.LedgerTrade.closed_at)
+    ).all()
+    groups: dict[str, list[models.LedgerTrade]] = {}
+    for trade in trades:
+        signal_type = (trade.source_signal or "unknown").split(":", 1)[0] or "unknown"
+        groups.setdefault(signal_type, []).append(trade)
+    out: list[dict] = []
+    for signal_type, rows in sorted(groups.items()):
+        wins = sum(1 for row in rows if row.pnl_sol is not None and row.pnl_sol > 0)
+        if len(rows) < 10:
+            out.append({"signal_type": signal_type, "trades": len(rows), "insufficient_data": True})
+            continue
+        values = [row.pnl_sol for row in rows if row.pnl_sol is not None]
+        mean = sum(values, Decimal("0")) / len(values) if values else Decimal("0")
+        out.append(
+            {
+                "signal_type": signal_type,
+                "trades": len(rows),
+                "wins": wins,
+                "mean_pnl_sol": str(mean),
+            }
+        )
+    return out
+
+
 # Live trading routes (Phase D2-D4)
 
 
@@ -263,6 +291,17 @@ async def trading_kill(session: DbSession) -> dict:
         except Exception:  # noqa: BLE001 - kill must survive any executor failure.
             failed += 1
     return {"killed": True, "cancelled": cancelled, "failed": failed}
+
+
+@router.post("/trading/copy/{log_id}/approve")
+async def trading_copy_approve(log_id: int, session: DbSession) -> dict:
+    from trading.copy import approve_copy
+
+    try:
+        row = approve_copy(session, log_id)
+    except TradeRefused as exc:
+        _raise_mapped(exc)
+    return {"status": row.status, "log_id": row.id, "detail": row.detail}
 
 
 @router.post("/trading/execute")

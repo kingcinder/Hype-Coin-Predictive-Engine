@@ -8,18 +8,20 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import Settings, get_settings
 from storage.database import get_session
 
 
-def _check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
+def _check_bearer_token(
+    authorization: str | None, settings: Settings | None = None
+) -> tuple[int, str] | None:
     """Validate the ``Authorization: Bearer <token>`` credential (H4).
 
     Returns ``None`` when the request is authorized, else ``(status, detail)``.
     Fail closed: when no token is configured and the local-dev bypass is off,
     every request is refused with 403. Comparison is constant-time.
     """
-    settings = get_settings()
+    settings = settings or get_settings()
     if settings.engine_api_auth_bypass:
         return None
     token = (settings.engine_api_token or "").strip()
@@ -43,6 +45,8 @@ DbSession = Annotated[Session, Depends(get_session)]
 """SQLAlchemy session dependency for DB access."""
 
 
-def check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
+def check_bearer_token(
+    authorization: str | None, settings: Settings | None = None
+) -> tuple[int, str] | None:
     """Public wrapper for bearer-token validation."""
-    return _check_bearer_token(authorization)
+    return _check_bearer_token(authorization, settings=settings)

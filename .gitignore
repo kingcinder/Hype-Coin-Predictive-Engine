@@ -45,3 +45,5 @@ coverage/history.json.new
 serpent.db.lock
 # Trading rules (example only; real one is user-provided)
 config/trading_rules.json
+
+config/tracked_wallets.json

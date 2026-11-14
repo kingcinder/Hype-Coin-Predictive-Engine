@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import time
 from collections import defaultdict
@@ -19,6 +18,7 @@ from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.orm import Session
 
 from api.analytics import similar_setups
+from api.auth import check_bearer_token
 from api.schemas import (
     AlertAckRequest,
     AlertQualityLedger,
@@ -114,30 +114,8 @@ VALIDATION_REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
 
 
 def _check_bearer_token(authorization: str | None) -> tuple[int, str] | None:
-    """Validate the ``Authorization: Bearer <token>`` credential (H4).
-
-    Returns ``None`` when the request is authorized, else ``(status, detail)``.
-    Fail closed: when no token is configured and the local-dev bypass is off,
-    every request is refused with 403. Comparison is constant-time.
-    """
-    settings = get_settings()
-    if settings.engine_api_auth_bypass:
-        return None
-    token = (settings.engine_api_token or "").strip()
-    if not token:
-        return (
-            403,
-            "API token not configured: set ENGINE_API_TOKEN "
-            "(or ENGINE_API_AUTH_BYPASS=1 for local development only)",
-        )
-    if not authorization:
-        return 401, "missing Authorization header: expected 'Bearer <token>'"
-    scheme, _, credential = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not credential:
-        return 401, "malformed Authorization header: expected 'Bearer <token>'"
-    if not hmac.compare_digest(credential, token):
-        return 401, "invalid API token"
-    return None
+    """Route auth through this module's settings name (tests patch it here)."""
+    return check_bearer_token(authorization, settings=get_settings())
 
 
 class _RequireApiTokenMiddleware:

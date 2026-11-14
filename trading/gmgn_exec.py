@@ -125,7 +125,10 @@ class GmgnExecutor:
                 expected_price is not None
                 and expected_price > 0
                 and fill.price > 0
-                and (fill.price - expected_price).copy_abs() / expected_price > Decimal("0.3")
+                and (
+                    (fill.price - expected_price).copy_abs() / expected_price * Decimal("100")
+                    > slip
+                )
             ):
                 write_session.add(
                     models.TradeDivergence(

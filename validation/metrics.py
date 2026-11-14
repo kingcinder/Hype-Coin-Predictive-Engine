@@ -279,49 +279,102 @@ def bootstrap_ci_generic(
     return (float(np.percentile(finite, 2.5)), float(np.percentile(finite, 97.5)))
 
 
+def _isnan(x: float) -> bool:
+    return x != x
+
+
 def verdict(
     value: float,
-    ci: WilsonCI,
-    baseline: float,
-    baseline_ci: WilsonCI,
+    lo: float | WilsonCI,
+    hi: float | WilsonCI | None = None,
+    base: float | WilsonCI | None = None,
+    base_lo: float | WilsonCI | None = None,
+    base_hi: float | None = None,
+    n_assets: int | None = None,
+    lower_is_better: bool | None = None,
     *,
-    higher_is_better: bool,
-    n: int,
+    higher_is_better: bool | None = None,
+    n: int | None = None,
     min_samples: int = MIN_SAMPLES_FOR_VERDICT,
+    min_assets: int = 30,
 ) -> str:
-    """Apply methodology §4.2 verdict rules.
+    """Apply the pre-registered verdict rules.
 
-    - better_than_baseline: model CI lies entirely past the baseline point
-      estimate AND the baseline CI's near edge (in the good direction).
-    - worse_than_baseline: model CI entirely past the bad side of both.
-    - indistinguishable_from_baseline: CIs overlap.
-    - insufficient_data: n below the minimum or non-finite value.
+    Supports the Phase B4 asset-level API::
+
+        verdict(value, lo, hi, base, base_lo, base_hi, n_assets, lower_is_better)
+
+    and the older cell API (``lo``/``base_lo`` are :class:`WilsonCI`) kept for
+    the existing metric cells and their committed self-test expectations.
     """
+    if isinstance(lo, WilsonCI):
+        # Existing cell API: the third/fourth positional arguments were
+        # ``baseline`` and ``baseline_ci`` before the B4 signature added
+        # ``hi``/``base_lo``/``base_hi``.
+        baseline = hi
+        baseline_ci = base
+        if (
+            baseline is None
+            or isinstance(baseline, WilsonCI)
+            or not isinstance(baseline_ci, WilsonCI)
+        ):
+            return "insufficient_data"
+        sample_n = n if n is not None else (n_assets or 0)
+        if (
+            sample_n < min_samples
+            or not np.isfinite(value)
+            or not np.isfinite(lo.low)
+            or not np.isfinite(lo.high)
+            or not np.isfinite(baseline)
+            or not np.isfinite(baseline_ci.low)
+            or not np.isfinite(baseline_ci.high)
+        ):
+            # A non-finite value OR non-finite CI bounds (e.g. a bootstrap that
+            # degenerated on rare-event resamples) must yield insufficient_data,
+            # never a misleading fall-through to indistinguishable_from_baseline.
+            return "insufficient_data"
+        cell_lo, cell_hi = lo.low, lo.high
+        blo, bhi = baseline_ci.low, baseline_ci.high
+        if higher_is_better is None:
+            higher_is_better = not bool(lower_is_better)
+        if higher_is_better:
+            if cell_lo > baseline and cell_lo > bhi:
+                return "better_than_baseline"
+            if cell_hi < baseline and cell_hi < blo:
+                return "worse_than_baseline"
+        else:  # lower is better (brier, ECE, ordinal distance)
+            if cell_hi < baseline and cell_hi < blo:
+                return "better_than_baseline"
+            if cell_lo > baseline and cell_lo > bhi:
+                return "worse_than_baseline"
+        return "indistinguishable_from_baseline"
+
+    # Phase B4 asset-level API, exactly as pre-registered.
     if (
-        n < min_samples
-        or not np.isfinite(value)
-        or not np.isfinite(ci.low)
-        or not np.isfinite(ci.high)
-        or not np.isfinite(baseline_ci.low)
-        or not np.isfinite(baseline_ci.high)
+        hi is None
+        or isinstance(hi, WilsonCI)
+        or base is None
+        or isinstance(base, WilsonCI)
+        or base_lo is None
+        or base_hi is None
+        or n_assets is None
+        or lower_is_better is None
+        or isinstance(base_lo, WilsonCI)
     ):
-        # A non-finite value OR non-finite CI bounds (e.g. a bootstrap that
-        # degenerated on rare-event resamples) must yield insufficient_data,
-        # never a misleading fall-through to indistinguishable_from_baseline.
         return "insufficient_data"
-    lo, hi = ci.low, ci.high
-    blo, bhi = baseline_ci.low, baseline_ci.high
-    if higher_is_better:
-        if lo > baseline and lo > bhi:
-            return "better_than_baseline"
-        if hi < baseline and hi < blo:
+    if n_assets < min_assets or any(map(_isnan, (value, lo, hi, base))):
+        return "insufficient_data"
+    if lower_is_better:
+        if hi < base_lo:
+            return "beats_baseline"
+        if lo > base_hi:
             return "worse_than_baseline"
-    else:  # lower is better (brier, ECE, ordinal distance)
-        if hi < baseline and hi < blo:
-            return "better_than_baseline"
-        if lo > baseline and lo > bhi:
+    else:
+        if lo > base_hi:
+            return "beats_baseline"
+        if hi < base_lo:
             return "worse_than_baseline"
-    return "indistinguishable_from_baseline"
+    return "indistinguishable"
 
 
 BAND_RANKS = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3, "BLACK": 4}

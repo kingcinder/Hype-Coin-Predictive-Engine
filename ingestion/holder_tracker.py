@@ -8,9 +8,16 @@ Computes holder_count and holder_growth from actual on-chain data:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from common.http import HttpClient
 from common.logging import get_logger
+from common.time import ensure_utc, utc_now
+from storage import models
 
 log = get_logger(__name__)
 
@@ -142,3 +149,65 @@ def compute_holder_growth(
         return None
     growth = (current.holder_count - previous.holder_count) / previous.holder_count
     return round(growth, 4)
+
+
+def record_holder_metrics(
+    session: Session,
+    asset_id: int,
+    *,
+    top10_pct: float | None,
+    holder_count: int | None,
+    observed_at: datetime | None = None,
+) -> models.HolderMetric:
+    """Persist a holder-metric row; unknown values stay ``None``."""
+    now = ensure_utc(observed_at or utc_now())
+    previous = session.scalar(
+        select(models.HolderMetric)
+        .where(
+            models.HolderMetric.asset_id == asset_id,
+            models.HolderMetric.ts <= now - timedelta(hours=1),
+        )
+        .order_by(models.HolderMetric.ts.desc())
+        .limit(1)
+    )
+    growth: Decimal | None = None
+    if previous is not None and previous.holder_count is not None and holder_count is not None:
+        hours = (now - ensure_utc(previous.ts)).total_seconds() / 3600.0
+        if hours > 0:
+            growth = Decimal(str((holder_count - previous.holder_count) / hours)).quantize(
+                Decimal("0.000001")
+            )
+    row = models.HolderMetric(
+        asset_id=asset_id,
+        ts=now,
+        top10_pct=None if top10_pct is None else Decimal(str(top10_pct)),
+        holder_count=holder_count,
+        holder_growth_per_hour=growth,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def record_dev_wallet_stats(
+    session: Session,
+    asset_id: int,
+    *,
+    deployer: str | None = None,
+    dev_holding_pct: float | None = None,
+    dev_sold: bool | None = None,
+    observed_at: datetime | None = None,
+) -> models.DevWalletStats:
+    """Upsert the developer-wallet snapshot; unknown values stay ``None``."""
+    row = session.scalar(
+        select(models.DevWalletStats).where(models.DevWalletStats.asset_id == asset_id)
+    )
+    if row is None:
+        row = models.DevWalletStats(asset_id=asset_id)
+        session.add(row)
+    row.deployer = deployer
+    row.dev_holding_pct = None if dev_holding_pct is None else Decimal(str(dev_holding_pct))
+    row.dev_sold = dev_sold
+    row.last_checked_ts = ensure_utc(observed_at or utc_now())
+    session.flush()
+    return row

@@ -760,6 +760,38 @@ class IngestionService:
                             pct_supply=pct_supply,
                         )
                         count += 1
+                    from ingestion.holder_tracker import (  # noqa: PLC0415
+                        record_dev_wallet_stats,
+                        record_holder_metrics,
+                    )
+
+                    pcts = []
+                    if supply and supply > 0:
+                        pcts = [
+                            float(account.get("uiAmount") or 0) / supply
+                            for account in accounts
+                            if account.get("uiAmount") is not None
+                        ]
+                    top10 = sum(sorted(pcts, reverse=True)[:10]) if pcts else None
+                    record_holder_metrics(
+                        session,
+                        asset.id,
+                        top10_pct=top10,
+                        holder_count=len(accounts) if accounts else None,
+                        observed_at=observed_at,
+                    )
+                    contract = session.scalar(
+                        select(models.Contract)
+                        .where(models.Contract.asset_id == asset.id)
+                        .order_by(models.Contract.created_at.desc())
+                        .limit(1)
+                    )
+                    record_dev_wallet_stats(
+                        session,
+                        asset.id,
+                        deployer=contract.deployer_wallet if contract else None,
+                        observed_at=observed_at,
+                    )
                     raw.raw_path = raw.raw_path or f"holder_snapshot:{asset.id}:{ts.isoformat()}"
                 except Exception as exc:  # noqa: BLE001 - preserve per-asset source failure.
                     session.rollback()
@@ -1050,6 +1082,17 @@ class IngestionService:
                 details={"liquidity_usd": normalized.liquidity_usd},
             )
             session.add(flag)
+        from radar.first_buys import record_first_buys  # noqa: PLC0415 - local import.
+
+        # The pair payload carries no wallet-level swaps; record the stats row
+        # as unknown rather than inventing zeroes.
+        record_first_buys(
+            session,
+            base_asset.id,
+            normalized.pair_created_at or observed_at,
+            [],
+            set(),
+        )
         return True
 
 

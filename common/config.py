@@ -220,7 +220,7 @@ class Settings(BaseSettings):
     ntfy_daily_digest_enabled: bool = True
     ntfy_alert_types_csv: str = (
         "ignition_detected,liquidity_withdrawal_warning,syndicate_recidivism,"
-        "lifecycle_transition,phase_wedge_timeout"
+        "lifecycle_transition,phase_wedge_timeout,tracked_wallet_first_buy"
     )
 
     # archive & retention: Parquet compaction of raw evidence

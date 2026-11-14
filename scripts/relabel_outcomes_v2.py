@@ -8,7 +8,8 @@ Usage:
     python -m scripts.relabel_outcomes_v2 --apply    # write v2 copies
     python -m scripts.relabel_outcomes_v2 --apply --batch 500
 
-Rows whose observation window has not elapsed, or whose lifecycle phase inside
+Only evaluated ``v1_unbounded`` rows are considered. Rows whose observation
+window has not elapsed, or whose lifecycle phase inside
 ``[scored_at, scored_at + window]`` neither collapses nor survives, stay v1 and
 are reported as censored (L5: unknown stays unknown).
 """
@@ -32,39 +33,38 @@ from risk_engine.outcomes import (
     _price_change_since,
 )
 from storage import models
-from storage.database import SessionLocal
+from storage.database import session_scope
 from storage.repository import queued_write
 from storage.write_queue import start_write_queue, stop_write_queue
 
 
-def relabel(
-    session: Session,
-    *,
-    apply: bool,
-    now: datetime | None = None,
-    batch: int | None = None,
-) -> dict[str, int]:
-    """Copy eligible v1 rows to bounded v2 rows; return counts."""
-    settings = get_settings()
-    window = timedelta(hours=settings.risk_outcome_window_hours)
-    now = ensure_utc(now or utc_now())
-
+def _candidate_rows(session: Session) -> list[models.RiskOutcome]:
+    """Evaluated v1 rows that do not already have a v2 copy."""
     done = select(models.RiskOutcome.score_id).where(
         models.RiskOutcome.label_version == LABEL_VERSION
     )
-    rows = list(
+    return list(
         session.scalars(
             select(models.RiskOutcome)
             .where(
-                models.RiskOutcome.label_version != LABEL_VERSION,
+                models.RiskOutcome.label_version == "v1_unbounded",
+                models.RiskOutcome.evaluated_at.is_not(None),
                 models.RiskOutcome.score_id.not_in(done),
             )
             .order_by(models.RiskOutcome.scored_at.asc())
         ).all()
     )
-    if batch:
-        rows = rows[:batch]
 
+
+def _copy_rows(
+    session: Session,
+    rows: list[models.RiskOutcome],
+    *,
+    now: datetime,
+) -> dict[str, int]:
+    """Append bounded copies for ``rows``; return copied/censored counts."""
+    settings = get_settings()
+    window = timedelta(hours=settings.risk_outcome_window_hours)
     copied = 0
     censored = 0
     for old in rows:
@@ -98,12 +98,46 @@ def relabel(
             )
         )
         copied += 1
+    return {"copied": copied, "censored": censored}
 
+
+def relabel(
+    session: Session,
+    *,
+    apply: bool,
+    now: datetime | None = None,
+    batch: int | None = None,
+) -> dict[str, int]:
+    """Copy eligible v1 rows to bounded v2 rows; return counts."""
+    now = ensure_utc(now or utc_now())
+    rows = _candidate_rows(session)
+    if batch:
+        rows = rows[:batch]
+
+    counts = _copy_rows(session, rows, now=now)
     if apply:
         session.flush()
     else:
         session.rollback()
-    return {"candidates": len(rows), "copied": copied, "censored": censored}
+    return {
+        "candidates": len(rows),
+        "copied": counts["copied"],
+        "censored": counts["censored"],
+    }
+
+
+def _relabel_batch(session: Session, ids: list[int], *, now: datetime) -> dict[str, int]:
+    """Copy one explicit batch of v1 primary keys (one write-queue transaction)."""
+    rows = list(
+        session.scalars(
+            select(models.RiskOutcome)
+            .where(models.RiskOutcome.id.in_(ids))
+            .order_by(models.RiskOutcome.scored_at.asc())
+        ).all()
+    )
+    counts = _copy_rows(session, rows, now=now)
+    session.flush()
+    return {"copied": counts["copied"], "censored": counts["censored"]}
 
 
 def main() -> None:
@@ -117,26 +151,39 @@ def main() -> None:
     parser.add_argument(
         "--batch",
         type=int,
-        default=None,
-        help="Maximum number of v1 rows to process in one invocation.",
+        default=500,
+        help="Rows per write transaction (one queued_write per batch).",
     )
     args = parser.parse_args()
+    if args.batch < 1:
+        parser.error("--batch must be >= 1")
 
+    now = utc_now()
     if args.apply:
         start_write_queue()
         try:
-            counts = queued_write(lambda session: relabel(session, apply=True, batch=args.batch))
+            with session_scope() as session:
+                ids = [row.id for row in _candidate_rows(session)]
+            copied = 0
+            censored = 0
+            for offset in range(0, len(ids), args.batch):
+                chunk = ids[offset : offset + args.batch]
+
+                def _run_batch(
+                    write_session: Session, batch_ids: list[int] = chunk
+                ) -> dict[str, int]:
+                    return _relabel_batch(write_session, batch_ids, now=now)
+
+                counts = queued_write(_run_batch)
+                copied += counts["copied"]
+                censored += counts["censored"]
         finally:
             stop_write_queue()
+        print(f"would_create={copied} censored={censored} mode=apply")
     else:
-        with SessionLocal() as session:
-            counts = relabel(session, apply=False, batch=args.batch)
-
-    print(
-        f"candidates={counts['candidates']} copied={counts['copied']} "
-        f"censored={counts['censored']} mode={'apply' if args.apply else 'dry-run'}"
-    )
-    if not args.apply:
+        with session_scope() as session:
+            counts = relabel(session, apply=False, now=now)
+        print(f"would_create={counts['copied']} censored={counts['censored']}")
         print("Run with --apply to write the v2 copies.")
 
 

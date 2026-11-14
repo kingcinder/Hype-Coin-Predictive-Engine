@@ -75,19 +75,72 @@ or `STATE.md` existed before 2026-09-09.
   the venue fill, but order-status reconciliation for partially filled orders is
   not implemented beyond the `unconfirmed` alert.
 
-## BLOCKED — 2026-11-14 (B4/B8 residual gaps)
+## RESOLVED — 2026-11-14 (A–E re-audit: B3/B4/B7 + C/D residuals)
 
-- **B4 applied except two items.** Confirmatory metrics filter to
-  `v2_bounded`; report carries `resolved`/`censored`; ordinal distance and
-  per-band collapse precision now bootstrap over ASSETS (not rows). STILL
-  MISSING: asset-grouped CIs for the ECE/calibration cells (still row-level;
-  they take plain arrays, not outcome rows), and the
-  `retrospective_exploratory` v1 report section. `tests/test_verdict.py` is
-  not added because the spec's `verdict()` signature/strings collide with the
-  existing `validation.metrics.verdict` that every cell already calls.
-- **B8 must be run after a real relabel.** `python -m validation` now reports
-  only `v2_bounded` rows; the DB still holds only v1 rows until
-  `python -m scripts.relabel_outcomes_v2 --apply` is run.
+- **B4 completed.** `validation.metrics.verdict` now exposes the exact
+  pre-registered asset-level signature (while preserving the older cell API),
+  and `tests/test_verdict.py` covers insufficient/beats/worse/indistinguishable/NaN.
+  Ordinal distance, per-band collapse precision, and confidence calibration
+  error all bootstrap over ASSETS; their cells carry `n_assets` and the
+  report's `as_dict()` exposes `baseline` alongside `baseline_value`.
+  `ValidationReport` now carries top-level `resolved`, `censored`, and a
+  `retrospective_exploratory` v1 section with `no confirmatory claim`. Every
+  confirmatory `RiskOutcome` query filters `label_version == "v2_bounded"`.
+- **B3 completed.** The relabel script selects evaluated `v1_unbounded` rows,
+  defaults `--batch 500`, prints `would_create=<n> censored=<n>`, and applies
+  one `queued_write` per explicit batch.
+- **B7 completed.** `docs/oos-proposal-v2.md` now has the required
+  `## Red-team attacks (22) and amendments (6)` heading and the single exact
+  human TODO line; the 13 numbered decisions remain.
+- **A2/B8 reports are staged.** The five cited validation reports plus
+  `reports/validation-2026-11-14-v2-relabel.json` are force-added despite the
+  ignored `reports/` directory.
+- **D2/D4 residuals.** Live opens refuse `daily_loss_limit` and append a
+  `killed` gate row first; fill divergence compares against the configured
+  slippage threshold instead of a hardcoded 30%. `api/main.py` now uses the
+  single `api.auth` bearer check instead of a duplicate implementation.
+
+## RESOLVED — 2026-11-14 (Phase F: whale/smart-money telemetry)
+
+- **F1** — added `0031_whale_telemetry` (chained from `0030_trading_execution`
+  because the B3 relabel migration occupies 0029) with `first_buys`,
+  `pair_first_window_stats`, `dev_wallet_stats`, `holder_metrics` and matching
+  models.
+- **F2** — added `config/tracked_wallets.example.json`, ignored the real
+  `config/tracked_wallets.json`, and added the mtime-cached, solana-validating
+  `trading/wallets.py` loader (invalid entries log without the address).
+- **F3** — added `radar/first_buys.py` with unknown-as-`None` first-window
+  stats, distinct first-buy rows, tracked-wallet alerts, new-pair wiring in
+  `ingestion/service.py`, and the ntfy default type.
+- **F4** — added holder/dev-wallet persistence to `ingestion/holder_tracker.py`,
+  wired it after the Solana holder fetch, and made the candidate builder read
+  `holder_metrics`/`dev_wallet_stats`.
+- **F5** — sniper-burst events now carry `event_ts` and
+  `signal_id=ignition:<asset>:<timestamp>`; candidates expose `signal_id`; and
+  `GET /paper/signals/attribution` groups closed trades with the required
+  insufficient-data behavior.
+- **F6** — added `trading/copy.py` and `POST /trading/copy/{log_id}/approve`:
+  disabled by default, paper-only when the gate is closed, pending until human
+  approval, delay-checked, gate/kill rechecked, and size clamped. No
+  auto-approval path exists.
+- **Tests added:** 13 across `test_whale_telemetry.py`, `test_wallets.py`,
+  `test_first_buys.py`, `test_holder_metrics.py`, `test_signal_attribution.py`,
+  and `test_copy.py`; `test_notifier.py` expected type list updated.
+- **Gate:** ruff, format, mypy (181 files), import, dependency and lock checks
+  pass; full pytest exit 0 with coverage 78.74%.
+
+## RESOLVED — 2026-11-14 (Phase G: P2 backlog)
+
+- Added `docs/p2-backlog.md` with the four P2 items and the exact
+  do-not-start sentence. No P2 code was built.
+
+## PROMPT CHECKLIST (2026-11-14)
+
+A1 ✓ · A2 ✓ · B1 ✓ · B2 ✓ · B3 ✓ · B4 ✓ · B5 ✓ · B6 ✓ · B7 ✓ · B8 ✓ ·
+C1 ✓ · C2 ✓ · C3 ✓ · C4 ✓ · C5 ✓ · C6 ✓ · C7 ✓ · C8 ✓ ·
+D1 ✓ · D2 ✓ · D3 ✓ · D4 ✓ · D5 ✓ · E1 ✓ · F1 ✓ · F2 ✓ · F3 ✓ · F4 ✓ ·
+F5 ✓ · F6 ✓ · G ✓ · final gate ✓ (components green; full pytest exit 0,
+coverage 78.74%).
 
 ## RESOLVED — 2026-11-14 (B3 relabel: score_id uniqueness)
 

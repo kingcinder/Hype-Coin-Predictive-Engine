@@ -32,6 +32,7 @@ CANDIDATE_KEYS = (
     "age_minutes",
     "tradeable",
     "tradeable_reason",
+    "signal_id",
     "missing",
 )
 
@@ -62,15 +63,18 @@ def _latest_snapshot(session: Session, asset_id: int):
 
 
 def _latest_liquidity(session: Session, asset_id: int) -> Decimal | None:
-    row = session.scalar(
-        select(models.LiquiditySnapshot.reserve_quote)
+    row = session.execute(
+        select(models.LiquiditySnapshot.reserve_usd, models.LiquiditySnapshot.reserve_quote)
         .join(models.Pool, models.Pool.id == models.LiquiditySnapshot.pool_id)
         .join(models.Pair, models.Pair.pool_id == models.Pool.id)
         .where(models.Pair.base_asset_id == asset_id)
         .order_by(models.LiquiditySnapshot.ts.desc())
         .limit(1)
-    )
-    return None if row is None else Decimal(str(row))
+    ).first()
+    if row is None:
+        return None
+    value = row[0] if row[0] is not None else row[1]
+    return None if value is None else Decimal(str(value))
 
 
 def _latest_phase(session: Session, asset_id: int) -> str | None:
@@ -122,7 +126,19 @@ def _top10_holder_pct(session: Session, asset_id: int) -> float | None:
     return float(sum(sorted(pcts, reverse=True)[:10]))
 
 
+def _latest_holder_metric(session: Session, asset_id: int) -> models.HolderMetric | None:
+    return session.scalar(
+        select(models.HolderMetric)
+        .where(models.HolderMetric.asset_id == asset_id)
+        .order_by(models.HolderMetric.ts.desc())
+        .limit(1)
+    )
+
+
 def _holders_count(session: Session, asset_id: int) -> int | None:
+    metric = _latest_holder_metric(session, asset_id)
+    if metric is not None and metric.holder_count is not None:
+        return metric.holder_count
     _, rows = _holder_rows(session, asset_id)
     if not rows:
         return None
@@ -130,6 +146,11 @@ def _holders_count(session: Session, asset_id: int) -> int | None:
 
 
 def _dev_wallet(session: Session, asset_id: int) -> str | None:
+    stats = session.scalar(
+        select(models.DevWalletStats).where(models.DevWalletStats.asset_id == asset_id)
+    )
+    if stats is not None and stats.deployer:
+        return stats.deployer
     wallet = session.scalar(
         select(models.Contract.deployer_wallet)
         .where(models.Contract.asset_id == asset_id)
@@ -137,6 +158,26 @@ def _dev_wallet(session: Session, asset_id: int) -> str | None:
         .limit(1)
     )
     return wallet if wallet else None
+
+
+def _signal_id(session: Session, asset_id: int) -> str | None:
+    event = session.scalar(
+        select(models.IgnitionEvent)
+        .where(
+            models.IgnitionEvent.asset_id == asset_id,
+            models.IgnitionEvent.event_type == "sniper_burst",
+        )
+        .order_by(models.IgnitionEvent.ts.desc())
+        .limit(1)
+    )
+    if event is None:
+        return None
+    details = event.details or {}
+    signal = details.get("signal_id")
+    if isinstance(signal, str) and signal:
+        return signal
+    ts = _aware(event.ts)
+    return f"ignition:{asset_id}:{int(ts.timestamp())}" if ts is not None else None
 
 
 def _missing_features(session: Session, score: models.Score | None) -> Any:
@@ -181,7 +222,12 @@ def _build(
     if holders is None:
         missing.append("holders")
 
-    top10 = _top10_holder_pct(session, asset.id)
+    holder_metric = _latest_holder_metric(session, asset.id)
+    top10 = (
+        float(holder_metric.top10_pct)
+        if holder_metric is not None and holder_metric.top10_pct is not None
+        else _top10_holder_pct(session, asset.id)
+    )
     if top10 is None:
         missing.append("top10_holder_pct")
 
@@ -232,6 +278,10 @@ def _build(
     quote = price_source.price(asset.address, chain)
     tradeable = quote is not None
 
+    signal_id = _signal_id(session, asset.id)
+    if signal_id is None:
+        missing.append("signal_id")
+
     missing = sorted(set(missing))
 
     return {
@@ -253,6 +303,7 @@ def _build(
         "age_minutes": int((now - (_aware(asset.first_seen_at) or now)).total_seconds() // 60),
         "tradeable": tradeable,
         "tradeable_reason": None if tradeable else "no_live_price",
+        "signal_id": signal_id,
         "missing": missing,
     }
 

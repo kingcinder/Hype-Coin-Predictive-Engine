@@ -33,9 +33,17 @@ class MetricCell:
     verdict: str  # better/indistinguishable/worse/insufficient_data
     leakage_suspected: bool = False
     note: str = ""
+    # Number of independent assets behind an asset-bootstrapped cell. None for
+    # row-level cells that do not use the asset-level verdict.
+    n_assets: int | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        # B4 report key: the pre-registered schema calls the baseline "baseline"
+        # while the original cell schema calls it "baseline_value". Emit both so
+        # existing consumers and the pre-registration both read the same cell.
+        data["baseline"] = self.baseline_value
+        return data
 
 
 @dataclass
@@ -52,6 +60,14 @@ class ValidationReport:
     # Outcome rows past their window that still have no established label.
     # They are withheld from every metric; the count makes the backlog visible.
     unresolved_outcomes: int = 0
+    # Top-of-file label accounting (B4): confirmatory metrics are conditional
+    # on resolved v2_bounded rows; v2 rows still unresolved are censored.
+    resolved: int = 0
+    censored: int = 0
+    # v1_unbounded rows are retrospective/exploratory only and never enter the
+    # confirmatory cells. This section carries their count and the explicit
+    # "no confirmatory claim" text.
+    retrospective_exploratory: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -66,6 +82,9 @@ class ValidationReport:
                 "suspicious_results": self.suspicious_results,
                 "notes": self.notes,
                 "unresolved_outcomes": self.unresolved_outcomes,
+                "resolved": self.resolved,
+                "censored": self.censored,
+                "retrospective_exploratory": self.retrospective_exploratory,
             },
             indent=2,
             default=str,

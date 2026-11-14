@@ -332,6 +332,7 @@ def evaluate_band_outcomes(
             else _bootstrap_ci(np.zeros_like(actual), actual, _dist)
         )
         unknown = int((~valid).sum())
+        n_assets = len(groups)
         cells.append(
             MetricCell(
                 output="risk_band",
@@ -346,13 +347,17 @@ def evaluate_band_outcomes(
                 baseline_ci_high=b_ci[1],
                 verdict=verdict(
                     dist,
-                    WilsonCI(*ci),
+                    ci[0],
+                    ci[1],
                     baseline_dist,
-                    WilsonCI(*b_ci),
-                    higher_is_better=False,
-                    n=int(valid.sum()),
+                    b_ci[0],
+                    b_ci[1],
+                    n_assets,
+                    True,
+                    min_assets=min_samples,
                 ),
                 note=f"{unknown} ambiguous outcomes excluded from ordinal distance",
+                n_assets=n_assets,
             )
         )
 
@@ -396,14 +401,17 @@ def evaluate_band_outcomes(
                 baseline_ci_high=band_base_ci.high,
                 verdict=verdict(
                     band_b,
-                    band_ci,
+                    band_ci.low,
+                    band_ci.high,
                     b,
-                    band_base_ci,
-                    higher_is_better=True,
-                    n=len(idx),
-                    min_samples=min_samples,
+                    band_base_ci.low,
+                    band_base_ci.high,
+                    len(band_groups),
+                    False,
+                    min_assets=min_samples,
                 ),
                 note=f"{unknown_band} ambiguous outcomes treated as non-collapse (reported)",
+                n_assets=len(band_groups),
             )
         )
     return cells
@@ -528,8 +536,26 @@ def evaluate_confidence_uncertainty(
     conf_valid = ~np.isnan(conf)
     if int(conf_valid.sum()) >= min_samples:
         err = confidence_calibration_error(conf[conf_valid], surv[conf_valid])
-        ci = _bootstrap_ci(
-            conf[conf_valid], surv[conf_valid], lambda c, s: confidence_calibration_error(c, s)
+        # Asset-level bootstrap: resample ASSETS, not rows, so a token with many
+        # scores cannot masquerade as many independent calibration samples.
+        conf_groups: dict[int, list[tuple[float, float]]] = {}
+        for i in np.where(conf_valid)[0]:
+            conf_groups.setdefault(outcomes[i].asset_id, []).append(
+                (float(conf[i]), float(surv[i]))
+            )
+        groups = list(conf_groups.values())
+
+        def _group_calibration_error(pairs: list[tuple[float, float]]) -> float:
+            return confidence_calibration_error(
+                np.array([c for c, _ in pairs]), np.array([s for _, s in pairs])
+            )
+
+        ci = (
+            bootstrap_ci(groups, _group_calibration_error)
+            if len(groups) > 1
+            else _bootstrap_ci(
+                conf[conf_valid], surv[conf_valid], lambda c, s: confidence_calibration_error(c, s)
+            )
         )
         # Compared against the same trust ceiling as ECE (methodology §4.3) —
         # 'better' means the confidence score is calibrated within the ceiling,
@@ -549,13 +575,17 @@ def evaluate_confidence_uncertainty(
                 baseline_ci_high=ceiling,
                 verdict=verdict(
                     err,
-                    WilsonCI(*ci),
+                    ci[0],
+                    ci[1],
                     ceiling,
-                    WilsonCI(ceiling, ceiling),
-                    higher_is_better=False,
-                    n=int(conf_valid.sum()),
+                    ceiling,
+                    ceiling,
+                    len(groups),
+                    True,
+                    min_assets=min_samples,
                 ),
                 note="confidence/100 vs observed survival frequency; trust ceiling 0.10",
+                n_assets=len(groups),
             )
         )
 
@@ -701,7 +731,10 @@ def load_unresolved_outcome_count(session: Session) -> int:
     window = timedelta(hours=get_settings().risk_outcome_window_hours)
     now = datetime.now(UTC)
     scored_ats = session.scalars(
-        select(models.RiskOutcome.scored_at).where(models.RiskOutcome.evaluated_at.is_(None))
+        select(models.RiskOutcome.scored_at).where(
+            models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.label_version == "v2_bounded",
+        )
     ).all()
     count = 0
     for ts in scored_ats:
@@ -805,7 +838,9 @@ def load_scorer_accuracy_history(
     # ML / heuristic bands live on the RiskOutcome rows, not OutcomeRow —
     # reload them per outcome so the meta-metric covers all three scorers.
     details_by_score: dict[int, dict[str, Any]] = {}
-    for outcome in session.scalars(select(models.RiskOutcome)).all():
+    for outcome in session.scalars(
+        select(models.RiskOutcome).where(models.RiskOutcome.label_version == "v2_bounded")
+    ).all():
         details_by_score[outcome.score_id] = outcome.details or {}
     for o in outcomes:
         ts = _as_utc(o.decision_ts)
@@ -1112,6 +1147,12 @@ def run_harness(
             models.RiskOutcome.label_version == "v2_bounded",
         )
     )
+    v1_resolved = session.scalar(
+        select(func.count(models.RiskOutcome.id)).where(
+            models.RiskOutcome.evaluated_at.is_not(None),
+            models.RiskOutcome.label_version == "v1_unbounded",
+        )
+    )
     forecasts = load_forecasts(session)
     forecast_outcomes = load_forecast_outcomes(session)
     ensemble_history = load_ensemble_history(session)
@@ -1175,6 +1216,17 @@ def run_harness(
             "reference_rows": len(reference_rows),
         },
         unresolved_outcomes=unresolved_outcomes,
+        resolved=len(outcomes),
+        censored=int(censored_outcomes or 0),
+        retrospective_exploratory={
+            "label_version": "v1_unbounded",
+            "resolved": int(v1_resolved or 0),
+            "text": "no confirmatory claim",
+            "note": (
+                "v1_unbounded rows are retrospective/exploratory only; they are "
+                "excluded from every confirmatory cell."
+            ),
+        },
     )
     report.notes.append(
         f"resolved={len(outcomes)} censored={int(censored_outcomes or 0)}: "
