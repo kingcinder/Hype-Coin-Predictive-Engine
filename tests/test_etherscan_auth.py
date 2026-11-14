@@ -7,6 +7,7 @@ from httpx import Response
 
 from common.config import get_settings
 from crawlers.sources.gas_tracker import GasTrackerCrawler
+from crawlers.sources.whale_tracker import ETH_WHALE_ADDRESSES, WhaleTrackerCrawler
 from ingestion.contract_analyzer import (
     ContractAnalysis,
     _analyze_evm_contract,
@@ -99,3 +100,24 @@ def test_gas_oracle_uses_v2_with_key() -> None:
     params = route.calls[0].request.url.params
     assert params["chainid"] == "1"
     assert params["apikey"] == KEY
+
+
+@respx.mock
+def test_whale_tracker_uses_authenticated_v2(monkeypatch) -> None:
+    """Whale txlist calls moved off the retired unauthenticated V1 endpoint."""
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
+    route = respx.get("https://api.etherscan.io/v2/api").mock(
+        return_value=Response(200, json={"status": "1", "result": []})
+    )
+    crawler = WhaleTrackerCrawler()
+    try:
+        assert crawler._fetch_eth_whales() == []
+        assert crawler._fetch_eth_large_swaps() == []
+    finally:
+        crawler.close()
+
+    assert len(route.calls) == len(ETH_WHALE_ADDRESSES) + 1
+    for call in route.calls:
+        params = call.request.url.params
+        assert params["chainid"] == "1"
+        assert params["apikey"] == KEY
