@@ -550,3 +550,54 @@ in the R3 run (-0.0607 to -0.6617): uncertainty now anti-correlates with
 prediction error, because the higher penalty lowered confidence for
 many-missing tokens. That is a real regression to watch, not a reporting
 artifact. No scoring output beats its naive baseline yet.
+
+## 17. 2026-11-14 addendum — bounded outcome labels
+
+`risk_engine/outcomes.py` labelled each prediction with the *latest*
+`LifecycleEvent` for the asset and the *latest* market snapshot after the
+score, both unbounded. A prediction scored on Day 0 (48h window) could
+therefore be labelled by a collapse on Day 4 — knowledge from outside the
+window it was scored on. The price leg had the same leak, and any phase that
+was neither collapse nor survival silently became a non-survival because
+`evaluated_at` was stamped anyway.
+
+The evaluator now bounds both lookups to `[scored_at, scored_at + window]`:
+`_lifecycle_phase_as_of(..., as_of=window_end)` and
+`_price_change_since(..., until=window_end)`. `record_risk_outcome` bounds its
+at-score phase lookup to `ts <= decision_ts`. A row whose bounded phase is not
+one of collapse/dead/rugged or survivor/parabolic/saturation stays unresolved:
+`evaluated_at` remains NULL and `lifecycle_phase_at_eval` records the bounded
+phase or `"unknown"`. Unresolved rows are excluded from band calibration, the
+validation harness, the risk calibrator, and the ensemble feedback block — all
+of which filter on `evaluated_at IS NOT NULL`. No historical `RiskOutcome` row
+was rewritten.
+
+### Before / after validation (validation harness, self-test passed)
+
+| Metric | Before (HEAD `495cf0f`) | After (working tree) | Baseline | Verdict |
+|---|---|---|---|---|
+| RiskBand ordinal distance (n=396) | 2.2020 | 2.2020 | 1.7980 | worse than baseline |
+| BLACK collapse precision (n=2013) | 0.0884 | 0.0884 | 0.0884 | indistinguishable |
+| risk_score concordance (n=396) | 0.9719 | 0.9719 | 0.5000 | better on paper, leakage_suspected |
+| exit_risk concordance (n=396) | 0.9719 | 0.9719 | 0.5000 | better on paper, leakage_suspected |
+| Confidence calibration error (n=2013) | 0.3761 | 0.3761 | 0.1000 | worse than baseline |
+| Uncertainty error correlation (n=2013) | -0.6617 | -0.6617 | 0.0000 | worse than baseline |
+
+The numbers are identical, and that is the expected result for this change:
+the harness scores stored `risk_outcomes` labels, this fix explicitly does not
+rewrite them (re-deriving history is a separate decision), and nothing in the
+harness re-runs the evaluator. The fix changes the labels the evaluator will
+assign going forward; it does not retroactively relabel the 2,013 evaluated
+rows the report scores. No number was tuned to look better.
+
+Reports: `reports/validation-2026-11-14-outcome-before.json` (pristine HEAD
+export run against the live DB) and
+`reports/validation-2026-11-14-outcome-after.json`. Both runs are read-only
+over `serpent.db`.
+
+Regression coverage: `tests/test_outcomes.py` covers post-window collapse
+staying unresolved, in-window collapse/rug/survival labelling correctly, no
+events staying unresolved, post-window price snapshots being ignored, and the
+window-end boundary being inclusive with a one-second-later event excluded.
+`tests/test_ensemble_pipeline.py` now seeds its collapse inside the window,
+matching the new semantics.
