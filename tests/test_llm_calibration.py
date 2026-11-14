@@ -276,6 +276,89 @@ def test_calibration_evaluates_prediction_and_records_outcome(session, monkeypat
     assert prediction.evaluation_details["actual_collapsed"] is True
 
 
+def test_unresolved_outcome_never_feeds_llm_calibration(session, monkeypatch) -> None:
+    """An unevaluated RiskOutcome must not be read as ``collapsed=False``.
+
+    Unresolved rows persist with ``evaluated_at IS NULL`` and the column
+    default ``collapsed=False``. Before the guard, ``_find_outcome`` returned
+    one anyway and ``evaluate_predictions`` stamped the LLM record with that
+    default, training the LLM weight on a non-outcome.
+    """
+    from datetime import timedelta
+
+    from common.time import utc_now
+
+    monkeypatch.setattr(
+        "scoring.llm_calibration.get_settings",
+        lambda: SimpleNamespace(llm_calibration_enabled=True, llm_calibration_eval_hours=1),
+    )
+    asset = seed_market_asset(session)
+    observed = utc_now() - timedelta(hours=3)
+    score = models.Score(
+        asset_id=asset.id,
+        decision_ts=observed,
+        observed_at=observed,
+        hype=50.0,
+        ethos=50.0,
+        risk=20.0,
+        liquidity_access=50.0,
+        manipulation=10.0,
+        confidence=70.0,
+        uncertainty=20.0,
+        catalyst=30.0,
+        exit_risk=40.0,
+        research_priority=50.0,
+        risk_band="YELLOW",
+        model_version="test-llm-calibration",
+    )
+    session.add(score)
+    session.flush()
+    outcome = models.RiskOutcome(
+        asset_id=asset.id,
+        score_id=score.id,
+        risk_band="BLACK",
+        scored_at=observed,
+        lifecycle_phase_at_score="seeding",
+    )
+    prediction = models.LLMCalibrationRecord(
+        asset_id=asset.id,
+        score_id=score.id,
+        prediction_ts=observed,
+        model_name="test",
+        hype_delta=1.0,
+        risk_delta=5.0,
+        confidence_delta=0.0,
+        llm_weight_at_time=0.1,
+        base_hype=40.0,
+        base_risk=20.0,
+        base_confidence=70.0,
+        final_hype=41.0,
+        final_risk=90.0,
+        final_confidence=70.0,
+    )
+    session.add_all([outcome, prediction])
+    session.flush()
+
+    calibrator = LLMCalibrator()
+    assert calibrator.evaluate_predictions(session) == 0
+    assert prediction.evaluated_at is None
+    assert prediction.actual_risk_band is None
+    assert prediction.llm_improved is None
+    assert prediction.collapsed is False  # the column default, not an observation
+
+    # Once the outcome is established, the same prediction evaluates normally.
+    outcome.evaluated_at = utc_now()
+    outcome.lifecycle_phase_at_eval = "collapse"
+    outcome.collapsed = True
+    session.flush()
+
+    assert calibrator.evaluate_predictions(session) == 1
+    assert prediction.evaluated_at is not None
+    assert prediction.actual_risk_band == "BLACK"
+    assert prediction.collapsed is True
+    assert prediction.llm_improved is True
+
+
 @pytest.mark.parametrize(
     ("score", "expected"),
     [(0.0, "GREEN"), (20.0, "YELLOW"), (40.0, "ORANGE"), (60.0, "RED"), (80.0, "BLACK")],

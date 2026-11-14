@@ -293,11 +293,19 @@ class LLMCalibrator:
     def _find_outcome(
         self, session: Session, record: models.LLMCalibrationRecord
     ) -> models.RiskOutcome | None:
-        """Find the risk outcome for a calibration record's score."""
+        """Find the evaluated risk outcome for a calibration record's score.
+
+        Unevaluated rows carry default ``collapsed=False`` and no observed
+        outcome, so reading one would train the LLM weight on a non-outcome.
+        Require ``evaluated_at`` to be set.
+        """
         if record.score_id is None:
             return None
         return session.scalar(
-            select(models.RiskOutcome).where(models.RiskOutcome.score_id == record.score_id)
+            select(models.RiskOutcome).where(
+                models.RiskOutcome.score_id == record.score_id,
+                models.RiskOutcome.evaluated_at.is_not(None),
+            )
         )
 
     def _assess_improvement(
