@@ -259,9 +259,60 @@ def test_successful_empty_geckoterminal_feed_skips_solana_rpc_fallback(monkeypat
     monkeypatch.setattr(ingestion_service, "SolanaRpcClient", UnexpectedRpc)
     service = IngestionService()
 
-    assert service._first_buy_swaps(pair, now, set()) == []
+    assert service._first_buy_swaps(pair, now, set()) == ([], True)
     assert service._first_buy_stats["gecko_failures"] == 0
     assert service._first_buy_stats["rpc_fallback_hits"] == 0
+
+
+def test_successful_empty_geckoterminal_feed_persists_zero_stats(session, monkeypatch) -> None:
+    """An empty-but-successful feed is observed data: zero buys/sells, not unknown.
+
+    The pool-trades call must succeed and the RPC fallback must never run, yet
+    the first-window stats are written as 0/0 instead of NULL.
+    """
+    seed_reference(session)
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert source is not None
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(
+        ingestion_service.GeckoTerminalClient,
+        "pool_trades",
+        lambda self, chain, pool: [],
+    )
+
+    class UnexpectedRpc:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("RPC fallback ran for a successful empty feed")
+
+    monkeypatch.setattr(ingestion_service, "SolanaRpcClient", UnexpectedRpc)
+    pool_address = "PairEmptyFeedStats1111111111111111111111111"
+    mint = "TokenEmptyFeedStats111111111111111111111111"
+    payload = {
+        "chainId": "solana",
+        "dexId": "raydium",
+        "pairAddress": pool_address,
+        "pairCreatedAt": int(now.timestamp() * 1000),
+        "baseToken": {"address": mint, "symbol": "EMPTY", "name": "Empty Feed Token"},
+        "quoteToken": {"address": "USDC", "symbol": "USDC", "name": "USD Coin"},
+        "liquidity": {"usd": 80000},
+    }
+
+    service = IngestionService()
+    assert service._store_dexscreener_pair(session, source, payload) is True
+    session.commit()
+
+    assert service._first_buy_stats["gecko_failures"] == 0
+    assert service._first_buy_stats["rpc_fallback_hits"] == 0
+    asset = session.scalar(select(models.Asset).where(models.Asset.address == mint))
+    assert asset is not None
+    stats = session.scalar(
+        select(models.PairFirstWindowStats).where(models.PairFirstWindowStats.asset_id == asset.id)
+    )
+    assert stats is not None
+    assert stats.buys == 0
+    assert stats.sells == 0
+    assert stats.buy_sell_ratio is None
 
 
 def test_ingestion_gecko_failure_without_trades_keeps_stats_unknown(session, monkeypatch) -> None:
@@ -379,14 +430,18 @@ def test_first_buy_trade_budget_caps_gecko_calls_per_scan(monkeypatch) -> None:
 
     service = IngestionService()
     for index in range(3):
-        assert service._first_buy_swaps(pair(f"PoolBudget{index}"), now, set()) == []
+        # The third pool is skipped by the budget, so its feed was never read.
+        assert service._first_buy_swaps(pair(f"PoolBudget{index}"), now, set()) == (
+            [],
+            index < 2,
+        )
 
     assert calls == ["PoolBudget0", "PoolBudget1"]
     assert service._first_buy_stats["pools"] == 2
     assert service._first_buy_stats["budget_skipped"] == 1
 
     service._reset_first_buy_stats()
-    assert service._first_buy_swaps(pair("PoolBudgetReset"), now, set()) == []
+    assert service._first_buy_swaps(pair("PoolBudgetReset"), now, set()) == ([], True)
     assert calls == ["PoolBudget0", "PoolBudget1", "PoolBudgetReset"]
 
 
@@ -432,13 +487,110 @@ def test_first_buy_trade_rate_limit_backs_off_for_rest_of_scan(monkeypatch) -> N
         )
 
     service = IngestionService()
-    assert service._first_buy_swaps(pair("PoolRateLimit0"), now, set()) == []
-    assert service._first_buy_swaps(pair("PoolRateLimit1"), now, set()) == []
+    assert service._first_buy_swaps(pair("PoolRateLimit0"), now, set()) == ([], False)
+    assert service._first_buy_swaps(pair("PoolRateLimit1"), now, set()) == ([], False)
 
     assert calls == ["PoolRateLimit0"]
     assert fallback_calls == ["PoolRateLimit0"]
     assert service._first_buy_stats["gecko_failures"] == 1
     assert service._first_buy_stats["backoff_skipped"] == 1
+
+
+def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) -> None:
+    """The 429 backoff is per scan: the next scan fetches that pool again.
+
+    Clearing only the per-scan pool budget would leave ``_first_buy_provider_backoff``
+    set forever. A stubbed ``run_once`` (the real scan boundary) must reset it.
+    """
+    seed_reference(session)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: now)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+
+    def pair(address: str) -> NormalizedPair:
+        return NormalizedPair(
+            chain_slug="solana",
+            dex_id="raydium",
+            pair_address=address,
+            base_address="MintBackoffReset",
+            base_symbol="RESET",
+            base_name="Backoff Reset Token",
+            quote_address="USDC",
+            quote_symbol="USDC",
+            quote_name="USD Coin",
+            pair_created_at=now,
+            price_usd=1.0,
+            volume_usd=0.0,
+            liquidity_usd=80000.0,
+            reserve_base=None,
+            reserve_quote=None,
+            buys=0,
+            sells=0,
+            trades=0,
+        )
+
+    def rate_limited(self, chain: str, pool: str):
+        request = httpx.Request("GET", f"https://api.geckoterminal.com/{pool}")
+        raise httpx.HTTPStatusError(
+            "429", request=request, response=httpx.Response(429, request=request)
+        )
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+    monkeypatch.setattr(
+        ingestion_service,
+        "fetch_pool_swaps",
+        lambda *args, **kwargs: [],
+    )
+    service = IngestionService()
+    assert service._first_buy_swaps(pair("PoolBackoff0"), now, set()) == ([], False)
+    assert service._first_buy_provider_backoff is True
+
+    # Stub every scan stage so run_once exercises the real scan boundary only.
+    monkeypatch.setattr(service, "_ingest_dexscreener_profiles", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_dexscreener_boosts", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_geckoterminal_new_pools", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_birdeye_solana", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_solana_holder_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_solana_safety_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_ingest_evm_holder_snapshots", lambda session: 0)
+    monkeypatch.setattr(service, "_run_data_quality_check", lambda session, decision_ts: {})
+    monkeypatch.setattr(service, "_run_contract_analysis", lambda session, decision_ts: {})
+    monkeypatch.setattr(ingestion_service, "run_mempool", lambda session, decision_ts=None: {})
+    monkeypatch.setattr(ingestion_service, "run_narrative", lambda session, decision_ts=None: {})
+    monkeypatch.setattr(ingestion_service, "extract_catalysts", lambda session, decision_ts=None: 0)
+    monkeypatch.setattr(
+        ingestion_service, "alert_upcoming_catalysts", lambda session, decision_ts=None: 0
+    )
+    monkeypatch.setattr(
+        ingestion_service, "run_lifecycle", lambda session, decision_ts=None: {"events": 0}
+    )
+    monkeypatch.setattr(
+        ingestion_service, "run_forecast_if_due", lambda session, decision_ts=None: {"forecasts": 0}
+    )
+    monkeypatch.setattr(
+        ingestion_service,
+        "score_current_assets",
+        lambda session, decision_ts=None, asset_ids=None: [],
+    )
+    monkeypatch.setattr(
+        ingestion_service, "run_notifier", lambda session, decision_ts=None: {"sent": 0}
+    )
+    monkeypatch.setattr(ingestion_service, "LiquidityRemovalWatcher", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "PrelaunchQueue", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "IgnitionRadar", _FakeStage)
+    monkeypatch.setattr(ingestion_service, "FingerprintEngine", _FakeStage)
+
+    service.run_once(session)
+
+    assert service._first_buy_provider_backoff is False
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ingestion_service.GeckoTerminalClient,
+        "pool_trades",
+        lambda self, chain, pool: calls.append(pool) or [],
+    )
+    assert service._first_buy_swaps(pair("PoolBackoff1"), now, set()) == ([], True)
+    assert calls == ["PoolBackoff1"]
 
 
 def test_first_buy_ingestion_uses_real_pool_trades(session, monkeypatch) -> None:

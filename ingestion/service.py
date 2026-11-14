@@ -1033,7 +1033,7 @@ class IngestionService:
         # the GeckoTerminal call.
         session.commit()
         tracked = self._tracked_wallets(normalized.chain_slug)
-        swaps = self._first_buy_swaps(normalized, observed_at, tracked)
+        swaps, swaps_known = self._first_buy_swaps(normalized, observed_at, tracked)
         first_seen_at = normalized.pair_created_at or observed_at
         base_asset = upsert_asset(
             session,
@@ -1125,6 +1125,7 @@ class IngestionService:
             normalized.pair_created_at or observed_at,
             swaps,
             tracked,
+            swaps_known=swaps_known,
         )
         for key, value in summary.items():
             self._first_buy_stats[key] = self._first_buy_stats.get(key, 0) + value
@@ -1135,26 +1136,32 @@ class IngestionService:
         normalized: NormalizedPair,
         observed_at: Any,
         tracked: set[str] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Real wallet trades for a pool while its first-buy window is open."""
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Real wallet trades for a pool while its first-buy window is open.
+
+        Returns ``(swaps, observed)``. ``observed`` is False when the provider
+        was never asked (window closed, budget/backoff skip) or failed, so the
+        caller keeps the stats unknown. A successful empty feed returns
+        ``([], True)``: no trades yet is a real answer, not missing data.
+        """
         created = normalized.pair_created_at
         if not self.settings.first_buy_trade_fetch_enabled or created is None:
-            return []
+            return [], False
         window = timedelta(minutes=self.settings.first_buy_window_minutes)
         if ensure_utc(observed_at) > ensure_utc(created) + window:
-            return []
+            return [], False
         if normalized.chain_slug not in GeckoTerminalClient.NETWORKS:
-            return []
+            return [], False
         if self._first_buy_provider_backoff:
             # Back off for the rest of this scan after a rate limit or an open
             # circuit: retrying every remaining pool only makes the flood worse.
             self._first_buy_stats["backoff_skipped"] += 1
-            return []
+            return [], False
         if self._first_buy_stats["pools"] >= self.settings.first_buy_trade_max_pools_per_scan:
             # Cap provider traffic per scan: first-buy telemetry is useful, but
             # an unbounded pool walk turns rate limits into a warning flood.
             self._first_buy_stats["budget_skipped"] += 1
-            return []
+            return [], False
         self._first_buy_stats["pools"] += 1
         client = GeckoTerminalClient()
         trades: list[dict[str, Any]] = []
@@ -1181,7 +1188,7 @@ class IngestionService:
         # A successful empty feed is a real answer: no trades yet. Only a
         # failed request justifies the more expensive on-chain fallback.
         if not gecko_failed or normalized.chain_slug != "solana":
-            return swaps
+            return swaps, not gecko_failed
 
         # The public trades endpoint failed (often rate-limited); rebuild the
         # same wallet swaps from the pool's on-chain transactions.
@@ -1202,7 +1209,7 @@ class IngestionService:
                 pool=normalized.pair_address,
                 error=str(exc),
             )
-            return []
+            return [], False
         finally:
             rpc.close()
         self._first_buy_stats["rpc_fallback_swaps"] += len(fallback)
@@ -1212,7 +1219,9 @@ class IngestionService:
                 pool=normalized.pair_address,
                 swaps=len(fallback),
             )
-        return fallback
+        # An empty fallback cannot distinguish "no swaps" from a partial RPC
+        # failure, so it stays unknown rather than fabricating zeroes.
+        return fallback, bool(fallback)
 
     def _record_first_buy_health(self, session: Session) -> None:
         stats = self._first_buy_stats

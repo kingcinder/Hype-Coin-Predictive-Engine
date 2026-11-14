@@ -20,12 +20,18 @@ def record_first_buys(
     pair_created_at: datetime,
     swaps: list[dict[str, Any]],
     tracked: set[str],
+    *,
+    swaps_known: bool | None = None,
 ) -> dict[str, int]:
     """Persist first buys and the first-window buy/sell stats.
 
-    ``swaps=[]`` means the data was unavailable: buys, sells and ratio stay
-    ``None`` (unknown), never zero. Returns counters for feed telemetry.
+    ``swaps=[]`` with ``swaps_known`` false (or unset and empty) means the data
+    was unavailable: buys, sells and ratio stay ``None`` (unknown), never zero.
+    A successful empty feed passes ``swaps_known=True`` so the zeroes are
+    persisted as an observed answer instead of unknown. Returns counters for
+    feed telemetry.
     """
+    observed = bool(swaps) if swaps_known is None else swaps_known
     from trading.copy import maybe_queue_copy  # noqa: PLC0415 - avoids import cycle.
 
     settings = get_settings()
@@ -41,7 +47,7 @@ def record_first_buys(
         if created <= ts <= created + window:
             in_window.append(swap)
 
-    if swaps:
+    if observed:
         buys = sum(1 for swap in in_window if swap.get("side") == "buy")
         sells = sum(1 for swap in in_window if swap.get("side") == "sell")
         ratio = Decimal(str(buys)) / Decimal(str(sells)) if sells > 0 else None
