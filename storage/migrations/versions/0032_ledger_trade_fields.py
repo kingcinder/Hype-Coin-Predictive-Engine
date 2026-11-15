@@ -1,6 +1,6 @@
 """Require stop_pct and the why/lesson fields on closed ledger trades.
 
-Revision ID: 0032_ledger_trade_required_fields
+Revision ID: 0032_ledger_trade_fields
 Revises: 0031_whale_telemetry
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0032_ledger_trade_required_fields"
+revision = "0032_ledger_trade_fields"
 down_revision = "0031_whale_telemetry"
 branch_labels = None
 depends_on = None

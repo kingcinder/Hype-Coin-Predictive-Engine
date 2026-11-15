@@ -15,7 +15,7 @@ from common.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION_0031 = "0031_whale_telemetry"
-REVISION_0032 = "0032_ledger_trade_required_fields"
+REVISION_0032 = "0032_ledger_trade_fields"
 
 
 def _alembic_config() -> Config:
