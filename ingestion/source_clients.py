@@ -196,7 +196,7 @@ class SolanaRpcClient:
             self._pool.record_request(self._pool_url or self.http.base_url)
         try:
             data = self.http.post_json(
-                "/",
+                self._pool_url or self.http.base_url,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []},
             )
         except Exception:

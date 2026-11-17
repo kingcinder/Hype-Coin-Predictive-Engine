@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,7 +27,17 @@ from storage.repository import (
 
 log = get_logger(__name__)
 
-PAIR_CREATED_TOPIC = "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e"
+
+def _is_client_rejection(exc: Exception) -> bool:
+    """Whether an HTTP error is a 4xx request/plan rejection (not 429)."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and 400 <= exc.response.status_code < 500
+        and exc.response.status_code != 429
+    )
+
+
+PAIR_CREATED_TOPIC = "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9"
 STABLE_SYMBOLS = {"USDC", "USDT", "DAI"}
 
 
@@ -78,20 +89,32 @@ class EVMFactoryWatcher:
 
     # ------------------------------------------------------------------- helpers
 
-    def _rpc(self, method: str, params: list[Any]) -> Any:
+    def _rpc(
+        self,
+        method: str,
+        params: list[Any],
+        *,
+        http: HttpClient | None = None,
+        url: str | None = None,
+    ) -> Any:
+        endpoint = url or self._pool_url
+        client = http or self.http
         if self._pool is not None:
-            self._pool.record_request(self._pool_url)
+            self._pool.record_request(endpoint)
         try:
-            data = self.http.post_json(
-                "/",
+            data = client.post_json(
+                endpoint,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
             )
-        except Exception:
-            if self._pool is not None:
-                self._pool.mark_failure(self._pool_url)
+        except Exception as exc:
+            # A 4xx other than 429 is a request/plan rejection (for example
+            # Alchemy Free's 10-block eth_getLogs cap), not an unhealthy
+            # endpoint: degrading it would blacklist a working provider.
+            if self._pool is not None and not _is_client_rejection(exc):
+                self._pool.mark_failure(endpoint)
             raise
         if self._pool is not None:
-            self._pool.mark_success(self._pool_url)
+            self._pool.mark_success(endpoint)
         return data
 
     def _block_number(self) -> int | None:
@@ -106,22 +129,74 @@ class EVMFactoryWatcher:
         return max(0, latest_block - blocks_per_hour * self.settings.evm_lookback_hours)
 
     def _pair_created_logs(self, from_block: int, to_block: int) -> list[dict[str, Any]]:
-        data = self._rpc(
-            "eth_getLogs",
-            [
-                {
-                    "fromBlock": hex(from_block),
-                    "toBlock": hex(to_block),
-                    "address": self.factory_address,
-                    "topics": [PAIR_CREATED_TOPIC],
-                }
-            ],
-        )
+        params = [
+            {
+                "fromBlock": hex(from_block),
+                "toBlock": hex(to_block),
+                "address": self.factory_address,
+                "topics": [PAIR_CREATED_TOPIC],
+            }
+        ]
         try:
-            result = data["result"]
-            return result if isinstance(result, list) else []
-        except (KeyError, TypeError):
-            return []
+            data = self._rpc("eth_getLogs", params)
+        except httpx.HTTPStatusError as exc:
+            if self._pool is None or not _is_client_rejection(exc):
+                raise
+            # Free plans cap eth_getLogs at a 10-block range. Scan the recent
+            # tail in legal chunks instead of failing or paging 24 h of blocks.
+            return self._recent_pair_created_logs(from_block, to_block)
+        result = data.get("result") if isinstance(data, dict) else None
+        if isinstance(result, list):
+            return result
+        # Some endpoints answer 200 with a JSON-RPC "method unsupported" error.
+        return self._fallback_pair_created_logs(params)
+
+    def _recent_pair_created_logs(
+        self, from_block: int, to_block: int, *, max_chunks: int = 60, chunk_size: int = 10
+    ) -> list[dict[str, Any]]:
+        start = max(from_block, to_block - max_chunks * chunk_size + 1)
+        logs: list[dict[str, Any]] = []
+        for chunk_start in range(start, to_block + 1, chunk_size):
+            chunk_end = min(chunk_start + chunk_size - 1, to_block)
+            data = self._rpc(
+                "eth_getLogs",
+                [
+                    {
+                        "fromBlock": hex(chunk_start),
+                        "toBlock": hex(chunk_end),
+                        "address": self.factory_address,
+                        "topics": [PAIR_CREATED_TOPIC],
+                    }
+                ],
+            )
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, list):
+                logs.extend(result)
+        return logs
+
+    def _fallback_pair_created_logs(self, params: list[Any]) -> list[dict[str, Any]]:
+        """Run eth_getLogs on another healthy pool endpoint.
+
+        The primary endpoint stays healthy (it answered blockNumber); it simply
+        cannot serve this method or block range on its current plan.
+        """
+        last_error: Exception | None = None
+        assert self._pool is not None
+        for state in self._pool.snapshot():
+            if state.url == self._pool_url or state.down:
+                continue
+            try:
+                with HttpClient(base_url=state.url) as client:
+                    data = self._rpc("eth_getLogs", params, http=client, url=state.url)
+            except Exception as exc:  # noqa: BLE001 - try the next healthy endpoint.
+                last_error = exc
+                continue
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, list):
+                return result
+        raise last_error or RuntimeError(
+            f"{self.chain_slug}: eth_getLogs unsupported by every pool endpoint"
+        )
 
     def _parse_log(self, item: dict[str, Any]) -> dict[str, Any] | None:
         topics = item.get("topics") or []

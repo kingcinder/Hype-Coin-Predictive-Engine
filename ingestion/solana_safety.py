@@ -10,9 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.http import HttpClient
+from common.logging import get_logger
 from common.time import utc_now
 from ingestion.rpc_pool import RpcEndpointPool, get_rpc_pool
 from storage import models
+
+log = get_logger(__name__)
 
 _BURN_OWNERS = {"1nc1nerator11111111111111111111111111111111"}
 
@@ -149,7 +152,7 @@ def fetch_account_info(
         client = http or HttpClient(base_url=url)
         endpoint_pool.record_request(url)
         response = client.post_json(
-            "/",
+            url,
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -157,12 +160,18 @@ def fetch_account_info(
                 "params": [address, {"encoding": "jsonParsed"}],
             },
         )
-        value = (response or {}).get("result", {}).get("value")
-        if not isinstance(value, dict):
+        if not isinstance(response, dict):
             endpoint_pool.mark_failure(url)
             return None
+        # A JSON-RPC error or a null ``value`` is a valid answer from a healthy
+        # endpoint (the address may simply not exist); only transport failures
+        # below degrade pool health.
+        result = response.get("result")
+        value = result.get("value") if isinstance(result, dict) else None
         endpoint_pool.mark_success(url)
-        return value
+        if response.get("error") is not None:
+            log.debug("solana_account_info_error", error=str(response.get("error"))[:200])
+        return value if isinstance(value, dict) else None
     except Exception:  # noqa: BLE001 - per-asset RPC failures are missing evidence.
         if url is not None:
             endpoint_pool.mark_failure(url)

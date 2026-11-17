@@ -11,7 +11,7 @@ import httpx
 # time (the exact site of the H26 InvalidURL crash); it is not re-exported at
 # the package top level.
 from httpx._utils import URLPattern
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from common.config import get_settings
 from common.logging import get_logger
@@ -125,6 +125,15 @@ def build_httpx_client(
         raise
 
 
+def _retryable_request_error(exc: BaseException) -> bool:
+    """Retry transport failures and 429/5xx, never other 4xx client errors."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429 or exc.response.status_code >= 500
+    return False
+
+
 def jittered_backoff(*, initial: float, maximum: float) -> Any:
     """``wait_exponential_jitter`` with the keyword the installed tenacity accepts.
 
@@ -191,9 +200,7 @@ class HttpClient:
         return self._request_json("POST", path, json=json, headers=headers)
 
     @retry(
-        retry=retry_if_exception_type(
-            (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError)
-        ),
+        retry=retry_if_exception(_retryable_request_error),
         wait=jittered_backoff(initial=0.5, maximum=8.0),
         stop=stop_after_attempt(3),
         reraise=True,
