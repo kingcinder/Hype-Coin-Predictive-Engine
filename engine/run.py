@@ -40,6 +40,11 @@ log = get_logger(__name__)
 #: a submitted write is itself stuck.
 WRITE_QUEUE_DRAIN_TIMEOUT_SECONDS = 15.0
 
+#: Absolute cap on the graceful shutdown epilogue. A second signal or this
+#: deadline force-exits after killing the UI process group, so a wedged close,
+#: API join, or queue drain can never leave ports 8000/8501 bound.
+SHUTDOWN_HARD_TIMEOUT_SECONDS = 30.0
+
 
 def _bootstrap() -> None:
     """Idempotent zero-container bootstrap: migrations + schema + reference rows."""
@@ -83,6 +88,23 @@ def _process_group_alive(pgid: int) -> bool:
     return True
 
 
+def _kill_ui_group(ui: subprocess.Popen[bytes] | None, pgid: int | None) -> None:
+    """Best-effort SIGKILL of the UI group and leader, safe from any thread."""
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:  # noqa: BLE001 - force-exit must continue.
+            log.warning("engine_ui_group_kill_failed", pgid=pgid, error=str(exc))
+    if ui is not None:
+        try:
+            if ui.poll() is None:
+                ui.kill()
+        except Exception as exc:  # noqa: BLE001 - force-exit must continue.
+            log.warning("engine_ui_leader_kill_failed", error=str(exc))
+
+
 def _terminate_ui(ui: subprocess.Popen[bytes], pgid: int) -> None:
     """Stop the GUI's process group, even if its leader already exited.
 
@@ -102,6 +124,8 @@ def _terminate_ui(ui: subprocess.Popen[bytes], pgid: int) -> None:
             if not _process_group_alive(pgid):
                 return
             time.sleep(0.1)
+    # Last resort: make sure neither the group nor a re-parented leader survives.
+    _kill_ui_group(ui, pgid)
     try:
         ui.wait(timeout=1)
     except subprocess.TimeoutExpired:
@@ -620,15 +644,43 @@ def main() -> None:
     start_write_queue()
 
     stop = threading.Event()
+    # Assigned after the API/UI start; the handler reads the current values so a
+    # second signal can kill the UI group even if the graceful epilogue is stuck.
+    ui: subprocess.Popen[bytes] | None = None
+    ui_pgid: int | None = None
+    # Staged shutdown tracing + one absolute deadline armed by the first signal.
+    shutdown_step = "main_loop"
+    step_started = time.monotonic()
+    shutdown_timer: threading.Timer | None = None
+
+    def _force_shutdown() -> None:
+        log.error(
+            "engine_shutdown_hard_timeout",
+            step=shutdown_step,
+            timeout_seconds=SHUTDOWN_HARD_TIMEOUT_SECONDS,
+        )
+        _kill_ui_group(ui, ui_pgid)
+        os._exit(130)
+
+    def _arm_shutdown_timer() -> None:
+        nonlocal shutdown_timer
+        if shutdown_timer is None:
+            shutdown_timer = threading.Timer(SHUTDOWN_HARD_TIMEOUT_SECONDS, _force_shutdown)
+            shutdown_timer.daemon = True
+            shutdown_timer.start()
 
     def _handle_stop(signum: int, _frame: object) -> None:
         if stop.is_set():
             # Second signal: the graceful path is already running and something
             # in it is wedged. Never require SIGKILL from the operator.
             log.warning("engine_force_exit_second_signal", signal=signum)
+            _kill_ui_group(ui, ui_pgid)
             os._exit(130)
         log.info("engine_shutdown_signal", signal=signum)
         stop.set()
+        # The main loop may be stuck somewhere that never reaches the finally
+        # block; arm the hard deadline here so both ports are still freed.
+        _arm_shutdown_timer()
 
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -763,6 +815,26 @@ def main() -> None:
             stop.wait(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
     finally:
         log.info("engine_shutting_down")
+        _arm_shutdown_timer()
+        shutdown_step = "ui"
+        step_started = time.monotonic()
+
+        def _next_step(step: str) -> None:
+            nonlocal shutdown_step, step_started
+            log.info(
+                "engine_shutdown_step",
+                step=shutdown_step,
+                elapsed_ms=round((time.monotonic() - step_started) * 1000, 1),
+            )
+            shutdown_step = step
+            step_started = time.monotonic()
+
+        # Always signal the captured group, not just a live leader: a Streamlit
+        # worker can outlive the launcher and keep the UI port bound. Do this
+        # first so a later stuck close cannot keep port 8501 alive.
+        if ui is not None and ui_pgid is not None:
+            _terminate_ui(ui, ui_pgid)
+        _next_step("nightcrawler_close")
         # Clean up Night Crawler HTTP clients
         try:
             from crawlers.orchestrator import close_nightcrawler_orchestrator
@@ -770,6 +842,7 @@ def main() -> None:
             close_nightcrawler_orchestrator()
         except Exception:
             pass
+        _next_step("llm_close")
         # Clean up LLM HTTP client
         try:
             from llm.engine import llm_engine
@@ -777,11 +850,10 @@ def main() -> None:
             llm_engine.close()
         except Exception:
             pass
-        # Always signal the captured group, not just a live leader: a Streamlit
-        # worker can outlive the launcher and keep the UI port bound.
-        _terminate_ui(ui, ui_pgid)
+        _next_step("api_stop")
         api_server.should_exit = True
         api_thread.join(timeout=10)
+        _next_step("write_queue_drain")
         # Drain the write queue: every submitted write commits before exit, so
         # shutdown loses no point-in-time evidence.
         try:
@@ -794,6 +866,9 @@ def main() -> None:
                 )
         except Exception:  # noqa: BLE001 - never fail shutdown on queue drain.
             log.exception("engine_write_queue_stop_failed")
+        _next_step("done")
+        if shutdown_timer is not None:
+            shutdown_timer.cancel()
         log.info("engine_stopped")
 
 

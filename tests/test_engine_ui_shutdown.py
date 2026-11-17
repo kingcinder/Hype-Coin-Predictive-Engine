@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from engine.run import _terminate_ui
+from engine.run import _kill_ui_group, _terminate_ui
 
 
 def _free_port() -> int:
@@ -35,6 +35,40 @@ def _wait_for_port(port: int, *, open_: bool, timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.05)
     return _accepts(port) is open_
+
+
+def test_kill_ui_group_frees_the_port_without_waiting() -> None:
+    """The forced-exit path must SIGKILL the UI group even with a dead leader."""
+    port = _free_port()
+    worker = (
+        "import socket,time\n"
+        "s=socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        f"s.bind(('127.0.0.1', {port}))\n"
+        "s.listen()\n"
+        "time.sleep(60)\n"
+    )
+    leader = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{worker!r}])",
+        ],
+        start_new_session=True,
+    )
+    pgid = os.getpgid(leader.pid)
+    try:
+        leader.wait(timeout=10)
+        assert _wait_for_port(port, open_=True), "worker never bound the UI port"
+
+        _kill_ui_group(leader, pgid)
+
+        assert _wait_for_port(port, open_=False), "forced kill left the UI port bound"
+    finally:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_terminate_ui_kills_orphaned_worker_holding_the_port() -> None:
