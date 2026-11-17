@@ -333,8 +333,9 @@ class NightCrawlerOrchestrator:
         """Get status of all crawlers."""
         with self._lock:
             last_run_snapshot = dict(self._last_run)
-        status = {
-            name: {
+        status: dict[str, Any] = {}
+        for name, crawler in self._crawlers.items():
+            entry = {
                 "enabled": crawler.health.enabled,
                 "reliability": round(crawler.health.reliability_score, 3),
                 "total_runs": crawler.health.total_runs,
@@ -345,8 +346,11 @@ class NightCrawlerOrchestrator:
                     self.heuristics.get_crawl_frequency_multiplier(name), 2
                 ),
             }
-            for name, crawler in self._crawlers.items()
-        }
+            skip_reason = crawler.skip_reason()
+            if skip_reason:
+                entry["status"] = "skipped"
+                entry["reason"] = skip_reason
+            status[name] = entry
         for name, enabled in (
             ("nitter", self.settings.nightcrawler_nitter_enabled),
             ("x_trends", self.settings.nightcrawler_x_trends_enabled),

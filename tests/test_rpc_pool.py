@@ -492,6 +492,41 @@ def test_record_pool_health_writes_per_chain_rows(session, monkeypatch) -> None:
         settings.rpc_pool_enabled = original_enabled
 
 
+def test_rpc_pool_health_marks_optional_public_fallback_without_failure(
+    session, monkeypatch
+) -> None:
+    from common.config import get_settings
+    from ingestion import rpc_pool as rpc_pool_module
+    from storage import models
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "helius_api_key", None)
+    monkeypatch.setattr(settings, "alchemy_api_key", None)
+    monkeypatch.setattr(settings, "quicknode_evm_rpc_url", None)
+    pools = {
+        "solana": RpcEndpointPool(["https://rpc-sol.example.com"], failure_threshold=1),
+        "ethereum": RpcEndpointPool(["https://rpc-eth.example.com"], failure_threshold=1),
+    }
+    monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain_slug: pools[chain_slug])
+
+    rpc_pool_module._pool_health_row(session, "solana")
+    rpc_pool_module._pool_health_row(session, "ethereum")
+    session.flush()
+
+    for component, key in (
+        ("rpc_pool:solana", "HELIUS_API_KEY"),
+        ("rpc_pool:ethereum", "ALCHEMY_API_KEY"),
+    ):
+        row = session.scalar(
+            select(models.SystemHealth).where(models.SystemHealth.component == component)
+        )
+        assert row is not None
+        assert row.state == "ok"
+        assert row.error_count == 0
+        assert row.message is not None
+        assert f"optional public fallback ({key} unset)" in row.message
+
+
 def test_probe_rpc_endpoint_chain_dispatch(monkeypatch) -> None:
     from ingestion import source_clients
 

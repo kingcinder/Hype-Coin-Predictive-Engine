@@ -96,6 +96,19 @@ def test_cmc_without_key_is_reported_as_skipped_not_empty(session) -> None:
     assert health.state == "yellow"
     assert health.message == "skipped: CMC_API_KEY is not set"
 
+    status = orch.get_status()["coinmarketcap"]
+    assert status["status"] == "skipped"
+    assert status["reason"] == "CMC_API_KEY is not set"
+    assert status["total_items"] == 0
+
+
+def test_cmc_with_key_is_not_reported_as_skipped() -> None:
+    crawler = CMCCrawler(api_key="test-key")
+    status = _orchestrator_with(crawler).get_status()["coinmarketcap"]
+
+    assert "status" not in status
+    assert "reason" not in status
+
 
 def test_explorer_without_etherscan_key_is_skipped_with_clear_reason(session) -> None:
     """A missing Etherscan key is a configuration skip, not an empty feed."""
