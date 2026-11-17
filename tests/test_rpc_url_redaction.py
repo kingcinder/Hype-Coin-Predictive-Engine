@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from sqlalchemy import select
 
 from common.config import get_settings
 from common.urls import redact_url
 from ingestion import rpc_pool
+from mempool import evm as evm_mod
+from mempool.evm import run_evm_watch
 from storage import models
 
 SECRET = "00000000-0000-4000-8000-000000000000"
@@ -46,6 +50,12 @@ def test_redact_url_masks_credentials_inside_http_error_text() -> None:
     assert "api-key=***" in redact_url(helius)
 
 
+def test_redact_url_masks_quicknode_path_token() -> None:
+    quicknode = "https://example.quiknode.pro/0123456789abcdef0123456789abcdef01234567/"
+    assert "0123456789abcdef" not in redact_url(quicknode)
+    assert "quiknode.pro/***" in redact_url(quicknode)
+
+
 def test_redact_url_masks_webhook_and_bot_tokens_in_paths() -> None:
     telegram = "https://api.telegram.org/bot123456789:AAHfake-token-value/sendMessage"
     discord = "https://discord.com/api/webhooks/123456789012345678/fake-discord-webhook-token-value"
@@ -57,6 +67,36 @@ def test_redact_url_masks_webhook_and_bot_tokens_in_paths() -> None:
     assert redact_url(telegram).startswith("https://api.telegram.org/bot***")
     assert "/api/webhooks/123456789012345678/***" in redact_url(discord)
     assert redact_url(slack).endswith("/services/T00000000/B00000000/***")
+
+
+def test_mempool_failure_log_redacts_helius_key(session, monkeypatch, capfd) -> None:
+    class _BoomWatcher:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def watch(self, *_args, **_kwargs) -> int:
+            raise RuntimeError(f"Client error for url '{HELIUS}'")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(evm_mod, "EVMFactoryWatcher", _BoomWatcher)
+    monkeypatch.setattr(
+        evm_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            mempool_enabled=True,
+            target_chains=["solana"],
+            evm_factories=[("solana", "0xfactory")],
+        ),
+    )
+
+    assert run_evm_watch(session)["errors"] == 1
+
+    logs = "".join(capfd.readouterr())
+    assert "mempool_evm_failed" in logs
+    assert SECRET not in logs
+    assert "api-key=***" in logs
 
 
 def _configure_helius(monkeypatch, settings) -> None:
