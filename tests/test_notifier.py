@@ -140,7 +140,7 @@ def test_notifier_pushes_each_type_once(session) -> None:
     assert len(notified) == 4
 
 
-def test_notifier_retries_failed_push(session) -> None:
+def test_notifier_retries_failed_push(session, capfd) -> None:
     asset = seed_market_asset(session)
     _seed_alert(session, asset_id=asset.id, alert_type="ignition_detected", created_at=NOW)
     session.commit()
@@ -155,6 +155,11 @@ def test_notifier_retries_failed_push(session) -> None:
         assert result["sent"] == 0
         alert = session.scalar(select(models.Alert))
         assert alert.notified_at is None  # retried on the next scan
+
+    logs = "".join(capfd.readouterr())
+    assert "ntfy_push_failed" in logs
+    assert "serpent-test" not in logs
+    assert "***" in logs
 
     with respx.mock:
         respx.post(NTFY_URL).mock(return_value=Response(200, content=b"ok"))
