@@ -974,6 +974,9 @@ def test_contract_analysis_health_reports_analyzed_and_flagged(session, monkeypa
     )
     service = IngestionService()
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    # CI has no provider credentials; this test exercises the analyzed path,
+    # not the missing-key deferral covered separately below.
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", "test-etherscan-key")
 
     def fake_analyze(_address, chain="ethereum", *, http=None):
         assert chain == "base"

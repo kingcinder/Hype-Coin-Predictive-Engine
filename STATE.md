@@ -26,6 +26,12 @@ or `STATE.md` existed before 2026-09-09.
   the parametrized `tests/test_script_entrypoint_pattern.py:250` routing cases
   for scripts that open no SQLAlchemy session, so the rule is not applicable —
   not missing dependencies or environment failures.
+- **CI follow-up:** the first pushed run's `Tests` job failed because
+  `test_contract_analysis_health_reports_analyzed_and_flagged` inherited the
+  developer's `ETHERSCAN_API_KEY`; CI has no key, so the new missing-key
+  preflight correctly deferred the EVM asset. The test now sets a test key
+  explicitly. A full suite rerun with `ETHERSCAN_API_KEY=` passed with the same
+  1,200/1,187/13/0 counts `[verified 2026-11-17]`.
 - **Static gate:** `ruff check .`, `ruff format --check .`, `make typecheck`
   (190 source files), `scripts/check_broken_imports.py --venv .venv`,
   `scripts/check_declared_deps.py`, and `scripts/check_lock_sync.py` all pass
