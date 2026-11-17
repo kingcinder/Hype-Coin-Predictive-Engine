@@ -738,7 +738,7 @@ def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
 def test_lake_reconstructs_evm_holders_from_blockscout_evidence(session, tmp_path) -> None:
     """The lake path reconstructs holder_count / holder_growth /
     top_holder_concentration for a Base/Ethereum asset from the archived
-    ``evm_holders`` evidence (Blockscout) exactly as for Solana — the
+    ``evm_holders`` evidence exactly as for Solana — the
     reconstruction is chain-agnostic, keyed on ``source_type='chain_rpc'``
     plus the mint/supply/largest_accounts payload shape."""
     chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")

@@ -897,8 +897,8 @@ class IngestionService:
         return count
 
     def _ingest_evm_holder_snapshots(self, session: Session) -> int:
-        """Holder snapshots for Base/Ethereum assets via free public Blockscout
-        instances (``EVMHolderClient``).
+        """Holder snapshots for Base/Ethereum assets via GoPlus's keyless
+        token-security API (``EVMHolderClient``).
 
         Stores the SAME evidence shape as the Solana path — ``mint`` / ``supply``
         / ``largest_accounts`` — on the ``evm_holders`` chain_rpc source, so the

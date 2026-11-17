@@ -502,8 +502,8 @@ The stack must not require any paid key or subscription:
   like `insert_holder_once`, with the same latest-snapshot count, top-10
   concentration, and one-hour-ago growth delta the SQL path computes). The
   reconstruction is **chain-agnostic**: an EVM asset whose holder evidence
-  arrives on the `evm_holders` source (Blockscout v2, `base.blockscout.com`
-  / `eth.blockscout.com`, no key) with the same payload shape must
+  arrives on the `evm_holders` source (GoPlus token-security API, no key)
+  with the same payload shape must
   reconstruct identically — a parity test seeds Base-chain holder evidence
   and asserts the lake matches the SQL path.
 - `suspicious_contract_flags` must reconstruct as the FULL count of
@@ -628,7 +628,7 @@ The stack must not require any paid key or subscription:
 
 - Solana holder ingestion must write idempotent `holders` rows from RPC token-account evidence before scoring runs.
 - `source:solana_holders` health must report the number of holder rows and assets scanned, or preserve the exact RPC failure reason when public RPC/provider limits block the scan.
-- Base/Ethereum holder ingestion must write idempotent `holders` rows from free public Blockscout v2 token-holder evidence (`EVMHolderClient`, no key): token info for `total_supply` plus the token-holders page, normalized to the same `mint`/`supply`/`largest_accounts` evidence shape the Solana path and the lake replay parse. The scan is bounded by `EVM_HOLDER_SCAN_LIMIT` per chain and paced by `EVM_HOLDER_RPC_PAUSE_SECONDS` to stay under Blockscout's unauthenticated rate limit (~3 req/min). One aggregate `source:evm_holders` health row must report the holder rows and scanned-chain count (`yellow` with `0 eligible assets` when chains exist but nothing is scannable), and the whole scan must be idempotent on repeat runs.
+- Base/Ethereum holder ingestion must write idempotent `holders` rows from the free GoPlus token-security API (`EVMHolderClient`, no key): `total_supply` plus the ranked holder list, normalized to the same `mint`/`supply`/`largest_accounts` evidence shape the Solana path and the lake replay parse. The scan is bounded by `EVM_HOLDER_SCAN_LIMIT` per chain and paced by `EVM_HOLDER_RPC_PAUSE_SECONDS` to stay under GoPlus's free rate limit. One aggregate `source:evm_holders` health row must report the holder rows and scanned-chain count (`yellow` with `0 eligible assets` when chains exist but nothing is scannable), and the whole scan must be idempotent on repeat runs.
 
 ## Time-Ordered Risk Confidence Calibration
 

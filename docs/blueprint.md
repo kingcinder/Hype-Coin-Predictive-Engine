@@ -54,7 +54,7 @@ local substitute. Build these; never subscribe.
 | Paid / limited service | Typical cost | Quiet superior local substitute |
 |---|---|---|
 | Helius / QuickNode / Alchemy (RPC) | $49–$500/mo | Free public RPC rotation (Solana mainnet, Ankr, drpc, publicnode, base public RPC) + WebSocket log streams + optional self-run node on old hardware/VPS |
-| Etherscan / Basescan API | $29+/mo | **Blockscout public instances are free with no key** (`base.blockscout.com`, `ethereum.blockscout.com`). Also self-hosted Blockscout (Phase 4) |
+| Etherscan / Basescan API | $29+/mo | **GoPlus token-security API is free with no key** (Base + Ethereum holder snapshots). Also self-hosted Blockscout (Phase 4) |
 | Moralis / Shyft (indexers) | $50+/mo | Solana RPC `getSignaturesForAddress` polling + log parsing — free, no key |
 | CoinGecko API | $29+/mo (paid tiers) | GeckoTerminal free API + DexScreener free API (already in MVP) + self-built snapshots stored forever in Postgres/Parquet |
 | LunarCrush / Brandwatch / social intel | $99–$1000/mo | **Narrative Radar module**: Reddit public JSON, RSSHub + Nitter bridges, YouTube RSS feeds, public Telegram channels, GitHub search API, HuggingFace trending — all free |
@@ -233,8 +233,8 @@ identical, enforced by the parity test in `tests/test_lake_features.py`. The lak
 path also reconstructs the on-chain features from the archived RPC evidence:
 `holder_count` / `holder_growth` / `top_holder_concentration` from the
 `chain_rpc` holder-snapshot payloads — `solana_rpc` for Solana and the
-`evm_holders` source for Base/Ethereum (free public Blockscout v2 instances,
-no key), both shaped `largest_accounts` + `supply` and deduped per
+`evm_holders` source for Base/Ethereum (GoPlus token-security API, no key),
+both shaped `largest_accounts` + `supply` and deduped per
 hour/wallet like `insert_holder_once`, so the reconstruction is
 chain-agnostic — and `suspicious_contract_flags` as the
 FULL count of evidence-backed contract flags: `low_liquidity` scans

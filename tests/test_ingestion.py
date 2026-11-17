@@ -21,7 +21,11 @@ from ingestion.solana_swaps import (
     reset_solana_swap_cache,
     reset_solana_swap_gate,
 )
-from ingestion.source_clients import GeckoTerminalClient, reset_geckoterminal_gate
+from ingestion.source_clients import (
+    EVMHolderClient,
+    GeckoTerminalClient,
+    reset_geckoterminal_gate,
+)
 from ops.archive import LocalArchiveStore
 from storage import models
 from storage.repository import (
@@ -1029,8 +1033,43 @@ def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> 
     assert len(evidence) == 1
 
 
+@respx.mock
+def test_evm_holder_client_uses_goplus_token_security() -> None:
+    address = "0x1111111111111111111111111111111111111111"
+    route = respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 1,
+                "result": {
+                    address: {
+                        "total_supply": "1000",
+                        "holder_count": "2",
+                        "holders": [
+                            {"address": "0xaaa", "balance": "700"},
+                            {"address": "0xbbb", "balance": "200"},
+                        ],
+                    }
+                },
+            },
+        )
+    )
+    client = EVMHolderClient("base")
+    try:
+        assert client.token_supply(address) == 1000.0
+        assert client.top_holders(address) == [
+            {"address": "0xaaa", "uiAmountString": "700"},
+            {"address": "0xbbb", "uiAmountString": "200"},
+        ]
+    finally:
+        client.close()
+
+    assert len(route.calls) == 1
+    assert route.calls[0].request.url.params["contract_addresses"] == address
+
+
 def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
-    """The EVM holder scan (Blockscout) stores the same evidence shape as the
+    """The EVM holder scan (GoPlus) stores the same evidence shape as the
     Solana path on the evm_holders chain_rpc source, writes Holder rows with
     pct-of-supply, reports source:evm_holders health, and is idempotent on a
     repeat scan."""

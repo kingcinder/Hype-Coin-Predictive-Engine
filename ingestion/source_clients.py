@@ -246,61 +246,63 @@ class SolanaRpcClient:
 
 
 class EVMHolderClient:
-    """Top-holder snapshots for EVM tokens via the free public Blockscout v2
-    API (no key): token info (``total_supply``) + the token-holders list.
+    """Top-holder snapshots for EVM tokens via GoPlus's keyless token-security
+    API: one response carries ``total_supply`` plus the ranked holder list.
 
-    Public Blockscout instances rate-limit unauthenticated requests (~3/min),
-    so callers must pause between tokens (``EVM_HOLDER_RPC_PAUSE_SECONDS``).
-    Balances and supply are returned in the token's raw units — pct-of-supply
-    and ranking are invariant to that common scale, and the SQL and lake read
-    paths both consume the same numbers, so the holder features agree.
+    GoPlus covers Base and Ethereum without a Blockscout/Etherscan key. The
+    supply and balances are human token units, so pct-of-supply and ranking are
+    correct; the service pauses between tokens via
+    ``EVM_HOLDER_RPC_PAUSE_SECONDS`` to stay well under the free rate limit.
     """
 
-    BLOCKSCOUT_BASES = {
-        "base": "https://base.blockscout.com",
-        "ethereum": "https://eth.blockscout.com",
-    }
+    GOPLUS_CHAIN_IDS = {"base": "8453", "ethereum": "1"}
 
     def __init__(self, chain_slug: str) -> None:
-        base = self.BLOCKSCOUT_BASES.get(chain_slug)
-        if not base:
-            raise ValueError(f"no blockscout instance for chain {chain_slug!r}")
+        chain_id = self.GOPLUS_CHAIN_IDS.get(chain_slug)
+        if not chain_id:
+            raise ValueError(f"no GoPlus token-security chain for {chain_slug!r}")
         self.chain_slug = chain_slug
-        self.http = HttpClient(base_url=base)
+        self.chain_id = chain_id
+        self.http = HttpClient(base_url="https://api.gopluslabs.io")
+        self._payloads: dict[str, dict[str, Any]] = {}
 
     def close(self) -> None:
         self.http.close()
 
+    def _payload(self, address: str) -> dict[str, Any]:
+        """Fetch (and cache) the token-security payload for one contract."""
+        cached = self._payloads.get(address.lower())
+        if cached is not None:
+            return cached
+        data = self.http.get_json(
+            f"/api/v1/token_security/{self.chain_id}",
+            params={"contract_addresses": address},
+        )
+        result = data.get("result") if isinstance(data, dict) else None
+        payload = result.get(address.lower(), {}) if isinstance(result, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        self._payloads[address.lower()] = payload
+        return payload
+
     def token_supply(self, address: str) -> float | None:
-        """Total supply in raw token units (``total_supply``), or None when
-        the token info call fails."""
-        data = self.http.get_json(f"/api/v2/tokens/{address}")
-        if not isinstance(data, dict):
-            return None
+        """Total supply in human token units, or None when GoPlus has no data."""
         try:
-            return float(data["total_supply"])
+            return float(self._payload(address)["total_supply"])
         except (KeyError, TypeError, ValueError):
             return None
 
     def top_holders(self, address: str) -> list[dict[str, Any]]:
-        """The token-holders page normalized to the canonical evidence shape
+        """Ranked top holders normalized to the canonical evidence shape
         the lake reconstruction parses (``[{address, uiAmountString}]``)."""
-        data = self.http.get_json(f"/api/v2/tokens/{address}/holders")
-        if not isinstance(data, dict):
-            return []
-        items = data.get("items") or []
+        items = self._payload(address).get("holders") or []
         out: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
-            holder = item.get("address_hash")
-            address_hash = holder.get("hash") if isinstance(holder, dict) else None
-            raw_value = item.get("value")
-            if not address_hash or raw_value is None:
-                continue
-            try:
-                balance = float(raw_value)
-            except (TypeError, ValueError):
+            address_hash = item.get("address")
+            balance = item.get("balance")
+            if not address_hash or balance is None:
                 continue
             out.append({"address": str(address_hash), "uiAmountString": str(balance)})
         return out

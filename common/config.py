@@ -173,9 +173,9 @@ class Settings(BaseSettings):
     black_min_liquidity_usd: float = 15_000
     solana_holder_scan_limit: int = 1
     solana_holder_rpc_pause_seconds: float = 0.75
-    # EVM holder snapshots via free public Blockscout v2 instances (~3 req/min
-    # unauthenticated), so the per-chain scan limit stays small and the pause
-    # keeps the worker under the rate limit.
+    # EVM holder snapshots via GoPlus's keyless token-security API, so the
+    # per-chain scan limit stays small and the pause keeps the worker under the
+    # free rate limit.
     evm_holder_scan_limit: int = 2
     evm_holder_rpc_pause_seconds: float = 20.0
 
