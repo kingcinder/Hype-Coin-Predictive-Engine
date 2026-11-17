@@ -471,6 +471,7 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
             probe_successes=0,
             probe_failures=0,
             request_count=23,
+            success_count=22,
             probe_history=[],
         )
     )
@@ -488,6 +489,7 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
             probe_successes=1,
             probe_failures=3,
             request_count=7,
+            success_count=6,
             probe_history=[{"ts": decision_ts.isoformat(), "ok": False}],
         )
     )
@@ -506,6 +508,7 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
     assert endpoint.probe_successes == 1
     assert endpoint.probe_failures == 3
     assert endpoint.request_count == 7
+    assert endpoint.success_count == 6
     assert endpoint.probe_history[0].ok is False
 
 

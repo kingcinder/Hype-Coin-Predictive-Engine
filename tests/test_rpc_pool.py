@@ -46,7 +46,9 @@ def test_request_counts_track_rpc_calls_separately_from_probes() -> None:
 
     state = pool.snapshot()[0]
     assert state.request_count == 1
+    assert state.success_count == 1
     assert state.probe_count == 1
+    assert state.probe_successes == 1
 
 
 def test_endpoint_goes_down_after_threshold_and_is_excluded() -> None:
@@ -359,6 +361,7 @@ def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monke
     }
     pools["base"].mark_failure("https://base.example.com")
     pools["base"].record_request("https://base.example.com")
+    pools["solana"].mark_success("https://solana.example.com")
     monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain: pools[chain])
 
     assert persist_pool_snapshots(session) == 3
@@ -372,6 +375,11 @@ def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monke
     assert row.probe_count == 0
     assert row.probe_history == []
     assert row.request_count == 1
+    solana = session.scalar(
+        select(models.RpcPoolSnapshot).where(models.RpcPoolSnapshot.chain_slug == "solana")
+    )
+    assert solana is not None
+    assert solana.success_count == 1
 
 
 def test_record_pool_health_writes_per_chain_rows(session, monkeypatch) -> None:

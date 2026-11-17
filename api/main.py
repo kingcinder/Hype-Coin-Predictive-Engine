@@ -1681,6 +1681,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_successes=row.probe_successes,
                     probe_failures=row.probe_failures,
                     request_count=row.request_count,
+                    success_count=row.success_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe["ts"], ok=bool(probe["ok"]))
                         for probe in (row.probe_history or [])
@@ -1705,6 +1706,7 @@ def rpc_pool_states(session: DbSession) -> list[RpcPoolChainRow]:
                     probe_successes=state.probe_successes,
                     probe_failures=state.probe_failures,
                     request_count=state.request_count,
+                    success_count=state.success_count,
                     probe_history=[
                         RpcPoolProbeRow(ts=probe.ts, ok=probe.ok) for probe in state.probe_history
                     ],

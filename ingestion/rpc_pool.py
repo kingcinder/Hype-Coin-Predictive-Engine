@@ -41,6 +41,7 @@ class EndpointState:
     probe_failures: int = 0
     probe_history: tuple[ProbeRecord, ...] = ()
     request_count: int = 0
+    success_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class RpcEndpointPool:
         }
         self._probe_counts: dict[str, int] = {url: 0 for url in self.endpoints}
         self._probe_successes: dict[str, int] = {url: 0 for url in self.endpoints}
+        self._success_counts: dict[str, int] = {url: 0 for url in self.endpoints}
         self._request_counts: dict[str, int] = {url: 0 for url in self.endpoints}
 
     @property
@@ -141,10 +143,12 @@ class RpcEndpointPool:
             self._last_used[chosen] = self._tick
             return chosen
 
-    def mark_success(self, url: str) -> None:
+    def mark_success(self, url: str, *, live: bool = True) -> None:
         with self._lock:
             if url not in self._health:
                 return
+            if live:
+                self._success_counts[url] += 1
             if self._is_down(url):
                 # Recovered from the down state: jump-start above the recovery
                 # threshold so it can win picks again instead of trickling back.
@@ -194,6 +198,7 @@ class RpcEndpointPool:
                     probe_failures=self._probe_counts[url] - self._probe_successes[url],
                     probe_history=tuple(self._probe_history[url]),
                     request_count=self._request_counts[url],
+                    success_count=self._success_counts[url],
                 )
                 for url in self.endpoints
             ]
@@ -375,7 +380,7 @@ class RpcEndpointPool:
             except Exception:  # noqa: BLE001 - a probe must never raise.
                 ok = False
             if ok:
-                self.mark_success(url)
+                self.mark_success(url, live=False)
             else:
                 self.mark_failure(url)
             self._record_probe(url, ok)
@@ -464,6 +469,7 @@ def persist_pool_snapshots(session: Session, *, ts: datetime | None = None) -> i
                         for probe in state.probe_history
                     ],
                     request_count=state.request_count,
+                    success_count=state.success_count,
                 )
             )
             count += 1
