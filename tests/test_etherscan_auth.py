@@ -59,7 +59,9 @@ def test_contract_source_lookup_sends_chain_id_and_key(monkeypatch) -> None:
     assert params["action"] == "getsourcecode"
     assert params["apikey"] == KEY
     # The deployer txlist follow-up hit V2 unauthenticated before this fix.
-    assert http.calls[1][1]["action"] == "txlist"
+    txlist_params = http.calls[1][1]
+    assert txlist_params["action"] == "txlist"
+    assert {"endblock", "page", "startblock"}.isdisjoint(txlist_params)
     for _, call_params in http.calls:
         assert call_params["apikey"] == KEY
 
@@ -89,6 +91,7 @@ def test_deployer_history_lookup_sends_key(monkeypatch) -> None:
     _, params = http.calls[0]
     assert params["chainid"] == "1"
     assert params["apikey"] == KEY
+    assert {"endblock", "page", "startblock"}.isdisjoint(params)
 
 
 @respx.mock

@@ -18,6 +18,15 @@ from common.urls import redact_url
 
 log = get_logger(__name__)
 
+
+def _with_etherscan_key(**params: Any) -> dict[str, Any]:
+    """Add the configured Etherscan V2 key to a request's parameters."""
+    api_key = secret_value(get_settings().etherscan_api_key)
+    if api_key:
+        params["apikey"] = api_key
+    return params
+
+
 # Honeypot indicator patterns in contract bytecode (simplified heuristics)
 HONEYPOT_PATTERNS = [
     # Function selectors for known honeypot patterns
@@ -111,17 +120,12 @@ def _analyze_evm_contract(
     try:
         # Fetch contract source code for pattern matching
         chain_id = "1" if chain == "ethereum" else "8453"
-        params: dict[str, Any] = {
-            "chainid": chain_id,
-            "module": "contract",
-            "action": "getsourcecode",
-            "address": address,
-        }
-        # Etherscan V2 rejects unauthenticated requests ("Missing/Invalid API
-        # Key"), so pass the configured key when there is one.
-        api_key = secret_value(get_settings().etherscan_api_key)
-        if api_key:
-            params["apikey"] = api_key
+        params = _with_etherscan_key(
+            chainid=chain_id,
+            module="contract",
+            action="getsourcecode",
+            address=address,
+        )
         data = client.get_json("/v2/api", params=params)
         if rejection := _etherscan_rejection(data):
             result.error = rejection
@@ -166,22 +170,17 @@ def _analyze_evm_contract(
             result.suspicious_flags += 1
             result.reasons.append("Contract source code not verified")
 
-        # Fetch deployer info. V2 requires the key on every endpoint, not just
-        # getsourcecode; without it this silently lost deployer age/history.
-        tx_params: dict[str, Any] = {
-            "chainid": chain_id,
-            "module": "account",
-            "action": "txlist",
-            "address": address,
-            "startblock": 0,
-            "endblock": 99999999,
-            "page": 1,
-            "offset": 1,
-            "sort": "asc",
-        }
-        if api_key:
-            tx_params["apikey"] = api_key
-        tx_data = client.get_json("/v2/api", params=tx_params)
+        tx_data = client.get_json(
+            "/v2/api",
+            params=_with_etherscan_key(
+                chainid=chain_id,
+                module="account",
+                action="txlist",
+                address=address,
+                offset=1,
+                sort="asc",
+            ),
+        )
         if rejection := _etherscan_rejection(tx_data):
             result.error = rejection
             return
@@ -281,21 +280,17 @@ def _check_deployer_history(
 ) -> None:
     """Check if deployer has prior rug-pull history."""
     try:
-        params: dict[str, Any] = {
-            "chainid": chain_id,
-            "module": "account",
-            "action": "txlist",
-            "address": deployer,
-            "startblock": 0,
-            "endblock": 99999999,
-            "page": 1,
-            "offset": 5,
-            "sort": "desc",
-        }
-        api_key = secret_value(get_settings().etherscan_api_key)
-        if api_key:
-            params["apikey"] = api_key
-        tx_data = client.get_json("/v2/api", params=params)
+        tx_data = client.get_json(
+            "/v2/api",
+            params=_with_etherscan_key(
+                chainid=chain_id,
+                module="account",
+                action="txlist",
+                address=deployer,
+                offset=5,
+                sort="desc",
+            ),
+        )
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list):
