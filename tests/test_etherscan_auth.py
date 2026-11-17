@@ -64,6 +64,22 @@ def test_contract_source_lookup_sends_chain_id_and_key(monkeypatch) -> None:
         assert call_params["apikey"] == KEY
 
 
+def test_evm_contract_exposes_etherscan_auth_failure() -> None:
+    result = ContractAnalysis()
+
+    _analyze_evm_contract(
+        "0xtoken",
+        "base",
+        result,
+        cast(
+            Any, FakeHttp({"status": "0", "message": "NOTOK", "result": "Missing/Invalid API Key"})
+        ),
+    )
+
+    assert result.error == "Missing/Invalid API Key"
+    assert result.suspicious_flags == 0
+
+
 def test_deployer_history_lookup_sends_key(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
     http = FakeHttp({"status": "1", "result": []})

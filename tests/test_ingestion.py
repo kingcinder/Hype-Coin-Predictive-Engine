@@ -960,6 +960,69 @@ def test_analysis_findings_maps_analysis_to_flagged_findings() -> None:
     assert _analysis_findings(ContractAnalysis(ownership_renounced=None)) == []
 
 
+def test_contract_analysis_health_reports_analyzed_and_flagged(session, monkeypatch) -> None:
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x1111111111111111111111111111111111111111",
+        symbol="EVMT",
+        name="EVM Token",
+        first_seen_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+    )
+    service = IngestionService()
+    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    def fake_analyze(_address, chain="ethereum", *, http=None):
+        assert chain == "base"
+        return ContractAnalysis(suspicious_flags=2, has_mint_function=True)
+
+    monkeypatch.setattr(ingestion_service, "analyze_contract", fake_analyze)
+
+    assert service._run_contract_analysis(session, decision_ts) == {"analyzed": 1, "flagged": 1}
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:contract_analysis")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "ok"
+    assert health.error_count == 0
+    assert health.message == "1 analyzed, 1 flagged"
+
+
+def test_contract_analysis_health_reports_etherscan_auth_failure(session, monkeypatch) -> None:
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x2222222222222222222222222222222222222222",
+        symbol="EVMT",
+        name="EVM Token",
+        first_seen_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+    )
+    service = IngestionService()
+    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    def fake_analyze(_address, chain="ethereum", *, http=None):
+        assert chain == "base"
+        return ContractAnalysis(error="Missing/Invalid API Key")
+
+    monkeypatch.setattr(ingestion_service, "analyze_contract", fake_analyze)
+
+    assert service._run_contract_analysis(session, decision_ts) == {"analyzed": 1, "flagged": 0}
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:contract_analysis")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "red"
+    assert health.error_count == 1
+    assert "1 analyzed, 0 flagged" in (health.message or "")
+    assert "Missing/Invalid API Key" in (health.message or "")
+
+
 def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> None:
     """_run_contract_analysis persists each finding as point-in-time raw
     evidence (the contract_analysis payload) AND one evidence-backed

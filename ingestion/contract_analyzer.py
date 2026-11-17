@@ -45,6 +45,7 @@ class ContractAnalysis:
     has_pause_function: bool = False
     contract_age_hours: float | None = None
     deployer_tx_count: int | None = None
+    error: str | None = None
 
 
 def _get_rug_deployers() -> set[str]:
@@ -122,6 +123,9 @@ def _analyze_evm_contract(
         if api_key:
             params["apikey"] = api_key
         data = client.get_json("/v2/api", params=params)
+        if rejection := _etherscan_rejection(data):
+            result.error = rejection
+            return
 
         source_code = ""
         if isinstance(data, dict) and data.get("result"):
@@ -178,6 +182,9 @@ def _analyze_evm_contract(
         if api_key:
             tx_params["apikey"] = api_key
         tx_data = client.get_json("/v2/api", params=tx_params)
+        if rejection := _etherscan_rejection(tx_data):
+            result.error = rejection
+            return
         if isinstance(tx_data, dict) and tx_data.get("result"):
             txs = tx_data["result"]
             if isinstance(txs, list) and txs:
@@ -189,10 +196,38 @@ def _analyze_evm_contract(
     except Exception as exc:  # noqa: BLE001
         # Class name only: an HTTPStatusError message embeds the request URL,
         # which carries the Etherscan ``apikey`` query parameter.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        result.error = (
+            f"Etherscan request failed (HTTP {status})"
+            if status
+            else f"Etherscan request failed ({type(exc).__name__})"
+        )
         log.debug("contract_analysis_error", address=address, error=type(exc).__name__)
     finally:
         if http is None:
             client.close()
+
+
+def _etherscan_rejection(data: Any) -> str | None:
+    """Return a safe Etherscan auth/plan rejection message, if any."""
+    if not isinstance(data, dict) or str(data.get("status")) != "0":
+        return None
+    message = str(data.get("result") or data.get("message") or "").strip()
+    lowered = message.lower()
+    if not message or not any(
+        token in lowered
+        for token in (
+            "api key",
+            "apikey",
+            "access",
+            "upgrade",
+            "unauthorized",
+            "rate limit",
+            "invalid key",
+        )
+    ):
+        return None
+    return redact_url(message)[:200]
 
 
 def _analyze_solana_contract(

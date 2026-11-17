@@ -319,8 +319,16 @@ class IngestionService:
                 contract_result = self._run_contract_analysis(session, decision_ts)
                 result["contract_analysis"] = contract_result
             except Exception as ce:  # noqa: BLE001
-                log.debug("contract_analysis_failed", error=str(ce))
-                result["contract_analysis"] = {"error": str(ce)}
+                safe_error = redact_url(str(ce))
+                log.debug("contract_analysis_failed", error=safe_error)
+                record_health(
+                    session,
+                    component="source:contract_analysis",
+                    state="red",
+                    message=f"contract analysis failed: {safe_error}",
+                    error_count=1,
+                )
+                result["contract_analysis"] = {"error": safe_error}
             self._commit_stage(session, stop)
             record_health(
                 session,
@@ -524,12 +532,27 @@ class IngestionService:
                     "ownership_renounced": analysis.ownership_renounced,
                     "findings": findings,
                     "reasons": analysis.reasons,
+                    "error": analysis.error,
                 }
             )
             # Each analysis is a network round-trip; commit so the next asset's
             # fetch does not run while we still hold SQLite's write lock.
             self._commit_stage(session)
         flagged = sum(1 for r in results if r["suspicious_flags"] > 0)
+        errors = [r["error"] for r in results if r["error"]]
+        message = f"{len(results)} analyzed, {flagged} flagged"
+        if errors:
+            message = f"{message}; {len(errors)} errors; first={errors[0]}"
+        record_health(
+            session,
+            component="source:contract_analysis",
+            state="red"
+            if errors and len(errors) == len(results)
+            else ("yellow" if errors else "ok"),
+            message=message,
+            error_count=len(errors),
+        )
+        self._commit_stage(session)
         return {"analyzed": len(results), "flagged": flagged}
 
     def _ingest_birdeye_solana(self, session: Session) -> int:
