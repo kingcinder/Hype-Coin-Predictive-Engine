@@ -22,7 +22,10 @@ This checklist does not rotate credentials or rewrite Git history.
 - [ ] `BIRDEYE_API_KEY`: rotate at Birdeye, update `.env.prod` for the
   production stack (and `.env` for local runs), then confirm the next scan
   reports `source:birdeye` as `ok`. The production Compose overlay refuses to
-  start when this value is missing or empty.
+  start when this value is missing or empty. A missing key and a rejected
+  401/403 both report yellow `disabled` locally (the latter names the key as
+  invalid or lacking access); a 429 is yellow pacing. Only other failures stay
+  red, so a credential problem never looks like a transient outage.
 - [ ] `TELEGRAM_API_HASH`: regenerate the Telegram application credential;
   review and replace the associated `TELEGRAM_API_ID` configuration if the
   application itself was exposed. Revoke and recreate any affected Telegram

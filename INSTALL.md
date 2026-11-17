@@ -370,6 +370,15 @@ If the worker logs `database is locked` repeatedly or falls silent for hours
 (stuck in a phase), that is the retention/phase wedge — the runbook
 [`docs/runbook.md`](docs/runbook.md) has the diagnosis and recovery steps.
 
+**Birdeye or GeckoTerminal shows yellow/red:**
+
+Open **Feed Health** and **Health & Diagnostics** first. A missing optional
+`BIRDEYE_API_KEY` and a rejected 401/403 key both report yellow `disabled`; a
+429 or an active GeckoTerminal cooldown reports yellow `pacing`. Those are
+configuration/pacing states, not transient failures. Only other provider
+errors should be red. See
+[`docs/runbook.md#provider-credential-and-cooldown-health`](docs/runbook.md#provider-credential-and-cooldown-health).
+
 **Reinstall from scratch:**
 ```bash
 sudo serpent uninstall --remove-data

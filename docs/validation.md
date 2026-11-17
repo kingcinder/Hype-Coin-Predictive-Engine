@@ -8,6 +8,36 @@
 .\scripts\dev.ps1 smoke
 ```
 
+### Full-suite and live-GUI verification (2026-11-17)
+
+On the live Linux host, after reconciling `fix/review-v3` and `origin/main`
+into `main`:
+
+```bash
+python -m pytest tests/ -q          # 1,200 collected: 1,187 passed, 13 skipped
+ruff check . && ruff format --check .
+make typecheck                      # 190 source files
+# `make gate` is the equivalent one-command gate (lint, format, mypy,
+# import/dependency/lock scans, then pytest with the coverage floor).
+python -m engine                    # live API + Streamlit GUI
+```
+
+The first complete run was green; no test fixes were required. The 13 skips are
+all parametrized script-entrypoint routing cases for scripts that open no
+SQLAlchemy session (`tests/test_script_entrypoint_pattern.py:250`), not missing
+dependencies. The live GUI was checked in the browser at
+`http://localhost:8501` (Command Center, Health & Diagnostics, Feed Health, and
+Engine Control), and
+`tests/test_ui_navigation.py` exercises every sidebar view through Streamlit's
+`AppTest`.
+
+The live `/health` row set was `degraded` because of existing lake data, not a
+code failure: the latest parity run reports a historical lake-vs-SQL mismatch
+(4,910 rows across 2,009 assets at a 2026-11-10 decision hour), and several
+label/score components are stale or yellow. Use **Feed Health** and the parity
+runbook to clear those data conditions; do not weaken the health check or
+skip the tests to make the header green.
+
 ## Phase 9 — Benchmark Harness (does the engine beat a dumb baseline?)
 
 The `validation/` package is a standalone, leak-first benchmark harness. It

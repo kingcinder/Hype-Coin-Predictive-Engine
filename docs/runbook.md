@@ -449,3 +449,55 @@ row, so the working copy now carries the red trend + health rows + an open
   stale scores.
 - Rescue soon after the formula change lands, so the served distribution and
   the live formula never drift far enough to mislead the risk console.
+
+## Provider credential and cooldown health
+
+Provider health separates operator configuration from transient failure. The
+GUI's **Feed Health** and **Health & Diagnostics** views show the same rows;
+the messages name the environment variable an operator must fix.
+
+### Birdeye (`source:birdeye`)
+
+| Condition | Recorded state | Meaning |
+|-----------|----------------|---------|
+| `BIRDEYE_API_KEY` unset or blank | yellow `disabled: ... not set; feed skipped` | Feed is intentionally optional locally; no request is made. |
+| 401/403 from Birdeye | yellow `disabled: Birdeye rejected BIRDEYE_API_KEY (401 Unauthorized)` / `403 Forbidden` | The key is present but invalid or lacks endpoint access. Replace it or unset it to skip the feed. This is not a transient outage. |
+| 429 | yellow `pacing: Birdeye rate limited 429` | Shared cooldown opened; later scans are deferred until it expires. |
+| 5xx, timeout, malformed response | red | A genuine provider or parsing failure. |
+
+Production Compose refuses to start when `BIRDEYE_API_KEY` is missing or empty;
+that fail-closed rule is separate from the local degraded state.
+
+### GeckoTerminal (`source:geckoterminal_new_pools`)
+
+| Condition | Recorded state | Meaning |
+|-----------|----------------|---------|
+| Active provider cooldown (`CircuitOpen`) | yellow `pacing: provider cooling down ...` | The shared gate is pacing calls; remaining chains are deferred. |
+| 403/429 that opens the cooldown | yellow `pacing: GeckoTerminal rate limited (...)` | The request that tripped the gate is pacing too, so the first rejected scan does not look like a red outage. |
+| Other errors | red | A real provider or request failure. |
+
+### Etherscan-dependent feeds
+
+- `ETHERSCAN_API_KEY` unset: the explorer is skipped yellow, EVM contract
+  analysis defers EVM assets yellow while Solana analysis continues, the
+  Ethereum whale half is skipped, and direct EVM analyzer calls return the
+  missing-credential reason without making an unauthenticated request.
+- A set-but-rejected Etherscan key still records the genuine failure; the
+  missing-key path and the rejected-key path are deliberately different.
+- Helius and Alchemy are optional RPC enhancements: without them the pool falls
+  back to configured public RPC URLs. Reddit's public JSON feed intentionally
+  needs no client credential; a `403 Blocked` there is a provider block, not a
+  missing-key configuration error.
+
+### Operational checks
+
+```bash
+# Authenticated API health (token from the environment/.env)
+curl -fsS -H "Authorization: Bearer $ENGINE_API_TOKEN" \
+  http://127.0.0.1:8000/health
+```
+
+In the GUI, open **Feed Health** for the component table and **Health &
+Diagnostics** for the overall status, recent errors, and RPC pool state. A
+yellow `disabled` or `pacing` row is not a reason to change code: fix the key,
+wait out the cooldown, or leave the optional feed disabled.

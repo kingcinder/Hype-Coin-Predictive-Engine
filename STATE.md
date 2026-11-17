@@ -11,6 +11,44 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## BRANCH RECONCILIATION + FINAL VERIFICATION — 2026-11-17
+
+- **Reconciled into `main`:** the reviewed `fix/review-v3` branch (`3665e0f`,
+  including the pending provider-health/HTTP-redaction work) and the newer
+  `origin/main` migration/coverage updates (`7a9d027`, `a0b8f16`). Merge commit
+  `036bbd7`; local `fix/rpc-pool-health` was the same tip as `fix/review-v3`.
+  No conflict required discarding either side: the migration rename and coverage
+  refresh came from `origin/main`, while the provider/RPC/redaction changes came
+  from review-v3.
+- **Full suite on the live host:** `python -m pytest tests/ -q` collected 1,200
+  tests: **1,187 passed, 13 skipped, 0 failed** `[verified 2026-11-17]`.
+  The first complete run was green; no test fixes were needed. All 13 skips are
+  the parametrized `tests/test_script_entrypoint_pattern.py:250` routing cases
+  for scripts that open no SQLAlchemy session, so the rule is not applicable —
+  not missing dependencies or environment failures.
+- **Static gate:** `ruff check .`, `ruff format --check .`, `make typecheck`
+  (190 source files), `scripts/check_broken_imports.py --venv .venv`,
+  `scripts/check_declared_deps.py`, and `scripts/check_lock_sync.py` all pass
+  `[verified 2026-11-17]`.
+- **Live GUI:** started `python -m engine` against the ignored `serpent.db` on
+  this host. Command Center, Health & Diagnostics, Feed Health, and Engine
+  Control rendered with real data and no Streamlit exception; the full suite's
+  `tests/test_ui_navigation.py` drives every sidebar view through `AppTest`.
+  The engine and its Streamlit child were stopped and ports 8000/8501 were
+  confirmed free `[verified 2026-11-17]`.
+- **Live `/health` is degraded, not failed:** the existing lake has a
+  lake-vs-SQL parity mismatch (`4,910` rows across `2,009` assets at decision
+  hour `2026-11-10T11:00:00+00:00`) plus stale/yellow data-quality rows
+  (`outcome_labels`, `score_drift`, Reddit 403, Solana holder 403, and the
+  GeckoTerminal cooldown). These are data/backfill and external-provider
+  conditions, not code/test failures; clear them with the archive/parity and
+  retention runbooks rather than weakening the checks.
+- **Provider behavior now explicit:** Birdeye missing key and rejected 401/403
+  both report yellow `disabled`; 429 is yellow pacing; other failures remain
+  red. GeckoTerminal 403/429 and an active cooldown are yellow pacing; real
+  failures remain red. Etherscan-missing states are yellow/deferred instead of
+  red provider failures.
+
 ## OUTCOME-FIX 2026-11-14 (bounded outcome labels)
 
 - **Code fix (`85e4ed6`):** `risk_engine/outcomes.py` labels each prediction only from lifecycle state at or before its own window end — `_lifecycle_phase_as_of(..., as_of=scored_at + risk_outcome_window_hours)` — and bounds the exit price with `_price_change_since(..., until=window_end)`. `record_risk_outcome` bounds the at-score phase lookup to `ts <= decision_ts`. Phases that establish neither collapse (`collapse`/`dead`/`rugged`) nor survival (`survivor`/`parabolic`/`saturation`) leave the row unresolved: `evaluated_at` stays NULL and `lifecycle_phase_at_eval` records the bounded phase or `"unknown"`, instead of silently becoming a non-survival. Historical `RiskOutcome` rows were not rewritten.

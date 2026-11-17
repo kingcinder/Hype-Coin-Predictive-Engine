@@ -14,6 +14,30 @@ Test coverage trajectory (backend core, weekly):
 
 Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It separates hype from structural danger and stores point-in-time evidence so scans can be replayed without future leakage.
 
+## Current verified state (2026-11-17)
+
+`main` is the single integration line. It contains the reviewed
+`fix/review-v3` work, the newer migration/coverage updates from `origin/main`,
+and the provider-health and HTTP-redaction fixes. The verified state on the
+live host is:
+
+- **Full suite:** 1,200 collected, **1,187 passed, 13 skipped, 0 failed**
+  (`python -m pytest tests/ -q`).
+- **Static gate:** ruff lint/format, mypy (190 source files), broken-import,
+  declared-dependency, and lock-sync checks all pass.
+- **Live GUI:** the engine started against `serpent.db` and the Command Center,
+  Health & Diagnostics, Feed Health, and Engine Control views rendered with
+  real data; `tests/test_ui_navigation.py` drives every sidebar view through
+  Streamlit's `AppTest` and asserts no view raises.
+- **Known live-data condition:** the `/health` snapshot was `degraded`, not
+  failed. The existing lake has a historical lake-vs-SQL parity mismatch
+  (4,910 rows across 2,009 assets at a 2026-11-10 decision hour) plus stale
+  and yellow data-quality components. This is a data/backfill condition, not a
+  code or test failure; see **Feed Health** and **Health & Diagnostics**.
+
+Provider missing-key, rejected-key, and cooldown behavior is documented in
+[`docs/runbook.md`](docs/runbook.md#provider-credential-and-cooldown-health).
+
 This is research software, not a wallet, custody system, or guaranteed-profit
 bot — it never holds keys or funds, and it makes no profit claims. Trading code
 does exist, and it is off by default:
@@ -292,19 +316,35 @@ that now guards it.
 |------|-------------|
 | **Command Center** | Compact live overview with auto-refresh |
 | **Engine Control** | Status, trigger actions, seed data |
-| **Night Crawlers** | Crawler fleet status, heuristics, trigger |
-| **Data Lake** | Signal scoring, label progress, archive stats |
-| **Confidence Dashboard** | Scoring breakdown, feature importance |
-| **Webhook Manager** | Register, list, delete webhooks |
+| **Health & Diagnostics** | System health, divergence probes, RPC pools, memory, LLM, and recent errors |
 | **Top Hype Tokens** | Tokens ranked by hype score |
 | **Top Research Candidates** | Tokens ranked by research priority |
 | **Risk Console** | Risk assessment with band coloring |
 | **Forecast** | ML predictions with feature contributions |
-| **Lifecycle Radar** | Token lifecycle phases and transitions |
+| **Confidence Dashboard** | Scoring breakdown, feature importance, and calibration confidence |
+| **Independent Market Analysis** | Market analysis separate from the internal score |
+| **Token Detail Page** | Full evidence, features, risk, and explanation for one token |
+| **Why It Ranked** | Feature and rule contributions behind a token's rank |
+| **What Changed** | Point-in-time changes in score, risk, and lifecycle |
+| **Historical Similar Setups** | Nearest historical analogues with bounded outcomes |
 | **Ignition Radar** | First liquidity injections and sniper bursts |
-| **Narrative Radar** | Mention clusters and dev activity |
-| **Feed Health** | RPC pool status and component health |
-| **Backtest & Drift** | Historical backtest results |
+| **Prelaunch Queue** | Ranked prelaunch candidates awaiting liquidity |
+| **Narrative Radar** | Mention clusters and narrative momentum |
+| **Catalyst Timetable** | Dated catalysts extracted from coverage |
+| **Syndicate Fingerprint** | Wallet/actor clustering and coordination signals |
+| **Lifecycle Radar** | Token lifecycle phases and transitions |
+| **Narrative Dev-Activity** | Developer and repository activity around narratives |
+| **Night Crawlers** | Crawler fleet status, heuristics, and manual trigger |
+| **Data Lake** | Signal scoring, label progress, and archive stats |
+| **Webhook Manager** | Register, list, and delete webhooks |
+| **RPC Pool Status** | Live per-endpoint health, latency, and success counts |
+| **Archive & Retention** | Parquet archive manifests, retention runs, and lake growth |
+| **Backtest & Drift** | Historical backtest results and score-distribution drift |
+| **Validation Integrity** | Outcome labels, calibration, and leakage checks |
+| **Feed Health** | Component health, parity, watchdog alarms, and RPC state |
+| **Live Ops Console** | Last scan pipeline, notifier state, and recent alerts |
+| **Trading** | Paper ledger by default; live gate status is explicitly unverified |
+| **Alerts** | Alert feed, acknowledgement, and signal-quality feedback |
 
 ## Installation
 
@@ -390,15 +430,25 @@ bash scripts/install_dev_deps.sh
 # Run engine (all-in-one)
 python -m engine
 
-# Run tests
+# Run the complete suite (no fail-fast: record every failure in one run)
+python -m pytest tests/ -q
+
+# Include skip reasons
+python -m pytest tests/ -q -rs
+
+# Optional fail-fast pass while iterating
 python -m pytest tests/ -x -q
 
 # Run tests with coverage (backend core only; ui/tests/scripts excluded)
 python -m pytest tests/ -q --cov=. --cov-report=term-missing
 
-# Lint + typecheck
+# Full documented gate (lint, format, mypy, import/dependency/lock scans,
+# then pytest with the coverage floor)
+make gate
+
+# Individual static checks
 ruff check .
-mypy api/ common/ engine/ crawlers/ data_lake/ ui/
+make typecheck
 
 # Format
 ruff format .
