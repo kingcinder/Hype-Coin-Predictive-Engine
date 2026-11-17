@@ -1,12 +1,13 @@
 """CoinMarketCap Night Crawler — new listings, trending tokens, market data.
 
-With ``CMC_API_KEY`` configured the crawler uses the CoinMarketCap Pro API
-(``pro-api``); without a key it keeps the legacy keyless ``data-api`` path.
-Pro's dedicated trending/new-listing endpoints are plan-gated (403 on a Basic
-key), so trending is taken from the highest-volume listings and new listings
-from the ``date_added`` field of the same listings call. This crawler feeds
-the signal scoring engine with market intelligence from a second major source,
-providing corroboration alongside CoinGecko data.
+The crawler uses the CoinMarketCap Pro API (``pro-api``) and requires
+``CMC_API_KEY``. Without a key it skips cleanly instead of calling the retired
+keyless ``data-api`` host and looking like an empty feed. Pro's dedicated
+trending/new-listing endpoints are plan-gated (403 on a Basic key), so trending
+is taken from the highest-volume listings and new listings from the
+``date_added`` field of the same listings call. This crawler feeds the signal
+scoring engine with market intelligence from a second major source, providing
+corroboration alongside CoinGecko data.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -44,14 +46,16 @@ class CMCCrawler(BaseCrawler):
             headers["X-CMC_PRO_API_KEY"] = self._api_key
         return headers
 
+    def skip_reason(self) -> str | None:
+        if not self._api_key:
+            return "CMC_API_KEY is not set"
+        return None
+
     def fetch_items(self) -> list[dict[str, Any]]:
-        if self._api_key:
-            return self._fetch_pro_items()
-        items: list[dict[str, Any]] = []
-        items.extend(self._fetch_trending())
-        items.extend(self._fetch_new_listings())
-        items.extend(self._fetch_top_gainers())
-        return items
+        if not self._api_key:
+            log.info("crawler_skipped", name=self.name, reason=self.skip_reason())
+            return []
+        return self._fetch_pro_items()
 
     def _fetch_pro_items(self) -> list[dict[str, Any]]:
         """One Pro listings call, split into new, trending, and gaining coins."""
@@ -62,7 +66,7 @@ class CMCCrawler(BaseCrawler):
             )
             payload = resp.json()
         except Exception as exc:
-            log.debug("cmc_pro_listings_failed", error=str(exc))
+            log.debug("cmc_pro_listings_failed", error=redact_url(str(exc)))
             return []
         coins = [coin for coin in (payload.get("data") or []) if isinstance(coin, dict)]
         if not coins:
@@ -175,7 +179,7 @@ class CMCCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:
-            log.debug("cmc_trending_failed", error=str(exc))
+            log.debug("cmc_trending_failed", error=redact_url(str(exc)))
             return []
 
     def _fetch_new_listings(self) -> list[dict[str, Any]]:
@@ -230,7 +234,7 @@ class CMCCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:
-            log.debug("cmc_listings_failed", error=str(exc))
+            log.debug("cmc_listings_failed", error=redact_url(str(exc)))
             return []
 
     def _fetch_top_gainers(self) -> list[dict[str, Any]]:
@@ -288,5 +292,5 @@ class CMCCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:
-            log.debug("cmc_gainers_failed", error=str(exc))
+            log.debug("cmc_gainers_failed", error=redact_url(str(exc)))
             return []

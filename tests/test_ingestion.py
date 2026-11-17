@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 import ingestion.service as ingestion_service
 from common.config import get_settings
 from common.time import ensure_utc
-from ingestion.birdeye_client import BirdeyeClient
+from ingestion.birdeye_client import BirdeyeClient, reset_birdeye_gate
 from ingestion.contract_analyzer import ContractAnalysis
 from ingestion.normalizers import NormalizedPair
 from ingestion.provider_gate import CircuitOpen
@@ -39,10 +39,12 @@ from tests.conftest import seed_market_asset, seed_reference
 @pytest.fixture(autouse=True)
 def _reset_provider_circuits():
     reset_geckoterminal_gate()
+    reset_birdeye_gate()
     reset_solana_swap_gate()
     reset_solana_swap_cache()
     yield
     reset_geckoterminal_gate()
+    reset_birdeye_gate()
     reset_solana_swap_gate()
     reset_solana_swap_cache()
 
@@ -1003,6 +1005,8 @@ def test_contract_analysis_health_reports_etherscan_auth_failure(session, monkey
     )
     service = IngestionService()
     decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    # A set-but-rejected key is an auth failure, not a missing credential.
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", "test-etherscan-key")
 
     def fake_analyze(_address, chain="ethereum", *, http=None):
         assert chain == "base"
@@ -1021,6 +1025,41 @@ def test_contract_analysis_health_reports_etherscan_auth_failure(session, monkey
     assert health.error_count == 1
     assert "1 analyzed, 0 flagged" in (health.message or "")
     assert "Missing/Invalid API Key" in (health.message or "")
+
+
+def test_contract_analysis_skips_evm_without_etherscan_key(session, monkeypatch) -> None:
+    """A missing Etherscan key defers EVM analysis as yellow, not red."""
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x3333333333333333333333333333333333333333",
+        symbol="EVMSKIP",
+        name="EVM Skip Token",
+        first_seen_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
+    )
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", None)
+
+    def unexpected_analyze(*_args, **_kwargs):
+        raise AssertionError("EVM analysis must not call Etherscan without a key")
+
+    monkeypatch.setattr(ingestion_service, "analyze_contract", unexpected_analyze)
+    service = IngestionService()
+
+    assert service._run_contract_analysis(session, datetime(2026, 5, 1, 12, 0, tzinfo=UTC)) == {
+        "analyzed": 0,
+        "flagged": 0,
+    }
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:contract_analysis")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.error_count == 0
+    assert "skipped" in (health.message or "")
+    assert "ETHERSCAN_API_KEY is not set" in (health.message or "")
 
 
 def test_contract_analysis_persists_evidence_and_flags(session, monkeypatch) -> None:
@@ -1250,6 +1289,38 @@ def test_geckoterminal_new_pools_cooldown_is_yellow_not_red(session, monkeypatch
     assert health.error_count == 0
 
 
+def test_geckoterminal_new_pools_429_is_yellow_pacing(session, monkeypatch) -> None:
+    """The request that opens a GeckoTerminal cooldown is pacing, not red."""
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 90)
+
+    def rate_limited(self, chain_slug: str):
+        request = httpx.Request(
+            "GET", "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
+        )
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "new_pools", rate_limited)
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "close", lambda self: None)
+
+    assert service._ingest_geckoterminal_new_pools(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:geckoterminal_new_pools")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "yellow"
+    assert "pacing" in (health.message or "")
+    assert "429" in (health.message or "")
+    assert "cooling down for 90s" in (health.message or "")
+    assert "deferred" in (health.message or "")
+    assert health.error_count == 0
+
+
 def test_geckoterminal_new_pools_real_failure_stays_red(session, monkeypatch) -> None:
     """Only genuine provider failures keep the component red."""
     service = IngestionService()
@@ -1324,10 +1395,10 @@ def test_birdeye_without_api_key_skips_feed_and_reports_configuration(session, m
 
 
 def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkeypatch) -> None:
-    """A set-but-rejected key must read as misconfiguration, not an outage."""
+    """A set-but-rejected key must read as a disabled configuration state."""
     seed_reference(session)
     monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
-    request = httpx.Request("GET", "https://public-api.birdeye.so/defi/v3/token/new_listing")
+    request = httpx.Request("GET", "https://public-api.birdeye.so/defi/v2/tokens/new_listing")
     response = httpx.Response(401, request=request)
 
     class RejectedKeyClient:
@@ -1353,11 +1424,60 @@ def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkey
         .order_by(models.SystemHealth.ts.desc())
     ).first()
     assert health is not None
-    assert health.state == "red"
-    assert "misconfigured" in (health.message or "")
+    assert health.state == "yellow"
+    assert "disabled" in (health.message or "")
     assert "BIRDEYE_API_KEY" in (health.message or "")
-    assert "401" in (health.message or "")
+    assert "401 Unauthorized" in (health.message or "")
+    assert "invalid" in (health.message or "")
+    assert "skip the feed" in (health.message or "")
     assert health.error_count == 0
+
+
+def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypatch) -> None:
+    """A Birdeye 429 opens a cooldown; repeated scans defer instead of failing red."""
+    seed_reference(session)
+    monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 3600)
+    calls: list[str] = []
+
+    def rate_limited(self, path: str, **kwargs) -> None:
+        calls.append(path)
+        request = httpx.Request("GET", f"https://public-api.birdeye.so{path}")
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    monkeypatch.setattr("common.http.HttpClient.get_json", rate_limited)
+    service = IngestionService()
+
+    assert service._ingest_birdeye_solana(session) == 0
+
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "yellow"
+    assert "pacing" in (health.message or "")
+    assert "429" in (health.message or "")
+    assert "cooling down" in (health.message or "")
+    assert health.error_count == 0
+    assert calls == ["/defi/v2/tokens/new_listing"]
+
+    # A second scan inside the cooldown is deferred without another request.
+    assert service._ingest_birdeye_solana(session) == 0
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert health.state == "yellow"
+    assert "pacing" in (health.message or "")
+    assert "cooling down" in (health.message or "")
+    assert "deferred" in (health.message or "")
+    assert health.error_count == 0
+    assert calls == ["/defi/v2/tokens/new_listing"]
 
 
 def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:

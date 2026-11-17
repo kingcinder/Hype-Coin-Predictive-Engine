@@ -14,6 +14,7 @@ from common.config import get_settings, secret_value
 from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from ingestion.rpc_pool import RpcEndpointPool
 from narrative.cluster import cluster_mentions
 from narrative.crawlers import (
@@ -350,12 +351,12 @@ class NarrativeEngine:
             session.commit()
             return stored
         except Exception as exc:  # noqa: BLE001 - preserve per-source failure.
-            log.warning("narrative_crawl_failed", source=source_name, error=str(exc))
+            log.warning("narrative_crawl_failed", source=source_name, error=redact_url(str(exc)))
             record_health(
                 session,
                 component=f"source:{source_name}",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
             session.commit()
@@ -411,12 +412,12 @@ class NarrativeEngine:
             session.commit()
             return stored
         except Exception as exc:  # noqa: BLE001
-            log.warning("rss_crawl_failed", error=str(exc))
+            log.warning("rss_crawl_failed", error=redact_url(str(exc)))
             record_health(
                 session,
                 component="source:rss_news",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
             session.commit()
@@ -440,12 +441,12 @@ class NarrativeEngine:
             )
             return clustered
         except Exception as exc:  # noqa: BLE001
-            log.exception("narrative_cluster_failed", error=str(exc))
+            log.exception("narrative_cluster_failed", error=redact_url(str(exc)))
             record_health(
                 session,
                 component="narrative_clusters",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
             return 0

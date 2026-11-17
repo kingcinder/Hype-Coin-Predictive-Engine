@@ -12,6 +12,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 from crawlers.sources.nitter import NitterCrawler, parse_nitter_rss
 
@@ -98,6 +99,11 @@ class XTrendsCrawler(BaseCrawler):
                     continue
                 return len(parse_nitter_rss(response.text, keyword))
             except Exception as exc:  # noqa: BLE001
-                log.debug("xtrends_rss_error", instance=instance, keyword=keyword, error=str(exc))
+                log.debug(
+                    "xtrends_rss_error",
+                    instance=instance,
+                    keyword=keyword,
+                    error=redact_url(str(exc)),
+                )
                 continue
         return 0

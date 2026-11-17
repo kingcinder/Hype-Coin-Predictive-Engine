@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import httpx
+import pytest
 from tenacity import retry, stop_after_attempt
 
 import common.http as httpmod
-from common.http import jittered_backoff
+from common.http import HttpClient, jittered_backoff
 
 
 def test_jittered_backoff_prefers_new_tenacity_kwargs(monkeypatch) -> None:
@@ -55,3 +57,56 @@ def test_jittered_backoff_works_with_installed_tenacity(monkeypatch) -> None:
 
     assert flaky() == "ok"
     assert attempts["count"] == 2
+
+
+def _status_attempts(monkeypatch, status: int) -> int:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(status, request=request, json={"success": False})
+
+    monkeypatch.setattr("tenacity.nap.sleep", lambda _seconds: None)
+    transport = httpx.MockTransport(handler)
+    client = HttpClient(base_url="https://example.test")
+    client.close()
+    client._client = httpx.Client(base_url="https://example.test", transport=transport)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get_json("/probe")
+    finally:
+        client.close()
+    return attempts
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_other_4xx_responses_are_not_retried(monkeypatch, status: int) -> None:
+    assert _status_attempts(monkeypatch, status) == 1
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_429_and_5xx_responses_are_retried(monkeypatch, status: int) -> None:
+    assert _status_attempts(monkeypatch, status) == 3
+
+
+@pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+def test_timeouts_and_transport_errors_are_retried(monkeypatch, exc_type) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise exc_type("probe failure", request=request)
+
+    monkeypatch.setattr("tenacity.nap.sleep", lambda _seconds: None)
+    transport = httpx.MockTransport(handler)
+    client = HttpClient(base_url="https://example.test")
+    client.close()
+    client._client = httpx.Client(base_url="https://example.test", transport=transport)
+    try:
+        with pytest.raises(exc_type):
+            client.get_json("/probe")
+    finally:
+        client.close()
+    assert attempts == 3

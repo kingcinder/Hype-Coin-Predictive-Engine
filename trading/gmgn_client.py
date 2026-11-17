@@ -47,11 +47,11 @@ def _is_unconfigured() -> bool:
 
 
 def _log_unconfigured() -> None:
-    """Log gmgn_unconfigured once per process."""
+    """Log gmgn_unconfigured once per process with the missing setting named."""
     global _gmgn_unconfigured_logged
     if not _gmgn_unconfigured_logged:
         _gmgn_unconfigured_logged = True
-        log.info("gmgn_unconfigured")
+        log.info("gmgn_unconfigured: GMGN_API_BASE is not set")
 
 
 def _note_error(exc: Exception) -> None:

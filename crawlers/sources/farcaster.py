@@ -13,6 +13,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 from crawlers.sources.utils import extract_token_mentions
 
@@ -92,7 +93,7 @@ class FarcasterCrawler(BaseCrawler):
             try:
                 _add_unique(self._search_casts(query, cutoff))
             except Exception as exc:  # noqa: BLE001
-                log.debug("farcaster_search_error", query=query, error=str(exc))
+                log.debug("farcaster_search_error", query=query, error=redact_url(str(exc)))
                 continue
 
         # 2. Tracked developer FIDs
@@ -100,7 +101,7 @@ class FarcasterCrawler(BaseCrawler):
             try:
                 _add_unique(self._fetch_user_casts(fid, cutoff))
             except Exception as exc:  # noqa: BLE001
-                log.debug("farcaster_fid_error", fid=fid, error=str(exc))
+                log.debug("farcaster_fid_error", fid=fid, error=redact_url(str(exc)))
                 continue
 
         # 3. Tracked channels for trending discussions
@@ -108,7 +109,7 @@ class FarcasterCrawler(BaseCrawler):
             try:
                 _add_unique(self._fetch_channel_casts(channel, cutoff))
             except Exception as exc:  # noqa: BLE001
-                log.debug("farcaster_channel_error", channel=channel, error=str(exc))
+                log.debug("farcaster_channel_error", channel=channel, error=redact_url(str(exc)))
                 continue
 
         return items
@@ -139,7 +140,7 @@ class FarcasterCrawler(BaseCrawler):
             # Reuse the cast parser with a label so we know it came from FID tracking
             return self._parse_casts(data, f"fid:{fid}", cutoff)
         except Exception as exc:  # noqa: BLE001
-            log.debug("farcaster_fid_request_error", fid=fid, error=str(exc))
+            log.debug("farcaster_fid_request_error", fid=fid, error=redact_url(str(exc)))
             return []
 
     def _fetch_channel_casts(self, channel: str, cutoff: datetime) -> list[dict[str, Any]]:
@@ -167,7 +168,9 @@ class FarcasterCrawler(BaseCrawler):
             data = response.json()
             return self._parse_casts(data, f"channel:{channel}", cutoff)
         except Exception as exc:  # noqa: BLE001
-            log.debug("farcaster_channel_request_error", channel=channel, error=str(exc))
+            log.debug(
+                "farcaster_channel_request_error", channel=channel, error=redact_url(str(exc))
+            )
             return []
 
     def _search_casts(self, query: str, cutoff: datetime) -> list[dict[str, Any]]:
@@ -194,7 +197,7 @@ class FarcasterCrawler(BaseCrawler):
             data = response.json()
             return self._parse_casts(data, query, cutoff)
         except Exception as exc:  # noqa: BLE001
-            log.debug("farcaster_request_error", query=query, error=str(exc))
+            log.debug("farcaster_request_error", query=query, error=redact_url(str(exc)))
             return []
 
     def _parse_casts(

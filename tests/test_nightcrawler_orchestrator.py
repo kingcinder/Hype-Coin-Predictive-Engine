@@ -15,10 +15,14 @@ from __future__ import annotations
 import threading
 
 import pytest
+from sqlalchemy import select
 
 from common.config import Settings, get_settings
 from crawlers.base import BaseCrawler
 from crawlers.orchestrator import NightCrawlerOrchestrator
+from crawlers.sources.cmc import CMCCrawler
+from crawlers.sources.explorer import ExplorerCrawler
+from storage import models
 
 
 class _EmptyCrawler(BaseCrawler):
@@ -71,6 +75,48 @@ def test_client_construction_failure_records_error(session, monkeypatch) -> None
     assert crawler.health.consecutive_errors >= 1
     assert crawler.health.last_error is not None
     assert "proxy environment" in crawler.health.last_error
+
+
+def test_cmc_without_key_is_reported_as_skipped_not_empty(session) -> None:
+    crawler = CMCCrawler()
+    orch = _orchestrator_with(crawler)
+
+    results = orch.run_all(session, force=True)
+
+    detail = results["details"]["coinmarketcap"]
+    assert detail == {"status": "skipped", "reason": "CMC_API_KEY is not set", "items": 0}
+    assert crawler.health.total_runs == 0
+    assert crawler.health.consecutive_empty_runs == 0
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "nightcrawler:coinmarketcap")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.message == "skipped: CMC_API_KEY is not set"
+
+
+def test_explorer_without_etherscan_key_is_skipped_with_clear_reason(session) -> None:
+    """A missing Etherscan key is a configuration skip, not an empty feed."""
+    crawler = ExplorerCrawler(etherscan_api_key=None)
+    orch = _orchestrator_with(crawler)
+
+    results = orch.run_all(session, force=True)
+
+    detail = results["details"]["explorer"]
+    assert detail == {"status": "skipped", "reason": "ETHERSCAN_API_KEY is not set", "items": 0}
+    assert crawler.health.total_runs == 0
+    assert crawler.health.consecutive_empty_runs == 0
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "nightcrawler:explorer")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.message == "skipped: ETHERSCAN_API_KEY is not set"
+    assert health.error_count == 0
 
 
 def test_repeated_empty_runs_degrade_health_without_tripping_gate(session) -> None:

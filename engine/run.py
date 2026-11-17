@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from ops.watchdog import StageOutcome
 
 from common.logging import get_logger
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -307,7 +308,7 @@ def _run_watchdog_phase(
                     log.warning(
                         "phase_wedge_timeout_ntfy_alert_failed",
                         stage=stage,
-                        error=str(exc),
+                        error=redact_url(str(exc)),
                         exc_info=True,
                     )
             else:
@@ -318,7 +319,10 @@ def _run_watchdog_phase(
                 )
         except Exception as exc:
             log.warning(
-                "phase_wedge_timeout_ntfy_alert_failed", stage=stage, error=str(exc), exc_info=True
+                "phase_wedge_timeout_ntfy_alert_failed",
+                stage=stage,
+                error=redact_url(str(exc)),
+                exc_info=True,
             )
         return outcome
 
@@ -455,8 +459,8 @@ def run_engine_phases(
         elif forecast.result and forecast.result.get("status") != "skipped":
             log.info("engine_forecast_training_complete", result=forecast.result)
     except Exception as exc:  # noqa: BLE001 - forecast failure must not kill the engine
-        log.exception("engine_forecast_failed", iteration=iteration, error=str(exc))
-        state.mark_error(f"forecast: {exc}")
+        log.exception("engine_forecast_failed", iteration=iteration, error=redact_url(str(exc)))
+        state.mark_error(f"forecast: {redact_url(str(exc))}")
         phase_error = True
 
     # ── Retention compaction + pruning ───────────────────────────────────────
@@ -548,8 +552,8 @@ def run_engine_phases(
                         result=nc_result.result,
                     )
     except Exception as exc:  # noqa: BLE001
-        log.exception("engine_nightcrawler_failed", iteration=iteration, error=str(exc))
-        state.mark_error(f"nightcrawler: {exc}")
+        log.exception("engine_nightcrawler_failed", iteration=iteration, error=redact_url(str(exc)))
+        state.mark_error(f"nightcrawler: {redact_url(str(exc))}")
         phase_error = True
 
     # ── Data lake pass ───────────────────────────────────────────────────────
@@ -580,8 +584,8 @@ def run_engine_phases(
                     result=dl_result.result,
                 )
     except Exception as exc:  # noqa: BLE001 - data lake failure must not kill the engine
-        log.exception("engine_data_lake_failed", iteration=iteration, error=str(exc))
-        state.mark_error(f"data_lake: {exc}")
+        log.exception("engine_data_lake_failed", iteration=iteration, error=redact_url(str(exc)))
+        state.mark_error(f"data_lake: {redact_url(str(exc))}")
         phase_error = True
 
     # ── Score-distribution drift probe (informational, like parity) ──────────
@@ -787,8 +791,8 @@ def main() -> None:
                 engine_state.mark_scan_result(result)
                 log.info("engine_scan_complete", iteration=iteration, result=result)
             except Exception as exc:  # noqa: BLE001 - individual scan failure must not kill the engine
-                log.exception("engine_scan_failed", iteration=iteration, error=str(exc))
-                engine_state.mark_error(str(exc))
+                log.exception("engine_scan_failed", iteration=iteration, error=redact_url(str(exc)))
+                engine_state.mark_error(redact_url(str(exc)))
                 on_scan_failure(_watchdog_state)
             else:
                 on_scan_success(_watchdog_state)

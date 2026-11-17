@@ -26,6 +26,12 @@ class ExplorerCrawler(BaseCrawler):
         )
         self.etherscan_api_key = etherscan_api_key
 
+    def skip_reason(self) -> str | None:
+        """Explorer ingestion is key-gated by Etherscan V2."""
+        if not self.etherscan_api_key:
+            return "ETHERSCAN_API_KEY is not set"
+        return None
+
     def fetch_items(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         items.extend(self._fetch_new_contracts())

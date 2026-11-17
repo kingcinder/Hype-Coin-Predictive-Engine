@@ -360,6 +360,17 @@ def test_engine_stops_cleanly_on_sigint_mid_scan(tmp_path: Path) -> None:
         ):
             _fail("the first scan never started writing, so no mid-scan stop", engine)
 
+        # The post-stop port check is only meaningful if the Streamlit child
+        # actually bound the UI listener before the stop. Proving that here
+        # catches a shutdown that never had a child to clean up as well as one
+        # that leaves the child behind.
+        if not _wait_until(
+            lambda: _port_accepts("127.0.0.1", engine.ui_port),
+            timeout=STARTUP_TIMEOUT_SECONDS,
+            engine=engine,
+        ):
+            _fail("the Streamlit UI never bound its port before the stop", engine)
+
         engine.proc.send_signal(signal.SIGINT)
         try:
             returncode = engine.proc.wait(timeout=STOP_TIMEOUT_SECONDS)

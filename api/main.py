@@ -212,7 +212,7 @@ def health(session: DbSession) -> HealthResponse:
     try:
         session.execute(text("SELECT 1"))
     except Exception as exc:  # noqa: BLE001
-        log.warning("health_database_failed", error=str(exc))
+        log.warning("health_database_failed", error=redact_url(str(exc)))
         database = f"error: {exc}"
     now = utc_now()
     components = [
@@ -499,7 +499,7 @@ def search_assets(
     try:
         pairs = client.search_pairs(q.strip())
     except Exception as exc:  # noqa: BLE001 - local search remains available when live search fails.
-        log.warning("market_asset_live_search_failed", error=str(exc))
+        log.warning("market_asset_live_search_failed", error=redact_url(str(exc)))
         return []
     finally:
         client.close()
@@ -552,14 +552,14 @@ def analyze_market(request: MarketAnalysisRequest, session: DbSession) -> dict[s
             try:
                 pairs = client.token_pairs(chain_slug, asset.address) if chain_slug else []
             except Exception as exc:  # noqa: BLE001 - continue with stored history.
-                log.warning("market_analysis_live_lookup_failed", error=str(exc))
+                log.warning("market_analysis_live_lookup_failed", error=redact_url(str(exc)))
                 pairs = []
             live_pair = select_dexscreener_pair(pairs, asset.address, chain_slug)
         else:
             try:
                 candidates = client.search_pairs(request.address or "")
             except Exception as exc:  # noqa: BLE001 - no live resolution means no new asset.
-                log.warning("market_analysis_ca_resolution_failed", error=str(exc))
+                log.warning("market_analysis_ca_resolution_failed", error=redact_url(str(exc)))
                 raise HTTPException(status_code=502, detail="live CA lookup failed") from exc
             candidates = [
                 pair
@@ -633,7 +633,7 @@ def analyze_market(request: MarketAnalysisRequest, session: DbSession) -> dict[s
                 market_client.token_pairs(chain_slug, asset.address) if chain_slug else []
             )
         except Exception as exc:  # noqa: BLE001 - saved and initial data remain usable.
-            log.warning("market_analysis_live_refresh_failed", error=str(exc))
+            log.warning("market_analysis_live_refresh_failed", error=redact_url(str(exc)))
             current_pairs = []
         refreshed_pair = select_dexscreener_pair(current_pairs, asset.address, chain_slug)
     finally:
@@ -1996,7 +1996,7 @@ def engine_trigger_scan() -> TriggerResponse:
             engine_state.mark_completed()
             log.info("api_manual_scan_complete", result=result)
         except Exception as exc:  # noqa: BLE001
-            engine_state.mark_error(str(exc))
+            engine_state.mark_error(redact_url(str(exc)))
             log.exception("api_manual_scan_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-scan", daemon=True).start()
@@ -2029,7 +2029,7 @@ def engine_trigger_forecast() -> TriggerResponse:
             engine_state.mark_completed()
             log.info("api_manual_forecast_complete", result=result)
         except Exception as exc:  # noqa: BLE001
-            engine_state.mark_error(str(exc))
+            engine_state.mark_error(redact_url(str(exc)))
             log.exception("api_manual_forecast_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-forecast", daemon=True).start()
@@ -2059,7 +2059,7 @@ def engine_trigger_retention() -> TriggerResponse:
             engine_state.mark_completed()
             log.info("api_manual_retention_complete", result=result)
         except Exception as exc:  # noqa: BLE001
-            engine_state.mark_error(str(exc))
+            engine_state.mark_error(redact_url(str(exc)))
             log.exception("api_manual_retention_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-manual-retention", daemon=True).start()
@@ -2666,7 +2666,7 @@ def engine_trigger_nightcrawlers() -> TriggerResponse:
             engine_state.mark_completed()
             log.info("api_nightcrawler_complete", result=result)
         except Exception as exc:  # noqa: BLE001
-            engine_state.mark_error(str(exc))
+            engine_state.mark_error(redact_url(str(exc)))
             log.exception("api_nightcrawler_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-nightcrawler", daemon=True).start()
@@ -2735,7 +2735,7 @@ def engine_trigger_data_lake() -> TriggerResponse:
             engine_state.mark_completed()
             log.info("api_data_lake_complete", result=result)
         except Exception as exc:  # noqa: BLE001
-            engine_state.mark_error(str(exc))
+            engine_state.mark_error(redact_url(str(exc)))
             log.exception("api_data_lake_failed", error=redact_url(str(exc)))
 
     threading.Thread(target=_run, name="api-data-lake", daemon=True).start()

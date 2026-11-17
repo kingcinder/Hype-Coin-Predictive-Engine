@@ -13,6 +13,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -82,7 +83,7 @@ class GoogleTrendsCrawler(BaseCrawler):
                 return []
             return self._extract_crypto_trends(data)
         except Exception as exc:  # noqa: BLE001
-            log.debug("google_trends_failed", error=str(exc))
+            log.debug("google_trends_failed", error=redact_url(str(exc)))
             return []
 
     @staticmethod
@@ -132,5 +133,5 @@ class GoogleTrendsCrawler(BaseCrawler):
                     }
                 )
         except Exception as exc:  # noqa: BLE001
-            log.debug("google_trends_extract_failed", error=str(exc))
+            log.debug("google_trends_extract_failed", error=redact_url(str(exc)))
         return items[:20]

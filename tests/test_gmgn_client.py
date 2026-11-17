@@ -47,13 +47,15 @@ def test_token_url_maps_chains() -> None:
         token_url("dogechain", "mint")
 
 
-def test_unconfigured_returns_none(monkeypatch) -> None:
+def test_unconfigured_returns_none(monkeypatch, caplog) -> None:
     monkeypatch.setattr(get_settings(), "gmgn_api_base", "")
     client = GmgnReadClient()
     client.http = FakeHttp({"price": "1"})
-    assert client.price("mint", "solana") is None
-    assert client.market_cap("mint", "solana") is None
-    assert client.trending("solana") is None
+    with caplog.at_level("INFO", logger=gmgn_client.__name__):
+        assert client.price("mint", "solana") is None
+        assert client.market_cap("mint", "solana") is None
+        assert client.trending("solana") is None
+    assert "GMGN_API_BASE is not set" in caplog.text
 
 
 def test_price_and_cache(monkeypatch) -> None:

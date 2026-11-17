@@ -115,12 +115,18 @@ def test_pro_key_uses_pro_api_and_parses_listings() -> None:
     assert hot["url"] == "https://coinmarketcap.com/currencies/hot/"
 
 
-def test_without_key_keeps_legacy_free_path() -> None:
+def test_without_key_skips_without_calling_retired_host(capfd) -> None:
     crawler = CMCCrawler()
     fake = _FakeClient({"data": {}})
     crawler._client = fake  # type: ignore[assignment]
 
+    assert crawler.skip_reason() == "CMC_API_KEY is not set"
     assert crawler.fetch_items() == []
-
-    assert fake.calls
-    assert all("api.coinmarketcap.com/data-api" in url for url, _ in fake.calls)
+    assert crawler.fetch() == []
+    assert fake.calls == []
+    assert crawler.health.total_runs == 0
+    assert crawler.health.consecutive_empty_runs == 0
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err
+    assert "crawler_skipped" in logs
+    assert "CMC_API_KEY is not set" in logs

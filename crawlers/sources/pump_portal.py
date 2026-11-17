@@ -17,6 +17,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -65,7 +66,7 @@ class PumpPortalCrawler(BaseCrawler):
             pumps = data if isinstance(data, list) else (data.get("pumps") or [])
             return [item for pump in pumps if (item := self._pump_item(pump))][:20]
         except Exception as exc:  # noqa: BLE001
-            log.debug("pump_portal_http_failed", error=str(exc))
+            log.debug("pump_portal_http_failed", error=redact_url(str(exc)))
             return []
 
     def _fetch_ws_tap(self) -> list[dict[str, Any]]:
@@ -92,7 +93,7 @@ class PumpPortalCrawler(BaseCrawler):
                         if item:
                             items.append(item)
         except Exception as exc:  # noqa: BLE001
-            log.debug("pump_portal_ws_failed", error=str(exc))
+            log.debug("pump_portal_ws_failed", error=redact_url(str(exc)))
         return items[:20]
 
     def _pump_item(self, pump: dict[str, Any]) -> dict[str, Any] | None:

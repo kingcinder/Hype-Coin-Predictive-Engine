@@ -15,6 +15,7 @@ from defusedxml.common import DefusedXmlException
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 from crawlers.sources.utils import extract_token_mentions
 
@@ -70,7 +71,9 @@ class NitterCrawler(BaseCrawler):
                     continue
                 return parse_nitter_rss(response.text, term)
             except Exception as exc:  # noqa: BLE001
-                log.debug("nitter_rss_error", instance=instance, term=term, error=str(exc))
+                log.debug(
+                    "nitter_rss_error", instance=instance, term=term, error=redact_url(str(exc))
+                )
                 continue
         return []
 

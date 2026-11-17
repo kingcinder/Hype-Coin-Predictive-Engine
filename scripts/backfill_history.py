@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from common.urls import redact_url
 from storage import models
 from storage.database import session_scope
 from storage.repository import get_or_create_source, insert_market_snapshot_once
@@ -117,7 +118,7 @@ def _resolve_coingecko_ids(
                 ids[asset.id] = str(coins[0]["id"])
             time.sleep(1.0)  # free tier rate limit
         except Exception as exc:  # noqa: BLE001 - one asset failing must not abort the run
-            log.warning("coingecko_resolve_failed", symbol=asset.symbol, error=str(exc))
+            log.warning("coingecko_resolve_failed", symbol=asset.symbol, error=redact_url(str(exc)))
     return ids
 
 
@@ -189,7 +190,7 @@ def _backfill_coingecko_in_session(  # noqa: C901 - one-off migration tool; read
             history = _coingecko_history(client, coin_id, days)
             time.sleep(1.0)  # free tier rate limit
         except Exception as exc:  # noqa: BLE001
-            log.warning("coingecko_history_failed", symbol=asset.symbol, error=str(exc))
+            log.warning("coingecko_history_failed", symbol=asset.symbol, error=redact_url(str(exc)))
             errors += 1
             continue
         retrieved_at = utc_now()
@@ -243,7 +244,9 @@ def _defillama_history(
             resp.raise_for_status()
             data = resp.json().get("coins", {})
         except Exception as exc:  # noqa: BLE001
-            log.warning("defillama_day_failed", day=day.date().isoformat(), error=str(exc))
+            log.warning(
+                "defillama_day_failed", day=day.date().isoformat(), error=redact_url(str(exc))
+            )
             failed_days += 1
             continue
         for ref in coin_refs:

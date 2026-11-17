@@ -8,7 +8,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from common.config import get_settings
 from common.http import HttpClient
+from ingestion.provider_gate import ProviderGate
+
+_birdeye_gate = ProviderGate()
+
+
+def reset_birdeye_gate() -> None:
+    """Clear the shared Birdeye cooldown (used by tests)."""
+    _birdeye_gate.reset()
 
 
 class BirdeyeClient:
@@ -25,13 +34,31 @@ class BirdeyeClient:
     def close(self) -> None:
         self.http.close()
 
+    def _get_json(self, path: str, *, params: dict[str, Any]) -> Any:
+        """Serialize Birdeye calls and open a cooldown after a sustained 429."""
+        settings = get_settings()
+        _birdeye_gate.configure(
+            min_interval=0.0,
+            cooldown=settings.provider_circuit_break_seconds,
+        )
+        _birdeye_gate.before()
+        try:
+            return self.http.get_json(path, params=params)
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            # Birdeye uses 403 for a key without permission, which is a
+            # configuration error and must not trigger rate-limit cooldown.
+            if status == 429:
+                _birdeye_gate.record_failure(exc)
+            raise
+
     def token_overview(self, address: str) -> dict[str, Any] | None:
         """Get token overview: price, volume, liquidity, holder count.
 
         Audited against the live API (2026-11): ``/defi/token_overview`` is
         current and returns the token snapshot directly under ``data``.
         """
-        data = self.http.get_json(
+        data = self._get_json(
             "/defi/token_overview",
             params={"address": address},
         )
@@ -40,9 +67,16 @@ class BirdeyeClient:
         return None
 
     def token_meta(self, address: str) -> dict[str, Any] | None:
-        """Get token metadata: name, symbol, decimals, creator."""
-        data = self.http.get_json(
-            "/defi/token_meta",
+        """Get token metadata: name, symbol, decimals, logo, social links.
+
+        Audited against the live API (2026-11): the old ``/defi/token_meta``
+        path returns 404. The current endpoint is
+        ``/defi/v3/token/meta-data/single``; access is plan-gated, so a key
+        without metadata permission returns 401 and this method returns
+        ``None``.
+        """
+        data = self._get_json(
+            "/defi/v3/token/meta-data/single",
             params={"address": address},
         )
         if isinstance(data, dict) and data.get("success"):
@@ -56,7 +90,7 @@ class BirdeyeClient:
         old ``/defi/v3/token/new_listing`` path is gone and answers 404); the
         chain comes from the ``x-chain`` header and ordering is implicit.
         """
-        data = self.http.get_json(
+        data = self._get_json(
             "/defi/v2/tokens/new_listing",
             params={"limit": limit},
         )
@@ -71,7 +105,7 @@ class BirdeyeClient:
         The old ``/defi/v3/token/trending`` path is gone (404). The live
         endpoint is ``/defi/token_trending``, capped at 20 tokens per page.
         """
-        data = self.http.get_json(
+        data = self._get_json(
             "/defi/token_trending",
             params={
                 "sort_by": "rank",
@@ -93,7 +127,7 @@ class BirdeyeClient:
         screener endpoint is ``/defi/v3/token/list`` sorted by
         ``price_change_24h_percent``.
         """
-        data = self.http.get_json(
+        data = self._get_json(
             "/defi/v3/token/list",
             params={
                 "sort_by": "price_change_24h_percent",

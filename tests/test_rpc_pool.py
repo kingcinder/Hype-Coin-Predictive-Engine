@@ -351,6 +351,81 @@ def test_get_rpc_url_rotates_base_pool(monkeypatch) -> None:
     assert source_clients.get_rpc_url("ethereum") == "https://rpc-eth.example.com"
 
 
+def test_pick_announces_selected_endpoint_once_with_redacted_url(monkeypatch) -> None:
+    from ingestion import rpc_pool as rpc_pool_module
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _CaptureLog:
+        def info(self, event: str, **kwargs: object) -> None:
+            events.append((event, kwargs))
+
+    url = "https://mainnet.helius-rpc.com/?api-key=rpc-secret"
+    monkeypatch.setattr(rpc_pool_module, "log", _CaptureLog())
+    pool = RpcEndpointPool([url])
+
+    assert pool.pick() == url
+    assert pool.pick() == url
+
+    assert [event for event, _ in events] == ["rpc_endpoint_selected"]
+    assert events[0][1]["chain"] == "unknown"
+    assert "api-key=***" in str(events[0][1]["url"])
+    assert "rpc-secret" not in str(events)
+
+
+def test_health_reports_selected_and_last_successful_endpoint_redacted(
+    session, monkeypatch
+) -> None:
+    from common.config import get_settings
+    from ingestion import rpc_pool as rpc_pool_module
+    from storage import models
+
+    settings = get_settings()
+    original_enabled = settings.rpc_pool_enabled
+    helius = "https://mainnet.helius-rpc.com/?api-key=rpc-secret"
+    alchemy = "https://eth-mainnet.g.alchemy.com/v2/rpc-secret-1234567890"
+    pools = {
+        "solana": RpcEndpointPool([helius], failure_threshold=1),
+        "base": RpcEndpointPool(["https://base.example.com"], failure_threshold=1),
+        "ethereum": RpcEndpointPool([alchemy], failure_threshold=1),
+    }
+    try:
+        settings.rpc_pool_enabled = True
+        monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain: pools[chain])
+
+        for chain, url in (
+            ("solana", helius),
+            ("base", "https://base.example.com"),
+            ("ethereum", alchemy),
+        ):
+            pool = pools[chain]
+            assert pool.pick() == url
+            pool.record_request(url)
+            pool.mark_success(url)
+
+        rpc_pool_module.record_pool_health(session)
+        session.flush()
+
+        for chain, redacted in (
+            ("solana", "api-key=***"),
+            ("ethereum", "/v2/***"),
+        ):
+            row = session.scalar(
+                select(models.SystemHealth).where(
+                    models.SystemHealth.component == f"rpc_pool:{chain}"
+                )
+            )
+            assert row is not None
+            message = row.message or ""
+            assert "selected=https://" in message
+            assert "last_success=https://" in message
+            assert redacted in message
+            assert "requests=1 successes=1" in message
+            assert "rpc-secret" not in message
+    finally:
+        settings.rpc_pool_enabled = original_enabled
+
+
 def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monkeypatch) -> None:
     from ingestion import rpc_pool as rpc_pool_module
     from storage import models

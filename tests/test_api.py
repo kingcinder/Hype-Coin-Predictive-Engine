@@ -512,6 +512,41 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
     assert endpoint.probe_history[0].ok is False
 
 
+def test_rpc_pool_api_excludes_retired_endpoints_from_older_snapshot(session) -> None:
+    """Only the newest snapshot timestamp for each chain is rendered."""
+    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    def add(chain: str, url: str, ts: datetime) -> None:
+        session.add(
+            models.RpcPoolSnapshot(
+                chain_slug=chain,
+                url=url,
+                ts=ts,
+                health=1.0,
+                consecutive_failures=0,
+                down=False,
+                probe_count=0,
+                probe_successes=0,
+                probe_failures=0,
+                request_count=0,
+                success_count=0,
+                probe_history=[],
+            )
+        )
+
+    add("solana", "https://solana-rpc.rpcpool.example", decision_ts - timedelta(minutes=10))
+    add("solana", "https://solana.ankr.example", decision_ts - timedelta(minutes=10))
+    add("solana", "https://mainnet.helius-rpc.com/?api-key=***", decision_ts)
+    add("solana", "https://api.mainnet-beta.solana.com", decision_ts)
+    session.commit()
+
+    solana = next(row for row in rpc_pool_states(session) if row.chain == "solana")
+    assert [endpoint.url for endpoint in solana.endpoints] == [
+        "https://mainnet.helius-rpc.com/?api-key=***",
+        "https://api.mainnet-beta.solana.com",
+    ]
+
+
 def test_velocity_features_endpoint_reports_live_values(session) -> None:
     from storage.repository import (
         get_or_create_source,

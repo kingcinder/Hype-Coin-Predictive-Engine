@@ -13,6 +13,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -122,5 +123,5 @@ class GitHubTrendingCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:  # noqa: BLE001
-            log.debug("github_search_failed", error=str(exc))
+            log.debug("github_search_failed", error=redact_url(str(exc)))
             return []

@@ -12,6 +12,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -81,7 +82,7 @@ class CoinPaprikaCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:  # noqa: BLE001
-            log.debug("coinpaprika_gainers_failed", error=str(exc))
+            log.debug("coinpaprika_gainers_failed", error=redact_url(str(exc)))
             return []
 
     def _fetch_global_market(self) -> list[dict[str, Any]]:
@@ -111,5 +112,5 @@ class CoinPaprikaCrawler(BaseCrawler):
             ]
             return items
         except Exception as exc:  # noqa: BLE001
-            log.debug("coinpaprika_global_failed", error=str(exc))
+            log.debug("coinpaprika_global_failed", error=redact_url(str(exc)))
             return []

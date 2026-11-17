@@ -18,6 +18,7 @@ import httpx
 from common.http import build_httpx_client
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 
 log = get_logger(__name__)
 
@@ -147,8 +148,22 @@ class BaseCrawler(ABC):
         """Fetch raw items from the source. Subclasses implement this."""
         ...
 
+    def skip_reason(self) -> str | None:
+        """Return a configuration reason to skip this crawl without I/O.
+
+        A skipped crawl is not an empty feed and must not degrade health or
+        write raw evidence. Subclasses that depend on optional credentials
+        override this method.
+        """
+        return None
+
     def fetch(self) -> list[dict[str, Any]]:
         """Main entry point: fetch with retry, dedup, and health tracking."""
+        skip_reason = self.skip_reason()
+        if skip_reason:
+            log.info("crawler_skipped", name=self.name, reason=skip_reason)
+            return []
+
         if not self.health.is_healthy:
             log.info("crawler_skipped", name=self.name, reason="unhealthy")
             return []
@@ -194,7 +209,7 @@ class BaseCrawler(ABC):
                 time.sleep(self.rate_limit_pause)
                 return unique_items
             except Exception as exc:
-                last_error = str(exc)
+                last_error = redact_url(str(exc))
                 log.warning(
                     "crawler_error",
                     name=self.name,

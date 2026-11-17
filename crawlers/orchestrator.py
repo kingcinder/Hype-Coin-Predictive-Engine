@@ -164,6 +164,18 @@ class NightCrawlerOrchestrator:
                 log.info("nightcrawler_stop_requested", remaining=[n for n, _ in due])
                 results.setdefault("interrupted", True)
                 break
+            skip_reason = crawler.skip_reason()
+            if skip_reason:
+                log.info("crawler_skipped", name=name, reason=skip_reason)
+                results[name] = {"status": "skipped", "reason": skip_reason, "items": 0}
+                record_health(
+                    session,
+                    component=f"nightcrawler:{name}",
+                    state="yellow",
+                    message=f"skipped: {skip_reason}",
+                )
+                session.commit()
+                continue
             try:
                 log.info("nightcrawler_start", name=name)
                 items = crawler.fetch()
@@ -269,7 +281,7 @@ class NightCrawlerOrchestrator:
             prune_result = self.heuristics.prune(max_age_days=30)
             results["_prune"] = prune_result
         except Exception as exc:  # noqa: BLE001 — pruning failure must not abort the fleet.
-            log.debug("heuristics_prune_failed", error=str(exc))
+            log.debug("heuristics_prune_failed", error=redact_url(str(exc)))
 
         duration = time.monotonic() - started
         total_items = sum(r.get("items", 0) for r in results.values() if isinstance(r, dict))
@@ -387,12 +399,12 @@ def run_nightcrawlers(
     try:
         return orchestrator.run_all(session, decision_ts=decision_ts, force=force)
     except Exception as exc:
-        log.exception("nightcrawler_orchestrator_failed", error=str(exc))
+        log.exception("nightcrawler_orchestrator_failed", error=redact_url(str(exc)))
         record_health(
             session,
             component="nightcrawler_orchestrator",
             state="red",
-            message=str(exc),
+            message=redact_url(str(exc)),
             error_count=1,
         )
-        return {"error": str(exc)}
+        return {"error": redact_url(str(exc))}

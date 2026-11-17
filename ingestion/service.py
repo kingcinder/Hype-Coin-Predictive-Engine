@@ -395,16 +395,20 @@ class IngestionService:
             session.rollback()
             with session.begin():
                 record_health(
-                    session, component="worker", state="red", message=str(exc), error_count=1
+                    session,
+                    component="worker",
+                    state="red",
+                    message=redact_url(str(exc)),
+                    error_count=1,
                 )
                 record_scan_result(
                     session,
                     ts=utc_now(),
                     state="red",
-                    error_message=str(exc),
+                    error_message=redact_url(str(exc)),
                 )
-            errors.append(str(exc))
-            log.exception("ingestion_scan_failed", error=str(exc))
+            errors.append(redact_url(str(exc)))
+            log.exception("ingestion_scan_failed", error=redact_url(str(exc)))
         return result
 
     def _run_data_quality_check(self, session: Session, decision_ts: Any) -> dict[str, Any]:
@@ -462,10 +466,18 @@ class IngestionService:
         source = get_or_create_source(
             session, name="contract_analysis", source_type="chain_rpc", tier="chain"
         )
+        etherscan_enabled = bool((secret_value(self.settings.etherscan_api_key) or "").strip())
         results: list[dict[str, Any]] = []
+        skipped_evm = 0
         for asset in recent_assets:
             chain_obj = self._chain(session, asset.chain_id)
             chain_name = chain_obj.slug if chain_obj else "solana"
+            if chain_name in ("ethereum", "base") and not etherscan_enabled:
+                # Etherscan V2 rejects unauthenticated calls. Do not turn a
+                # missing optional key into a red provider failure: defer just
+                # the EVM contracts and still analyze Solana contracts.
+                skipped_evm += 1
+                continue
             analysis = analyze_contract(
                 asset.address,
                 chain=chain_name,
@@ -543,12 +555,23 @@ class IngestionService:
         message = f"{len(results)} analyzed, {flagged} flagged"
         if errors:
             message = f"{message}; {len(errors)} errors; first={errors[0]}"
+        if skipped_evm:
+            if results:
+                message = (
+                    f"{message}; skipped {skipped_evm} EVM contracts: ETHERSCAN_API_KEY is not set"
+                )
+            else:
+                message = (
+                    f"skipped: {skipped_evm} EVM contracts deferred; ETHERSCAN_API_KEY is not set"
+                )
         record_health(
             session,
             component="source:contract_analysis",
-            state="red"
-            if errors and len(errors) == len(results)
-            else ("yellow" if errors else "ok"),
+            state=(
+                "red"
+                if errors and len(errors) == len(results) and not skipped_evm
+                else ("yellow" if errors or skipped_evm else "ok")
+            ),
             message=message,
             error_count=len(errors),
         )
@@ -561,7 +584,9 @@ class IngestionService:
         Birdeye is optional and key-gated. Without ``BIRDEYE_API_KEY`` every
         request returns 401, which is a configuration state rather than a
         transient outage: the feed is skipped and reported as disabled instead
-        of painting a red failure on every scan.
+        of painting a red failure on every scan. A 429 opens the shared Birdeye
+        cooldown (see ``BirdeyeClient``), so sustained free-tier rate limits are
+        reported as yellow pacing and deferred instead of repeated red failures.
         """
         if "solana" not in self.settings.target_chains:
             return 0
@@ -614,19 +639,43 @@ class IngestionService:
                 state="ok",
                 message=f"{count} new tokens",
             )
+        except CircuitOpen as exc:
+            # The client's cooldown is still active from a prior 429. This is
+            # pacing, not a provider failure: defer the feed until it expires.
+            record_health(
+                session,
+                component="source:birdeye",
+                state="yellow",
+                message=f"pacing: {exc}; Birdeye feed deferred to a later scan",
+            )
+            log.info("birdeye_deferred", reason=redact_url(str(exc)))
         except Exception as exc:  # noqa: BLE001
             status = getattr(getattr(exc, "response", None), "status_code", None)
             safe_error = redact_url(str(exc))
-            if status in (401, 403):
-                # A rejected key is configuration, not an outage: name the
-                # variable an operator must fix so this never reads as flaky.
+            if status == 429:
+                cooldown = self.settings.provider_circuit_break_seconds
                 record_health(
                     session,
                     component="source:birdeye",
-                    state="red",
+                    state="yellow",
                     message=(
-                        f"misconfigured: Birdeye rejected BIRDEYE_API_KEY ({status}); "
-                        "update the key or unset it to skip the feed"
+                        f"pacing: Birdeye rate limited 429; feed cooling down for "
+                        f"{cooldown:g}s and deferred to a later scan"
+                    ),
+                )
+                log.info("birdeye_rate_limited", status=status, cooldown_seconds=cooldown)
+            elif status in (401, 403):
+                # A rejected key is configuration, not an outage: disable the
+                # feed as degraded and name the variable an operator must fix.
+                status_label = "Unauthorized" if status == 401 else "Forbidden"
+                record_health(
+                    session,
+                    component="source:birdeye",
+                    state="yellow",
+                    message=(
+                        f"disabled: Birdeye rejected BIRDEYE_API_KEY "
+                        f"({status} {status_label}); the key is invalid or lacks access; "
+                        "replace it or unset it to skip the feed"
                     ),
                 )
                 log.warning("birdeye_key_rejected", status=status)
@@ -692,10 +741,10 @@ class IngestionService:
                 session,
                 component="source:dexscreener_profiles",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
-            log.warning("dexscreener_profiles_failed", error=str(exc))
+            log.warning("dexscreener_profiles_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count
@@ -732,10 +781,10 @@ class IngestionService:
                 session,
                 component="source:dexscreener_pairs",
                 state="red",
-                message=str(exc),
+                message=redact_url(str(exc)),
                 error_count=1,
             )
-            log.warning("dexscreener_pairs_failed", error=str(exc))
+            log.warning("dexscreener_pairs_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count
@@ -781,16 +830,38 @@ class IngestionService:
                     "remaining chains deferred to a later scan"
                 ),
             )
-            log.info("geckoterminal_new_pools_deferred", reason=str(exc), pools=count)
+            log.info("geckoterminal_new_pools_deferred", reason=redact_url(str(exc)), pools=count)
         except Exception as exc:  # noqa: BLE001
-            record_health(
-                session,
-                component="source:geckoterminal_new_pools",
-                state="red",
-                message=str(exc),
-                error_count=1,
-            )
-            log.warning("geckoterminal_new_pools_failed", error=str(exc))
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in RATE_LIMIT_STATUSES:
+                # The client just opened the shared cooldown. This is pacing,
+                # not a provider outage, so the first 429/403 is yellow too.
+                cooldown = self.settings.provider_circuit_break_seconds
+                record_health(
+                    session,
+                    component="source:geckoterminal_new_pools",
+                    state="yellow",
+                    message=(
+                        f"pacing: GeckoTerminal rate limited ({status}); cooling down for "
+                        f"{cooldown:g}s; {count} pools ingested before cooldown, "
+                        "remaining chains deferred to a later scan"
+                    ),
+                )
+                log.info(
+                    "geckoterminal_new_pools_deferred",
+                    status=status,
+                    cooldown_seconds=cooldown,
+                    pools=count,
+                )
+            else:
+                record_health(
+                    session,
+                    component="source:geckoterminal_new_pools",
+                    state="red",
+                    message=redact_url(str(exc)),
+                    error_count=1,
+                )
+                log.warning("geckoterminal_new_pools_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count
@@ -1253,7 +1324,7 @@ class IngestionService:
                 "first_buy_trades_failed",
                 pool=normalized.pair_address,
                 chain=normalized.chain_slug,
-                error=str(exc),
+                error=redact_url(str(exc)),
             )
         finally:
             client.close()

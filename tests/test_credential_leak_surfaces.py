@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import crawlers.sources.cmc as cmc_mod
 from api.main import app
-from api.main import health as health_endpoint
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.logging import configure_logging, get_logger
+from crawlers.sources.cmc import CMCCrawler
 from ingestion import service as ingestion_service
 from ingestion.service import IngestionService
 from storage.database import get_session
@@ -85,10 +87,9 @@ def test_status_payload_and_logs_contain_no_credential_markers(
     assert response.status_code == 200, response.text
     # The credentials really are configured, so the absence assertions below
     # are not passing against an empty settings object.
-    assert (
-        credentialed_settings.helius_api_key is not None
-        and credentialed_settings.helius_api_key.get_secret_value() == _MARKERS["HELIUS_API_KEY"]
-    )
+    for env_name, marker in _MARKERS.items():
+        configured = getattr(credentialed_settings, env_name.lower())
+        assert secret_value(configured) == marker, env_name
     # The probe proves log capture is live, so the marker assertions are not
     # passing against an empty buffer.
     assert "credential_leak_probe" in logs
@@ -100,11 +101,9 @@ def test_status_payload_and_logs_contain_no_credential_markers(
 
 
 def test_provider_http_failure_does_not_leak_url_key_to_logs_or_health_payload(
-    session, credentialed_settings, monkeypatch, capfd
+    client, session, credentialed_settings, monkeypatch, capfd
 ) -> None:
     """Provider HTTP errors include request URLs; both telemetry surfaces redact keys."""
-    import httpx
-
     marker = _MARKERS["BIRDEYE_API_KEY"]
     request = httpx.Request(
         "GET",
@@ -130,12 +129,99 @@ def test_provider_http_failure_does_not_leak_url_key_to_logs_or_health_payload(
     monkeypatch.setattr(ingestion_service, "BirdeyeClient", FailingBirdeyeClient)
     service = IngestionService()
     assert service._ingest_birdeye_solana(session) == 0
+    session.commit()
 
-    payload = health_endpoint(session).model_dump_json()
+    response = client.get("/health")
     captured = capfd.readouterr()
     logs = captured.out + captured.err
+    assert response.status_code == 200, response.text
     assert "birdeye_ingestion_failed" in logs
-    assert marker not in payload
-    assert marker not in logs
-    assert "api-key=***" in payload
+    for marker_value in _MARKERS.values():
+        assert marker_value not in response.text
+        assert marker_value not in logs
+    assert "api-key=***" in response.text
+    assert "api-key=***" in logs
+
+
+def test_cmc_http_failure_does_not_leak_url_key_to_logs_or_health_payload(
+    client, credentialed_settings, monkeypatch
+) -> None:
+    """The CMC provider path also handles HTTP error text without echoing its key."""
+    marker = _MARKERS["CMC_API_KEY"]
+    request = httpx.Request(
+        "GET",
+        f"https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?api-key={marker}",
+    )
+    response = httpx.Response(500, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as provider_error:
+        response.raise_for_status()
+    assert marker in str(provider_error.value)
+
+    class FailingHttp:
+        is_closed = False
+
+        def get(self, *_args, **_kwargs):
+            raise provider_error.value
+
+    captured_log: dict[str, object] = {}
+
+    class CaptureLog:
+        def debug(self, event: str, **kwargs: object) -> None:
+            captured_log["event"] = event
+            captured_log.update(kwargs)
+
+    crawler = CMCCrawler(api_key=marker)
+    crawler._client = FailingHttp()  # type: ignore[assignment]
+    monkeypatch.setattr(cmc_mod, "log", CaptureLog())
+    assert crawler._fetch_pro_items() == []
+
+    health_response = client.get("/health")
+    assert health_response.status_code == 200, health_response.text
+    assert captured_log["event"] == "cmc_pro_listings_failed"
+    logged_error = str(captured_log["error"])
+    for marker_value in _MARKERS.values():
+        assert marker_value not in health_response.text
+        assert marker_value not in logged_error
+    assert "api-key=***" in logged_error
+
+
+def test_dexscreener_http_failure_does_not_leak_url_key_to_logs_or_health_payload(
+    client, session, credentialed_settings, monkeypatch, capfd
+) -> None:
+    """A second ingestion provider path must keep its error URL out of /health."""
+    marker = _MARKERS["HELIUS_API_KEY"]
+    request = httpx.Request(
+        "GET",
+        f"https://api.dexscreener.com/latest/dex/token-profiles?api-key={marker}",
+    )
+    response = httpx.Response(500, request=request)
+    with pytest.raises(httpx.HTTPStatusError) as provider_error:
+        response.raise_for_status()
+    assert marker in str(provider_error.value)
+
+    class FailingDexScreenerClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def latest_token_profiles(self):
+            raise provider_error.value
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ingestion_service, "DexScreenerClient", FailingDexScreenerClient)
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    assert service._ingest_dexscreener_profiles(session) == 0
+    session.commit()
+
+    health_response = client.get("/health")
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err
+    assert health_response.status_code == 200, health_response.text
+    assert "dexscreener_profiles_failed" in logs
+    for marker_value in _MARKERS.values():
+        assert marker_value not in health_response.text
+        assert marker_value not in logs
+    assert "api-key=***" in health_response.text
     assert "api-key=***" in logs

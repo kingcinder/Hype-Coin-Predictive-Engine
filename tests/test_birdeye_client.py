@@ -32,6 +32,39 @@ def test_token_overview_uses_live_path_and_parses_snapshot() -> None:
         client.close()
 
 
+def test_token_meta_uses_v3_single_metadata_path() -> None:
+    client = _client()
+    try:
+        with respx.mock:
+            route = respx.get(f"{BASE}/defi/v3/token/meta-data/single").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "address": "Mint1",
+                            "symbol": "MINT",
+                            "name": "Mint One",
+                            "decimals": 6,
+                        },
+                    },
+                )
+            )
+            metadata = client.token_meta("Mint1")
+        assert metadata == {
+            "address": "Mint1",
+            "symbol": "MINT",
+            "name": "Mint One",
+            "decimals": 6,
+        }
+        request = route.calls[0].request
+        assert request.url.params["address"] == "Mint1"
+        assert request.headers["X-API-KEY"] == "test-key"
+        assert request.headers["x-chain"] == "solana"
+    finally:
+        client.close()
+
+
 def test_trending_tokens_uses_token_trending_path() -> None:
     client = _client()
     try:

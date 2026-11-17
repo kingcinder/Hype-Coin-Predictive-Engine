@@ -17,6 +17,7 @@ from typing import Any
 
 from common.logging import get_logger
 from common.time import utc_now
+from common.urls import redact_url
 from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
@@ -75,7 +76,7 @@ class DexScreenerTrendsCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:  # noqa: BLE001
-            log.debug("dexscreener_profiles_failed", error=str(exc))
+            log.debug("dexscreener_profiles_failed", error=redact_url(str(exc)))
             return []
 
     def _fetch_top_boosts(self) -> list[dict[str, Any]]:
@@ -113,5 +114,5 @@ class DexScreenerTrendsCrawler(BaseCrawler):
                 )
             return items
         except Exception as exc:  # noqa: BLE001
-            log.debug("dexscreener_boosts_failed", error=str(exc))
+            log.debug("dexscreener_boosts_failed", error=redact_url(str(exc)))
             return []

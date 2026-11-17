@@ -10,10 +10,13 @@ from functools import lru_cache
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
+from common.logging import get_logger
 from common.time import utc_now
 from common.urls import redact_url
 from storage import models
 from storage.repository import record_health
+
+log = get_logger(__name__)
 
 HEALTH_START = 1.0
 HEALTH_FAILURE_DECAY = 0.25
@@ -106,10 +109,26 @@ class RpcEndpointPool:
         self._probe_successes: dict[str, int] = {url: 0 for url in self.endpoints}
         self._success_counts: dict[str, int] = {url: 0 for url in self.endpoints}
         self._request_counts: dict[str, int] = {url: 0 for url in self.endpoints}
+        self._last_selected_url: str | None = None
+        self._last_success_url: str | None = None
+        self._selection_announced: set[str] = set()
+        self._success_announced: set[str] = set()
 
     @property
     def enabled(self) -> bool:
         return len(self.endpoints) > 0
+
+    @property
+    def last_selected_url(self) -> str | None:
+        """The most recent endpoint chosen by ``pick`` (redact before display)."""
+        with self._lock:
+            return self._last_selected_url
+
+    @property
+    def last_success_url(self) -> str | None:
+        """The most recent endpoint that served a successful live request."""
+        with self._lock:
+            return self._last_success_url
 
     def pick(self) -> str:
         """Best endpoint: highest health, down endpoints excluded, LRU tiebreak.
@@ -141,14 +160,27 @@ class RpcEndpointPool:
             else:
                 chosen = min(self.endpoints, key=lambda url: self._last_used[url])
             self._last_used[chosen] = self._tick
-            return chosen
+            self._last_selected_url = chosen
+            announce = chosen not in self._selection_announced
+            if announce:
+                self._selection_announced.add(chosen)
+        if announce:
+            # First selection per endpoint is enough to prove which provider
+            # the scan chose without flooding logs on every RPC call.
+            log.info("rpc_endpoint_selected", chain=self.chain_slug, url=redact_url(chosen))
+        return chosen
 
     def mark_success(self, url: str, *, live: bool = True) -> None:
+        announce = False
         with self._lock:
             if url not in self._health:
                 return
             if live:
                 self._success_counts[url] += 1
+                self._last_success_url = url
+                announce = url not in self._success_announced
+                if announce:
+                    self._success_announced.add(url)
             if self._is_down(url):
                 # Recovered from the down state: jump-start above the recovery
                 # threshold so it can win picks again instead of trickling back.
@@ -159,6 +191,8 @@ class RpcEndpointPool:
             else:
                 self._health[url] = min(1.0, self._health[url] + HEALTH_SUCCESS_BOOST)
             self._consecutive_failures[url] = 0
+        if announce:
+            log.info("rpc_endpoint_success", chain=self.chain_slug, url=redact_url(url))
 
     def record_request(self, url: str) -> None:
         """Count one attempted JSON-RPC request, excluding pool probes."""
@@ -433,6 +467,14 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
         message = f"{message}; down={down[0]}"
     elif degraded:
         message = f"{message}; degraded={degraded[0]}"
+    if selected := pool.last_selected_url:
+        message = f"{message}; selected={redact_url(selected)}"
+    if last_success := pool.last_success_url:
+        message = f"{message}; last_success={redact_url(last_success)}"
+    requests = sum(state.request_count for state in states)
+    successes = sum(state.success_count for state in states)
+    if requests:
+        message = f"{message}; requests={requests} successes={successes}"
     record_health(
         session,
         component=f"rpc_pool:{chain_slug}",

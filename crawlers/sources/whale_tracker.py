@@ -77,6 +77,12 @@ class WhaleTrackerCrawler(BaseCrawler):
 
     def _fetch_eth_transfers(self) -> list[dict[str, Any]]:
         """Fetch recent large ETH transfers for every watched Ethereum address."""
+        if not secret_value(get_settings().etherscan_api_key):
+            log.info(
+                "whale_tracker_eth_skipped: ETHERSCAN_API_KEY is not set; "
+                "Ethereum whale feed deferred"
+            )
+            return []
         items: list[dict[str, Any]] = []
         for address, dex in ETH_WATCH_TARGETS:
             try:

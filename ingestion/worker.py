@@ -6,6 +6,7 @@ import time
 
 from common.config import get_settings
 from common.logging import get_logger
+from common.urls import redact_url
 from forecast.engine import maybe_run_forecast
 from ingestion.service import IngestionService, backoff_sleep_seconds
 from ingestion.source_clients import ensure_background_probe
@@ -72,7 +73,7 @@ def main() -> None:
             result = run_once()
             log.info("worker_loop_complete", result=result)
         except Exception as exc:  # noqa: BLE001 - scan failure must not kill the loop
-            log.exception("worker_scan_failed", iteration=iteration, error=str(exc))
+            log.exception("worker_scan_failed", iteration=iteration, error=redact_url(str(exc)))
         # The scan performs the initial/due pass before scoring; this second
         # cadence gate also lets a long-running worker retrain independently of
         # scan implementation details.
@@ -81,7 +82,7 @@ def main() -> None:
             if forecast.get("status") != "skipped":
                 log.info("forecast_training_complete", result=forecast)
         except Exception as exc:  # noqa: BLE001
-            log.exception("worker_forecast_failed", iteration=iteration, error=str(exc))
+            log.exception("worker_forecast_failed", iteration=iteration, error=redact_url(str(exc)))
         # Retention autopilot: run the compaction + pruning + lake-growth pass
         # when the configured cadence has elapsed since the last pass. The scan
         # never touches the archive; this cadence fully owns compaction on the

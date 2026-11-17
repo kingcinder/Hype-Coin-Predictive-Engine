@@ -66,7 +66,19 @@ def test_contract_source_lookup_sends_chain_id_and_key(monkeypatch) -> None:
         assert call_params["apikey"] == KEY
 
 
-def test_evm_contract_exposes_etherscan_auth_failure() -> None:
+def test_evm_contract_without_key_reports_missing_credential(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", None)
+    http = FakeHttp({"status": "1", "result": []})
+    result = ContractAnalysis()
+
+    _analyze_evm_contract("0xtoken", "base", result, cast(Any, http))
+
+    assert result.error == "ETHERSCAN_API_KEY is not set"
+    assert http.calls == []
+
+
+def test_evm_contract_exposes_etherscan_auth_failure(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
     result = ContractAnalysis()
 
     _analyze_evm_contract(
@@ -122,6 +134,28 @@ def test_gas_oracle_uses_v2_with_key() -> None:
     params = route.calls[0].request.url.params
     assert params["chainid"] == "1"
     assert params["apikey"] == KEY
+
+
+@respx.mock
+def test_whale_tracker_skips_ethereum_without_key(monkeypatch) -> None:
+    """The ETH half is key-gated; missing credentials must not hit Etherscan."""
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", None)
+
+    class UnexpectedClient:
+        is_closed = False
+
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("Etherscan called without ETHERSCAN_API_KEY")
+
+        def close(self) -> None:
+            pass
+
+    crawler = WhaleTrackerCrawler()
+    crawler._client = cast(Any, UnexpectedClient())
+    try:
+        assert crawler._fetch_eth_transfers() == []
+    finally:
+        crawler.close()
 
 
 @respx.mock

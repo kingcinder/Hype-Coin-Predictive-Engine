@@ -116,6 +116,9 @@ def _analyze_evm_contract(
     http: HttpClient | None = None,
 ) -> None:
     """Analyze an EVM contract using Etherscan API."""
+    if not secret_value(get_settings().etherscan_api_key):
+        result.error = "ETHERSCAN_API_KEY is not set"
+        return
     client = http or HttpClient(base_url="https://api.etherscan.io")
     try:
         # Fetch contract source code for pattern matching
