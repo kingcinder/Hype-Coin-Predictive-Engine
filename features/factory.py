@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -13,16 +14,25 @@ from sqlalchemy.orm import Session
 
 from common.config import get_settings
 from common.enums import IgnitionEventType, LifecyclePhase
+from common.logging import get_logger
 from common.time import ensure_utc, utc_now
 from features.definitions import FEATURE_NAMES
 from pump_physics.engine import phase_rank
 from storage import models
-from storage.repository import upsert_feature
+from storage.repository import upsert_features
 from validation.leakage_guard import (
     check_rows_point_in_time,
     frozen_decision_ts,
     require_decision_ts,
 )
+
+log = get_logger(__name__)
+
+# Keep feature persistence observable without logging every asset. The start
+# checkpoint points at a hung asset; completion summaries stay at the same
+# bounded cadence, and only genuinely slow assets get a warning.
+_FEATURE_PROGRESS_EVERY = 100
+_FEATURE_SLOW_ASSET_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -574,28 +584,58 @@ class FeatureFactory:
         source_names = _load_source_names(session) if assets else {}
         # Freeze the decision time for the whole scan: every per-asset build
         # inside this scope must carry exactly this value (plan #8).
+        total_assets = len(assets)
+        loop_started = time.monotonic()
         with frozen_decision_ts(decision_ts):
-            for asset in assets:
+            for index, asset in enumerate(assets, start=1):
+                asset_started = time.monotonic()
+                if index == 1 or index % _FEATURE_PROGRESS_EVERY == 0 or index == total_assets:
+                    log.info(
+                        "feature_build_progress",
+                        phase="asset_start",
+                        asset_id=asset.id,
+                        processed=index - 1,
+                        total=total_assets,
+                        elapsed_sec=round(asset_started - loop_started, 3),
+                        decision_ts=decision_ts.isoformat(),
+                    )
                 values = self.build_for_asset(
                     session, asset, decision_ts, source_names=source_names
                 )
                 output[asset.id] = {value.name: value for value in values}
-                for value in values:
-                    upsert_feature(
-                        session,
-                        asset_id=asset.id,
-                        decision_ts=decision_ts,
-                        feature_name=value.name,
-                        feature_value=value.value,
-                        source_count=value.source_count,
-                        freshness_score=value.freshness_score,
-                        missing_flag=value.missing,
-                        source_refs=value.source_refs,
-                    )
+                upsert_features(
+                    session,
+                    asset_id=asset.id,
+                    decision_ts=decision_ts,
+                    values=values,
+                )
                 # Per-asset commit: building features for the whole universe in a
                 # single transaction held SQLite's write lock for the entire pass
                 # and starved the engine's write queue.
                 session.commit()
+                asset_elapsed = time.monotonic() - asset_started
+                if asset_elapsed >= _FEATURE_SLOW_ASSET_SECONDS:
+                    log.warning(
+                        "feature_build_slow_asset",
+                        asset_id=asset.id,
+                        elapsed_sec=round(asset_elapsed, 3),
+                        processed=index,
+                        total=total_assets,
+                        decision_ts=decision_ts.isoformat(),
+                    )
+                if index % _FEATURE_PROGRESS_EVERY == 0 or index == total_assets:
+                    elapsed = time.monotonic() - loop_started
+                    log.info(
+                        "feature_build_progress",
+                        phase="asset_complete",
+                        asset_id=asset.id,
+                        processed=index,
+                        total=total_assets,
+                        elapsed_sec=round(elapsed, 3),
+                        rate_per_sec=round(index / elapsed, 2) if elapsed > 0 else 0.0,
+                        last_asset_sec=round(asset_elapsed, 3),
+                        decision_ts=decision_ts.isoformat(),
+                    )
         return output
 
     def _holder_features(
@@ -1144,7 +1184,7 @@ def build_and_persist_features(
     - ``"lake"``: replay the lake-covered block (market/liquidity series,
       on-chain holder features, and the contract-flag count) entirely from
       the archived Parquet lake via ``LakeFeatureFactory`` (DuckDB) and
-      persist it with the same ``upsert_feature`` — no live market,
+      persist it with the same batched ``upsert_features`` path — no live market,
       liquidity, holder, or contract-flag tables are touched. Backtests use
       this to replay features from the archived evidence without depending
       on hot-DB state.

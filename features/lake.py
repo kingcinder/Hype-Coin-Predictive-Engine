@@ -57,7 +57,7 @@ from common.time import ensure_utc, floor_to_hour
 from features.factory import FeatureValue, _feature, compute_market_block
 from ops.archive import ArchiveStore, make_store
 from storage import models
-from storage.repository import upsert_feature
+from storage.repository import upsert_features
 from validation.leakage_guard import check_rows_point_in_time, require_decision_ts
 
 log = get_logger(__name__)
@@ -516,7 +516,7 @@ class LakeFeatureFactory:
 
         This is the ``feature_source="lake"`` replay path: it reads DuckDB
         over the archived evidence and writes feature rows exactly like the
-        SQL path (same ``upsert_feature``), without touching any live
+        SQL path (same batched ``upsert_features``), without touching any live
         normalized tables. All assets are reconstructed in one download /
         one DuckDB session per decision time.
         """
@@ -544,18 +544,12 @@ class LakeFeatureFactory:
                     f"asset_id={asset.id} decision_ts={decision_ts.isoformat()}"
                 )
             output[asset.id] = values
-            for value in values.values():
-                upsert_feature(
-                    session,
-                    asset_id=asset.id,
-                    decision_ts=decision_ts,
-                    feature_name=value.name,
-                    feature_value=value.value,
-                    source_count=value.source_count,
-                    freshness_score=value.freshness_score,
-                    missing_flag=value.missing,
-                    source_refs=value.source_refs,
-                )
+            upsert_features(
+                session,
+                asset_id=asset.id,
+                decision_ts=decision_ts,
+                values=values.values(),
+            )
         return output
 
     def _series_from_lake(self, asset_address: str, decision_ts: datetime) -> LakeMarketSeries:

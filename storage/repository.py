@@ -422,6 +422,66 @@ def upsert_feature(
     return row
 
 
+def upsert_features(
+    session: Session,
+    *,
+    asset_id: int,
+    decision_ts: datetime,
+    values: Iterable[Any],
+) -> list[models.Feature]:
+    """Upsert one asset's feature set with one lookup and one flush.
+
+    ``upsert_feature`` is intentionally kept for single writes and tests, but
+    the scan path writes ~45 features per asset. Calling it in a loop issues
+    one SELECT and one flush per feature; on a mature feature table that makes
+    persistence the dominant scoring cost. Loading the asset's current row set
+    once turns that into one indexed SELECT per asset and one batched flush.
+
+    ``values`` is an iterable of ``FeatureValue``-like objects (``name``,
+    ``value``, ``source_count``, ``freshness_score``, ``missing``, and
+    ``source_refs``).
+    """
+    values = list(values)
+    if not values:
+        return []
+    existing = {
+        row.feature_name: row
+        for row in session.scalars(
+            select(models.Feature).where(
+                models.Feature.asset_id == asset_id,
+                models.Feature.decision_ts == decision_ts,
+            )
+        )
+    }
+    observed_at = utc_now()
+    rows: list[models.Feature] = []
+    for value in values:
+        row = existing.get(value.name)
+        if row is None:
+            row = models.Feature(
+                asset_id=asset_id,
+                decision_ts=decision_ts,
+                observed_at=observed_at,
+                feature_name=value.name,
+                feature_value=value.value,
+                source_count=value.source_count,
+                freshness_score=value.freshness_score,
+                missing_flag=value.missing,
+                source_refs=value.source_refs or {},
+            )
+            session.add(row)
+        else:
+            row.feature_value = value.value
+            row.source_count = value.source_count
+            row.freshness_score = value.freshness_score
+            row.missing_flag = value.missing
+            row.observed_at = observed_at
+            row.source_refs = value.source_refs or {}
+        rows.append(row)
+    session.flush()
+    return rows
+
+
 def upsert_social_mention(
     session: Session,
     *,
