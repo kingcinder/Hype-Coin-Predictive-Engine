@@ -510,7 +510,15 @@ class AlertTypeControl(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
-    __table_args__ = (Index("ix_alerts_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_alerts_created_at", "created_at"),
+        # Scoring checks for an existing alert on every new score and the
+        # quality gate counts acknowledged alerts by type. Both lookups used
+        # to full-scan the alert table, which grows by thousands of rows per
+        # scan.
+        Index("ix_alerts_asset_score_type", "asset_id", "score_id", "alert_type"),
+        Index("ix_alerts_type_acked", "alert_type", "acked_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
