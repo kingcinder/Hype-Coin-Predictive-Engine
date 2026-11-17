@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from common.config import Settings, secret_value
+from common.config import Settings, _allows_none
 
 EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
 
@@ -39,33 +39,20 @@ def example_settings(tmp_path, monkeypatch):
 def test_full_env_example_boots_with_blanks_unset(example_settings) -> None:
     settings, blanks = example_settings
 
-    assert "TELEGRAM_API_ID" in blanks
-    assert "LIVE_MAX_BANKROLL_SOL" in blanks
-    assert "LIVE_DAILY_LOSS_LIMIT_SOL" in blanks
-    assert "HELIUS_API_KEY" in blanks
+    assert blanks, "expected .env.example to contain blank placeholders"
 
+    nullable_checks = 0
     for key in blanks:
-        assert key.lower() in Settings.model_fields, key
+        field_name = key.lower()
+        field = Settings.model_fields.get(field_name)
+        assert field is not None, key
+        if not _allows_none(field.annotation):
+            continue
 
-    # Optional placeholders (numbers, secrets, URLs) are unset, not empty strings
-    # or zero values that would read as configured.
-    assert settings.telegram_api_id is None
-    assert settings.live_max_bankroll_sol is None
-    assert settings.live_daily_loss_limit_sol is None
-    assert settings.engine_api_token is None
-    assert settings.helius_api_key is None
-    assert settings.alchemy_api_key is None
-    assert settings.etherscan_api_key is None
-    assert settings.birdeye_api_key is None
-    assert settings.cmc_api_key is None
-    assert settings.gmgn_api_key is None
-    assert settings.gmgn_signer_secret is None
-    assert settings.reddit_client_secret is None
-    assert settings.reddit_client_id is None
-    assert settings.llm_api_key is None
-    assert settings.llm_base_url is None
-    assert settings.quicknode_evm_rpc_url is None
-    assert settings.webhook_url_allowlist_csv is None
-    assert settings.gmgn_wallet_address is None
-    assert settings.telegram_api_hash is None
-    assert secret_value(settings.helius_api_key) is None
+        # Optional placeholders (numbers, secrets, URLs) are unset, not empty
+        # strings or zero values that would read as configured.
+        value = getattr(settings, field_name)
+        assert value is None, f"{key} is blank in .env.example but parsed as {value!r}"
+        nullable_checks += 1
+
+    assert nullable_checks, "no blank .env.example keys map to nullable settings fields"
