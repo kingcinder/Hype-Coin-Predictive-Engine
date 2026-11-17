@@ -399,9 +399,17 @@ def _compute_reason_weights(
     all_score_ids = list(
         {o.score_id for o in collapsed_outcomes} | {o.score_id for o in survived_outcomes}
     )
-    explanations = session.scalars(
-        select(models.ScoreExplanation).where(models.ScoreExplanation.score_id.in_(all_score_ids))
-    ).all()
+    # Chunk the lookup: a single IN() with tens of thousands of score ids
+    # makes SQLAlchemy generate a huge cache key and bind list, which can
+    # dominate the calibration pass after a large outcome batch is labeled.
+    explanations: list[models.ScoreExplanation] = []
+    for start in range(0, len(all_score_ids), 500):
+        chunk = all_score_ids[start : start + 500]
+        explanations.extend(
+            session.scalars(
+                select(models.ScoreExplanation).where(models.ScoreExplanation.score_id.in_(chunk))
+            ).all()
+        )
     explanation_by_score = {e.score_id: e for e in explanations}
 
     # Get the risk reasons for collapsed and survived tokens via their scores
