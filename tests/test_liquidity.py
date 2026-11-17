@@ -131,6 +131,40 @@ def test_watcher_disabled_by_setting_returns_zero_counts(session, monkeypatch) -
     assert session.scalars(select(models.LiquidityRemovalEvent)).all() == []
 
 
+def test_liquidity_rpc_failure_log_and_health_redact_helius_key(
+    session, monkeypatch, capfd
+) -> None:
+    from storage.models import SystemHealth
+
+    secret = "fake-helius-key-for-tests"
+    helius = f"https://mainnet.helius-rpc.com/?api-key={secret}"
+    _asset, _pool, _source = _seed_base_pool(session)
+    watcher = LiquidityRemovalWatcher()
+    monkeypatch.setattr("radar.liquidity.get_rpc_url", lambda _chain: helius)
+
+    def endpoint_failure(*_args, **_kwargs) -> list[dict]:
+        raise RuntimeError(f"Client error for url '{helius}'")
+
+    monkeypatch.setattr(watcher, "_logs_from_endpoint", endpoint_failure)
+
+    assert watcher.scan(session, decision_ts=NOW)["errors"] == 1
+
+    logs = "".join(capfd.readouterr())
+    assert "lp_removal_endpoint_failed" in logs
+    assert "lp_removal_watch_failed" in logs
+    assert secret not in logs
+    assert "api-key=***" in logs
+
+    row = session.scalar(
+        select(SystemHealth)
+        .where(SystemHealth.component == "source:lp_removal:base")
+        .order_by(SystemHealth.id.desc())
+    )
+    assert row is not None
+    assert secret not in (row.message or "")
+    assert "api-key=***" in (row.message or "")
+
+
 def test_watcher_reports_rpc_failure_without_aborting_scan(session, monkeypatch) -> None:
     from storage.models import SystemHealth
 

@@ -6,15 +6,72 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
+import ingestion.holder_tracker as holder_mod
+import ingestion.service as ingestion_service
 from common.config import get_settings
 from common.urls import redact_url
 from ingestion import rpc_pool
+from ingestion.holder_tracker import HolderSnapshot, get_solana_holders
+from ingestion.service import IngestionService
 from mempool import evm as evm_mod
 from mempool.evm import run_evm_watch
 from storage import models
+from tests.conftest import seed_market_asset
 
 SECRET = "00000000-0000-4000-8000-000000000000"
 HELIUS = f"https://mainnet.helius-rpc.com/?api-key={SECRET}"
+
+
+def test_solana_holder_failure_log_and_health_redact_helius_key(session, monkeypatch) -> None:
+    error = f"Client error for url '{HELIUS}'"
+
+    class _FailingHolderHttp:
+        def post_json(self, *_args, **_kwargs):
+            raise RuntimeError(error)
+
+    logged: dict[str, object] = {}
+
+    class _CaptureLog:
+        def debug(self, event: str, **kwargs: object) -> None:
+            logged["event"] = event
+            logged.update(kwargs)
+
+    monkeypatch.setattr(holder_mod, "log", _CaptureLog())
+    assert get_solana_holders("mint", http=_FailingHolderHttp()) == HolderSnapshot()
+
+    assert logged["event"] == "solana_holder_error"
+    assert SECRET not in str(logged)
+    assert "api-key=***" in str(logged["error"])
+
+    seed_market_asset(session)
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    service.settings.solana_holder_scan_limit = 1
+
+    class _FailingSolanaClient:
+        def close(self) -> None:
+            return None
+
+        def get_token_supply(self, _mint: str) -> float:
+            raise RuntimeError(error)
+
+        def get_token_largest_accounts(self, _mint: str):  # pragma: no cover - never reached
+            raise AssertionError("holder accounts fetched after supply failed")
+
+    monkeypatch.setattr(ingestion_service, "SolanaRpcClient", _FailingSolanaClient)
+
+    assert service._ingest_solana_holder_snapshots(session) == 0
+    session.commit()
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:solana_holders")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.error_count == 1
+    assert SECRET not in (health.message or "")
+    assert "api-key=***" in (health.message or "")
 
 
 def test_redact_url_masks_query_credentials() -> None:
