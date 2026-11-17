@@ -8,6 +8,7 @@ import respx
 from httpx import Response
 
 from common.config import get_settings
+from crawlers.sources import whale_tracker as whale_mod
 from crawlers.sources.gas_tracker import GasTrackerCrawler
 from crawlers.sources.whale_tracker import ETH_WHALE_ADDRESSES, WhaleTrackerCrawler
 from ingestion.contract_analyzer import (
@@ -105,6 +106,33 @@ def test_gas_oracle_uses_v2_with_key() -> None:
 
 
 @respx.mock
+def test_whale_tracker_maps_large_transfers_from_every_watched_address(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
+    monkeypatch.setattr(whale_mod.time, "sleep", lambda _seconds: None)
+    tx = {
+        "value": str(60 * 10**18),
+        "timeStamp": "1700000000",
+        "hash": "0xabc",
+        "from": "0xfrom",
+        "to": "0xto",
+        "blockNumber": "123",
+    }
+    respx.get("https://api.etherscan.io/v2/api").mock(
+        return_value=Response(200, json={"status": "1", "result": [tx]})
+    )
+    crawler = WhaleTrackerCrawler()
+    try:
+        items = crawler._fetch_eth_transfers()
+    finally:
+        crawler.close()
+
+    assert len(items) == len(whale_mod.ETH_WATCH_TARGETS)
+    assert items[-1]["title"] == "Large DEX swap: 60.0 ETH via Uniswap"
+    assert items[-1]["metrics"]["dex"] == "uniswap_v2"
+    assert items[0]["metrics"]["from"] == "0xfrom"
+
+
+@respx.mock
 def test_whale_tracker_uses_authenticated_v2(monkeypatch) -> None:
     """Whale txlist calls moved off the retired unauthenticated V1 endpoint."""
     monkeypatch.setattr(get_settings(), "etherscan_api_key", KEY)
@@ -113,8 +141,7 @@ def test_whale_tracker_uses_authenticated_v2(monkeypatch) -> None:
     )
     crawler = WhaleTrackerCrawler()
     try:
-        assert crawler._fetch_eth_whales() == []
-        assert crawler._fetch_eth_large_swaps() == []
+        assert crawler._fetch_eth_transfers() == []
     finally:
         crawler.close()
 

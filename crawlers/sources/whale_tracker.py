@@ -8,7 +8,7 @@ block explorer APIs to detect smart money movements.
 from __future__ import annotations
 
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from common.config import get_settings, secret_value
@@ -46,6 +46,17 @@ ETH_WHALE_ADDRESSES = [
 ETH_MIN_VALUE_ETH = 50.0
 SOL_MIN_VALUE_SOL = 1000.0
 
+UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+ETH_WATCH_TARGETS: tuple[tuple[str, str | None], ...] = tuple(
+    (address, None) for address in ETH_WHALE_ADDRESSES
+) + ((UNISWAP_V2_ROUTER, "uniswap_v2"),)
+
+SOL_WHALE_ACCOUNTS = [
+    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",  # Binance
+    "5VCwKtCXgCJ6kit5FybXkhvErEB2g2f6J5LMkmbmSVr6",  # FTX (historical)
+    "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiGPkr",  # OKX
+]
+
 
 class WhaleTrackerCrawler(BaseCrawler):
     """Tracks whale wallets and large on-chain movements."""
@@ -60,119 +71,43 @@ class WhaleTrackerCrawler(BaseCrawler):
         )
 
     def fetch_items(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        items.extend(self._fetch_eth_whales())
-        items.extend(self._fetch_eth_large_swaps())
-        items.extend(self._fetch_sol_whales())
-        return items
+        return [*self._fetch_eth_transfers(), *self._fetch_sol_whales()]
 
     # ── Ethereum whale tracking ──────────────────────────────────────────
 
-    def _fetch_eth_whales(self) -> list[dict[str, Any]]:
-        """Fetch recent large ETH transfers from known whale addresses."""
+    def _fetch_eth_transfers(self) -> list[dict[str, Any]]:
+        """Fetch recent large ETH transfers for every watched Ethereum address."""
         items: list[dict[str, Any]] = []
-        for address in ETH_WHALE_ADDRESSES:
+        for address, dex in ETH_WATCH_TARGETS:
             try:
-                data = self.client.get(
-                    _ETHERSCAN_V2_URL,
-                    params=_etherscan_params(
-                        module="account",
-                        action="txlist",
-                        address=address,
-                        startblock=0,
-                        endblock=99999999,
-                        page=1,
-                        offset=5,
-                        sort="desc",
-                    ),
-                ).json()
-                for tx in (data.get("result") or [])[:5]:
-                    value_eth = int(tx.get("value", "0")) / 1e18
-                    if value_eth < ETH_MIN_VALUE_ETH:
-                        continue
-                    ts = _unix_to_iso(int(tx.get("timeStamp", 0)))
-                    items.append(
-                        {
-                            "title": f"Whale transfer: {value_eth:,.1f} ETH",
-                            "text": (
-                                f"Large ETH movement of {value_eth:,.1f} ETH "
-                                f"from {address[:10]}... to {(tx.get('to') or '')[:10]}..."
-                            ),
-                            "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
-                            "published": ts,
-                            "source_domain": "etherscan.io",
-                            "source_type": "on_chain",
-                            "metrics": {
-                                "chain": "ethereum",
-                                "tx_hash": tx.get("hash"),
-                                "from": address,
-                                "to": tx.get("to"),
-                                "value_eth": round(value_eth, 4),
-                                "block": tx.get("blockNumber"),
-                                "whale_alert": True,
-                            },
-                        }
-                    )
-                time.sleep(0.25)  # Etherscan rate limit
+                items.extend(self._fetch_eth_address(address, dex=dex))
             except Exception as exc:  # noqa: BLE001
                 log.debug("whale_eth_error", address=address, error=redact_url(str(exc)))
+            time.sleep(0.25)  # Etherscan rate limit
         return items
 
-    def _fetch_eth_large_swaps(self) -> list[dict[str, Any]]:
-        """Detect large Uniswap V2/V3 swaps via Etherscan event logs.
-
-        Looks for recent Swap events on major DEX routers where the ETH value
-        exceeds the whale threshold.
-        """
-        items: list[dict[str, Any]] = []
-        # Uniswap V2 Router
-        router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
-        try:
-            # Get recent transactions to the Uniswap router
-            data = self.client.get(
-                _ETHERSCAN_V2_URL,
-                params=_etherscan_params(
-                    module="account",
-                    action="txlist",
-                    address=router,
-                    startblock=0,
-                    endblock=99999999,
-                    page=1,
-                    offset=20,
-                    sort="desc",
-                ),
-            ).json()
-            for tx in (data.get("result") or [])[:20]:
-                value_eth = int(tx.get("value", "0")) / 1e18
-                if value_eth < ETH_MIN_VALUE_ETH:
-                    continue
-                ts = _unix_to_iso(int(tx.get("timeStamp", 0)))
-                items.append(
-                    {
-                        "title": f"Large DEX swap: {value_eth:,.1f} ETH via Uniswap",
-                        "text": (
-                            f"Whale-sized swap of {value_eth:,.1f} ETH detected on "
-                            f"Uniswap V2 Router from {(tx.get('from') or '')[:10]}..."
-                        ),
-                        "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
-                        "published": ts,
-                        "source_domain": "etherscan.io",
-                        "source_type": "on_chain",
-                        "metrics": {
-                            "chain": "ethereum",
-                            "tx_hash": tx.get("hash"),
-                            "from": tx.get("from"),
-                            "to": tx.get("to"),
-                            "value_eth": round(value_eth, 4),
-                            "block": tx.get("blockNumber"),
-                            "dex": "uniswap_v2",
-                            "whale_alert": True,
-                        },
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.debug("whale_eth_swap_error", error=redact_url(str(exc)))
-        return items
+    def _fetch_eth_address(self, address: str, *, dex: str | None) -> list[dict[str, Any]]:
+        """Return whale-sized transfers for one address, optionally labelled as DEX flow."""
+        limit = 20 if dex else 5
+        data = self.client.get(
+            _ETHERSCAN_V2_URL,
+            params=_etherscan_params(
+                module="account",
+                action="txlist",
+                address=address,
+                startblock=0,
+                offset=limit,
+                sort="desc",
+            ),
+        ).json()
+        transactions = data.get("result")
+        if not isinstance(transactions, list):
+            return []
+        return [
+            item
+            for tx in transactions[:limit]
+            if isinstance(tx, dict) and (item := _eth_transfer_item(tx, dex=dex)) is not None
+        ]
 
     # ── Solana whale tracking ────────────────────────────────────────────
 
@@ -184,8 +119,7 @@ class WhaleTrackerCrawler(BaseCrawler):
         """
         items: list[dict[str, Any]] = []
         # Use public Solana RPC for recent signatures on major accounts
-        whale_accounts = _get_solana_whale_accounts()
-        for account in whale_accounts[:3]:  # Limit to avoid rate limits
+        for account in SOL_WHALE_ACCOUNTS:  # Limit to avoid rate limits
             try:
                 sig_data = self.client.post(
                     "https://api.mainnet-beta.solana.com",
@@ -246,15 +180,6 @@ class WhaleTrackerCrawler(BaseCrawler):
         return items
 
 
-def _get_solana_whale_accounts() -> list[str]:
-    """Return known Solana whale / exchange deposit addresses."""
-    return [
-        "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",  # Binance
-        "5VCwKtCXgCJ6kit5FybXkhvErEB2g2f6J5LMkmbmSVr6",  # FTX (historical)
-        "FWznbcNXWQuHTawe9RxvQ2LdCENssh12dsznf4RiGPkr",  # OKX
-    ]
-
-
 def _extract_sol_transfer(tx: dict[str, Any], watch_account: str) -> float | None:
     """Extract net SOL balance change for the watched account from a parsed transaction."""
     try:
@@ -279,10 +204,46 @@ def _extract_sol_transfer(tx: dict[str, Any], watch_account: str) -> float | Non
     return None
 
 
-def _unix_to_iso(ts: int) -> Any:
-    """Convert unix timestamp to ISO format string."""
-    from datetime import datetime
+def _eth_transfer_item(tx: dict[str, Any], *, dex: str | None) -> dict[str, Any] | None:
+    """Map one Etherscan tx to a whale item, or None below the ETH threshold."""
+    value_eth = int(tx.get("value", "0")) / 1e18
+    if value_eth < ETH_MIN_VALUE_ETH:
+        return None
+    tx_from = tx.get("from") or ""
+    tx_to = tx.get("to") or ""
+    if dex:
+        title = f"Large DEX swap: {value_eth:,.1f} ETH via Uniswap"
+        text = (
+            f"Whale-sized swap of {value_eth:,.1f} ETH detected on "
+            f"Uniswap V2 Router from {tx_from[:10]}..."
+        )
+    else:
+        title = f"Whale transfer: {value_eth:,.1f} ETH"
+        text = (
+            f"Large ETH movement of {value_eth:,.1f} ETH from {tx_from[:10]}... to {tx_to[:10]}..."
+        )
+    metrics: dict[str, Any] = {
+        "chain": "ethereum",
+        "tx_hash": tx.get("hash"),
+        "from": tx_from,
+        "to": tx_to,
+        "value_eth": round(value_eth, 4),
+        "block": tx.get("blockNumber"),
+        "whale_alert": True,
+    }
+    if dex:
+        metrics["dex"] = dex
+    return {
+        "title": title,
+        "text": text,
+        "url": f"https://etherscan.io/tx/{tx.get('hash', '')}",
+        "published": _unix_to_iso(int(tx.get("timeStamp", 0))),
+        "source_domain": "etherscan.io",
+        "source_type": "on_chain",
+        "metrics": metrics,
+    }
 
-    if ts <= 0:
-        return utc_now()
-    return datetime.fromtimestamp(ts, tz=UTC)
+
+def _unix_to_iso(ts: int) -> datetime:
+    """Convert a Unix timestamp to UTC, falling back to now for missing values."""
+    return datetime.fromtimestamp(ts, tz=UTC) if ts > 0 else utc_now()
