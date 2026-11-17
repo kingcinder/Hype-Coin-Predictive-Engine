@@ -1,7 +1,7 @@
 """Track when a copy approval claimed its log.
 
 Revision ID: 0033_copy_log_claimed_at
-Revises: 0032_ledger_trade_required_fields
+Revises: 0032_ledger_trade_fields
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0033_copy_log_claimed_at"
-down_revision = "0032_ledger_trade_required_fields"
+down_revision = "0032_ledger_trade_fields"
 branch_labels = None
 depends_on = None
 
