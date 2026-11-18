@@ -235,6 +235,55 @@ def test_engine_scan_failure_log_redacts_quicknode_key(monkeypatch: pytest.Monke
     assert "quiknode.pro/***" in state.errors[0]
 
 
+def test_engine_scan_failure_redacts_alchemy_key_in_logs_and_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Alchemy-shaped HTTP error must not leak its path credential.
+
+    This exercises the engine's own scan-failure boundary, not just
+    ``redact_url``: ``_record_scan_failure`` writes the redacted message to
+    both the ``engine_scan_failed`` log and the engine health/status state.
+    """
+    import httpx
+
+    import engine.run as engine_run
+    import ops.watchdog as watchdog_mod
+    from engine.state import EngineState
+
+    secret = "fake-alchemy-key-for-engine-test-1234567890"
+    request = httpx.Request("POST", f"https://eth-mainnet.g.alchemy.com/v2/{secret}")
+    with pytest.raises(httpx.HTTPStatusError) as provider_error:
+        httpx.Response(401, request=request).raise_for_status()
+    # The raw key must really be present before the engine redacts it.
+    assert secret in str(provider_error.value)
+
+    emitted: dict[str, object] = {}
+
+    class CaptureLog:
+        def exception(self, event: str, **kwargs: object) -> None:
+            emitted["event"] = event
+            emitted.update(kwargs)
+
+    state = EngineState()
+    monkeypatch.setattr(engine_run, "log", CaptureLog())
+    monkeypatch.setattr(watchdog_mod, "on_scan_failure", lambda _state: None)
+
+    engine_run._record_scan_failure(  # noqa: SLF001 - exercises the engine catch path.
+        provider_error.value,
+        iteration=7,
+        engine_state=state,
+        watchdog_state=object(),
+    )
+
+    logs = str(emitted)
+    health = state.snapshot()
+    assert emitted["event"] == "engine_scan_failed"
+    assert secret not in logs
+    assert "/v2/***" in logs
+    assert secret not in str(health)
+    assert "/v2/***" in (health["scan"]["error_message"] or "")
+
+
 def test_worker_once_acquires_writer_guard_before_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     """A one-shot full scan must not bypass the single-writer guard."""
     import sys
