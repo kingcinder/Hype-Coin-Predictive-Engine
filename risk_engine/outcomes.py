@@ -659,7 +659,6 @@ def evaluate_outcomes(
         fed_count = 0
         max_feed = 100  # cap per evaluation pass to avoid ensemble overload
         settings = get_settings()
-        fed_rows: list[models.RiskOutcome] = []
         for row in recent_outcomes:
             if fed_count >= max_feed:
                 break
@@ -728,22 +727,18 @@ def evaluate_outcomes(
                     }
                 )
             ensemble_engine.record_outcomes(entries)
-            # Defer the marking write until after the ensemble's own session
-            # flushes.  Setting this column inside the loop re-acquired the
-            # scan session's write lock and re-created the lock inversion the
-            # commit above is meant to avoid.
-            fed_rows.append(row)
-            fed_count += 1
-
-        for row in fed_rows:
+            # Commit this row's marker immediately after its feedback has been
+            # delivered.  Batching all markers until the loop ended meant a
+            # failure on a later row rolled back the markers for rows whose
+            # ensemble weights had already been persisted; the next evaluation
+            # then fed those rows a second time.  Per-row commits keep the
+            # writer lock bounded to one marker update (max_feed caps the loop
+            # at 100) while making completed feedback durable before the next
+            # row is processed.
             row.ensemble_fed_at = decision_ts
-        if fed_rows:
             session.flush()
-            # Commit the feedback markers before returning.  Leaving this
-            # transaction open makes the caller's calibration work hold
-            # SQLite's write lock for its whole duration, which is the same
-            # lock inversion the pre-ensemble commit above avoids.
             session.commit()
+            fed_count += 1
     except Exception:  # noqa: BLE001
         pass  # ensemble feedback must never break outcome evaluation
 

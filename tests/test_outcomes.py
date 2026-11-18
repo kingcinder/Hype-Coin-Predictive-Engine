@@ -300,6 +300,138 @@ def test_evaluated_outcomes_commit_in_batches(session, monkeypatch) -> None:
     assert len(commits) >= 2
 
 
+def test_ensemble_feedback_commit_is_visible_and_unlocked_before_calibration(
+    session, monkeypatch
+) -> None:
+    """Calibration must start after the scan commits its ensemble markers.
+
+    ``run_calibration`` calls ``evaluate_outcomes`` first.  A scanner that
+    leaves the ``ensemble_fed_at`` writes uncommitted would both hide them from
+    another connection and keep SQLite's writer lock while calibration starts.
+    The calibration hook below runs immediately after the real evaluation,
+    before calibration writes anything, and checks both conditions.
+    """
+    import sqlite3
+
+    from risk_engine import calibrator
+    from scoring.ensemble import ensemble_engine
+
+    monkeypatch.setattr(ensemble_engine, "record_outcomes", lambda _entries: None)
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+    session.commit()
+
+    db_path = session.get_bind().url.database
+    assert db_path
+
+    observed: dict[str, object] = {}
+    real_evaluate = calibrator.evaluate_outcomes
+
+    def evaluate_then_probe(*args, **kwargs):
+        report = real_evaluate(*args, **kwargs)
+
+        # A separate connection proves the marker was committed by the scan
+        # session, not just left in that session's identity map.
+        reader = sqlite3.connect(db_path, timeout=1.0)
+        try:
+            row = reader.execute(
+                "select count(*) from risk_outcomes where id = ? and ensemble_fed_at is not null",
+                (outcome.id,),
+            ).fetchone()
+        finally:
+            reader.close()
+        observed["committed_marker"] = row[0] if row else 0
+
+        # BEGIN IMMEDIATE fails immediately if the scan session still owns the
+        # SQLite writer lock; keep the probe bounded instead of waiting out the
+        # production busy timeout.
+        writer = sqlite3.connect(db_path, timeout=0.2)
+        try:
+            writer.execute("pragma busy_timeout=100")
+            writer.execute("begin immediate")
+            observed["writer_lock_available"] = True
+        finally:
+            writer.rollback()
+            writer.close()
+        return report
+
+    monkeypatch.setattr(calibrator, "evaluate_outcomes", evaluate_then_probe)
+
+    calibrator.run_calibration(session, decision_ts=EVAL_TS)
+
+    assert observed["committed_marker"] == 1
+    assert observed["writer_lock_available"] is True
+
+
+def test_ensemble_feedback_failure_does_not_refeed_committed_rows(session, monkeypatch) -> None:
+    """A mid-loop failure must not replay outcomes whose weights were saved.
+
+    The ensemble persists weights through its own session.  If the marker for
+    an earlier row is only written after the whole loop, a later
+    ``record_outcomes`` failure discards that marker and the next evaluation
+    feeds the earlier outcome again.  Markers must be durable per row before
+    the next row is attempted.
+    """
+    import sqlite3
+
+    from scoring.ensemble import ensemble_engine
+
+    first = seed_market_asset(session)
+    first_outcome = _seed_prediction(session, first)
+    _seed_lifecycle(session, first, "collapse", SCORED_AT + timedelta(hours=24))
+
+    second = seed_market_asset(
+        session,
+        address="EnsembleRetrySecond1111111111111111111111",
+        pair_address="EnsembleRetrySecondPair111111111111111",
+    )
+    second_outcome = _seed_prediction(session, second, model_version="test-ensemble-retry-second")
+    _seed_lifecycle(session, second, "collapse", SCORED_AT + timedelta(hours=24))
+    session.commit()
+
+    fed_calls: list[list[dict[str, object]]] = []
+
+    def fail_second_feedback(entries: list[dict[str, object]]) -> None:
+        fed_calls.append(entries)
+        if len(fed_calls) == 2:
+            raise RuntimeError("ensemble feedback failed after the first row")
+
+    monkeypatch.setattr(ensemble_engine, "record_outcomes", fail_second_feedback)
+
+    # The first row is fed and marked; the second row fails before its marker.
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert len(fed_calls) == 2
+    session.refresh(first_outcome)
+    session.refresh(second_outcome)
+    assert [first_outcome.ensemble_fed_at, second_outcome.ensemble_fed_at].count(None) == 1
+
+    # Read through a separate connection: the surviving marker must have been
+    # committed by the failed evaluation, not merely flushed in this session.
+    db_path = session.get_bind().url.database
+    assert db_path
+    reader = sqlite3.connect(db_path, timeout=1.0)
+    try:
+        committed = reader.execute(
+            "select count(*) from risk_outcomes where id in (?, ?) and ensemble_fed_at is not null",
+            (first_outcome.id, second_outcome.id),
+        ).fetchone()[0]
+    finally:
+        reader.close()
+    assert committed == 1
+
+    # A retry must feed only the row that did not complete, not the first one.
+    fed_calls.clear()
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert len(fed_calls) == 1
+    session.refresh(first_outcome)
+    session.refresh(second_outcome)
+    assert first_outcome.ensemble_fed_at is not None
+    assert second_outcome.ensemble_fed_at is not None
+
+
 def test_large_due_backlog_uses_bounded_batches_and_short_lock_holds(session) -> None:
     """A realistic due backlog must commit every 500 rows, not hold one lock.
 

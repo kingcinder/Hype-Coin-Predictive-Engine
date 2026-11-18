@@ -28,6 +28,11 @@ from common.urls import redact_url
 
 log = get_logger(__name__)
 
+# A provider can send a Retry-After of days, either accidentally or to keep a
+# client away.  Five minutes is long enough to respect a real rate-limit window,
+# but prevents one header from parking a provider for hours or days.
+MAX_RETRY_AFTER_SECONDS = 300.0
+
 
 def _is_ipv4(hostname: str) -> bool:
     try:
@@ -159,9 +164,9 @@ def retry_after_seconds(exc: BaseException) -> float | None:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
         seconds = (retry_at - datetime.now(UTC)).total_seconds()
-    if not math.isfinite(seconds) or seconds < 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         return None
-    return seconds
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
 def _retryable_request_error(exc: BaseException) -> bool:
@@ -201,7 +206,10 @@ def retry_after_or_backoff(*, initial: float, maximum: float) -> Callable[[Retry
             if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
                 seconds = retry_after_seconds(exc)
                 if seconds is not None:
-                    return seconds
+                    # A Retry-After may exceed the normal exponential backoff
+                    # ceiling; do not let one response stall this request for
+                    # minutes.
+                    return min(seconds, maximum)
         return float(fallback(retry_state))
 
     return wait

@@ -133,6 +133,8 @@ class IngestionService:
             "backoff_skipped": 0,
             "gecko_failures": 0,
             "provider_failures": 0,
+            "rate_limit_failures": 0,
+            "circuit_open_failures": 0,
             "rpc_fallback_hits": 0,
             "rpc_fallback_swaps": 0,
             "swaps": 0,
@@ -1350,10 +1352,15 @@ class IngestionService:
         except Exception as exc:  # noqa: BLE001 - fall back to chain data below.
             gecko_failed = True
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            if isinstance(exc, CircuitOpen) or status in RATE_LIMIT_STATUSES:
-                # The backoff flag is the source of truth for pacing; reuse it
-                # instead of tracking the same rate-limit state twice.
+            if isinstance(exc, CircuitOpen):
+                # The shared flag gates the rest of this scan, but a generic
+                # circuit-open is not necessarily a rate limit. Track the
+                # cause separately so health does not mislabel it.
                 self._first_buy_provider_backoff = True
+                self._first_buy_stats["circuit_open_failures"] += 1
+            elif status in RATE_LIMIT_STATUSES:
+                self._first_buy_provider_backoff = True
+                self._first_buy_stats["rate_limit_failures"] += 1
             else:
                 self._first_buy_stats["provider_failures"] += 1
             self._first_buy_stats["gecko_failures"] += 1
@@ -1409,7 +1416,8 @@ class IngestionService:
     def _record_first_buy_health(self, session: Session) -> None:
         stats = self._first_buy_stats
         skipped = stats["budget_skipped"] + stats["backoff_skipped"]
-        rate_limited = self._first_buy_provider_backoff
+        rate_limit_failures = stats["rate_limit_failures"]
+        circuit_open_failures = stats["circuit_open_failures"]
         provider_failures = stats["provider_failures"]
         if stats["gecko_failures"] == 0 and skipped == 0:
             state = "ok"
@@ -1421,14 +1429,20 @@ class IngestionService:
         else:
             state = "red"
         message = " ".join(f"{key}={value}" for key, value in stats.items())
-        if rate_limited:
+        backoff_reasons: list[str] = []
+        if rate_limit_failures:
+            backoff_reasons.append("rate limited")
+        if circuit_open_failures:
+            backoff_reasons.append("circuit open")
+        if backoff_reasons:
+            reason = " and ".join(backoff_reasons)
             detail = (
-                "pacing: GeckoTerminal rate limited or cooling down; first-buy "
-                f"fetches deferred for the rest of this scan; {message}"
+                f"pacing: GeckoTerminal {reason}; first-buy fetches deferred "
+                f"for the rest of this scan; {message}"
             )
             if provider_failures:
                 detail = (
-                    "pacing with provider failures: GeckoTerminal rate limited; "
+                    f"pacing with provider failures: GeckoTerminal {reason}; "
                     f"{provider_failures} other provider request(s) failed; "
                     f"first-buy fetches deferred for the rest of this scan; {message}"
                 )
@@ -1443,7 +1457,8 @@ class IngestionService:
         log.info(
             "first_buy_feed_health",
             state=state,
-            rate_limited=rate_limited,
+            rate_limited=rate_limit_failures,
+            circuit_open=circuit_open_failures,
             **stats,
         )
 

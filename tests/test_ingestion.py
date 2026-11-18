@@ -623,6 +623,79 @@ def test_first_buy_mixed_rate_limit_and_provider_failure_reports_both(session, m
     assert "gecko_failures=2" in health.message
 
 
+def test_first_buy_circuit_open_health_is_not_labeled_rate_limit(session, monkeypatch) -> None:
+    """A generic provider circuit-open is backoff, not evidence of a 429."""
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+
+    def cooling(self, chain: str, pool: str):
+        raise CircuitOpen("provider cooling down for 53.4s")
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", cooling)
+    monkeypatch.setattr(ingestion_service, "fetch_pool_swaps", lambda *args, **kwargs: [])
+
+    pair = NormalizedPair(
+        chain_slug="solana",
+        dex_id="raydium",
+        pair_address="PoolCircuitOpenHealth",
+        base_address="MintCircuitOpenHealth",
+        base_symbol="COOL",
+        base_name="Circuit Open Token",
+        quote_address="USDC",
+        quote_symbol="USDC",
+        quote_name="USD Coin",
+        pair_created_at=now,
+        price_usd=1.0,
+        volume_usd=0.0,
+        liquidity_usd=80000.0,
+        reserve_base=None,
+        reserve_quote=None,
+        buys=0,
+        sells=0,
+        trades=0,
+    )
+
+    service = IngestionService()
+    assert service._first_buy_swaps(pair, now, set()) == ([], False)
+    assert service._first_buy_stats["circuit_open_failures"] == 1
+    assert service._first_buy_stats["rate_limit_failures"] == 0
+
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "yellow"
+    assert health.error_count == 0
+    assert "circuit open" in health.message
+    assert "rate limited" not in health.message
+    assert "circuit_open_failures=1" in health.message
+
+
+def test_first_buy_health_does_not_hide_failure_after_rate_limit(session) -> None:
+    """A non-rate provider failure must remain visible alongside pacing."""
+    service = IngestionService()
+    service._first_buy_provider_backoff = True
+    service._first_buy_stats.update(
+        gecko_failures=2,
+        rate_limit_failures=1,
+        provider_failures=1,
+    )
+
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "red"
+    assert health.error_count == 1
+    assert "pacing with provider failures:" in health.message
+    assert "provider_failures=1" in health.message
+    assert "rate_limit_failures=1" in health.message
+
+
 def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) -> None:
     """The 429 backoff is per scan: the next scan fetches that pool again.
 
@@ -1808,12 +1881,19 @@ def test_birdeye_without_api_key_skips_feed_and_reports_configuration(session, m
     assert health.error_count == 0
 
 
-def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkeypatch) -> None:
-    """A set-but-rejected key must read as a disabled configuration state."""
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [(401, "Unauthorized"), (403, "Forbidden")],
+)
+def test_birdeye_rejected_key_is_reported_as_configuration_error(
+    session, monkeypatch, status: int, label: str
+) -> None:
+    """A set-but-rejected key, including 403, must read as a disabled configuration state."""
     seed_reference(session)
     monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
     request = httpx.Request("GET", "https://public-api.birdeye.so/defi/v2/tokens/new_listing")
-    response = httpx.Response(401, request=request)
+    response = httpx.Response(status, request=request)
+    error = f"{status} {label}"
 
     class RejectedKeyClient:
         BASE_URL = "https://public-api.birdeye.so"
@@ -1822,7 +1902,7 @@ def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkey
             assert api_key == "test-birdeye-key"
 
         def new_tokens(self, limit: int = 20):
-            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+            raise httpx.HTTPStatusError(error, request=request, response=response)
 
         def close(self) -> None:
             pass
@@ -1841,7 +1921,7 @@ def test_birdeye_rejected_key_is_reported_as_configuration_error(session, monkey
     assert health.state == "yellow"
     assert "disabled" in (health.message or "")
     assert "BIRDEYE_API_KEY" in (health.message or "")
-    assert "401 Unauthorized" in (health.message or "")
+    assert error in (health.message or "")
     assert "invalid" in (health.message or "")
     assert "skip the feed" in (health.message or "")
     assert health.error_count == 0
@@ -1894,7 +1974,18 @@ def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypat
     assert calls == ["/defi/v2/tokens/new_listing"]
 
 
-def test_birdeye_429_honors_retry_after_header(session, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("header", "expected_seconds"),
+    [
+        ("7", 7.0),
+        # The parser must cap an oversized provider delay before the gate uses
+        # it, otherwise one header can block the feed for days.
+        ("999999999", 300.0),
+    ],
+)
+def test_birdeye_429_honors_retry_after_header(
+    session, monkeypatch, header, expected_seconds
+) -> None:
     """The provider's Retry-After delay replaces the configured cooldown."""
     seed_reference(session)
     monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
@@ -1906,7 +1997,7 @@ def test_birdeye_429_honors_retry_after_header(session, monkeypatch) -> None:
     def rate_limited(self, path: str, **kwargs) -> None:
         calls.append(path)
         request = httpx.Request("GET", f"https://public-api.birdeye.so{path}")
-        response = httpx.Response(429, request=request, headers={"Retry-After": "7"})
+        response = httpx.Response(429, request=request, headers={"Retry-After": header})
         raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
 
     monkeypatch.setattr("common.http.HttpClient.get_json", rate_limited)
@@ -1919,11 +2010,11 @@ def test_birdeye_429_honors_retry_after_header(session, monkeypatch) -> None:
         .order_by(models.SystemHealth.ts.desc())
     ).first()
     assert health is not None
-    assert "cooling down for 7s" in (health.message or "")
+    assert f"cooling down for {expected_seconds:g}s" in (health.message or "")
 
-    # At the header's deadline the gate reopens; a 3600s configured fallback
+    # At the capped deadline the gate reopens; a 3600s configured fallback
     # would still defer this request without calling the provider.
-    clock[0] += 7.1
+    clock[0] += expected_seconds + 0.1
     assert service._ingest_birdeye_solana(session) == 0
     assert calls == [
         "/defi/v2/tokens/new_listing",
