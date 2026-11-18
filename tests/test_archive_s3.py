@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import boto3
 import pytest
@@ -26,11 +27,11 @@ DECISION_TS = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
 BUCKET = "raw-evidence"
 
 
-def _settings(**overrides) -> Settings:
+def _settings(tmp_path: Path, **overrides) -> Settings:
     kwargs: dict[str, object] = {
         "archive_enabled": True,
         "archive_backend": "s3",
-        "archive_local_dir": "/tmp/serpent-s3-tests",
+        "archive_local_dir": str(tmp_path / "s3-archive"),
         "archive_compact_after_hours": 72.0,
         "archive_retention_days": 30,
         "archive_batch_size": 5_000,
@@ -91,8 +92,8 @@ def _seed_evidence(session, *, count: int = 2, days_ago: float = 11.0, batch: st
     return source
 
 
-def test_s3_store_put_object_and_object_exists(s3) -> None:
-    store = S3ArchiveStore(_settings())
+def test_s3_store_put_object_and_object_exists(s3, tmp_path) -> None:
+    store = S3ArchiveStore(_settings(tmp_path))
 
     assert store.object_exists("evidence/source=x/year=2026/month=07/part-0.parquet") is False
     assert store.put_object(
@@ -101,8 +102,8 @@ def test_s3_store_put_object_and_object_exists(s3) -> None:
     assert store.object_exists("evidence/source=x/year=2026/month=07/part-0.parquet") is True
 
 
-def test_s3_store_list_objects_filters_prefix_and_parquet(s3) -> None:
-    store = S3ArchiveStore(_settings())
+def test_s3_store_list_objects_filters_prefix_and_parquet(s3, tmp_path) -> None:
+    store = S3ArchiveStore(_settings(tmp_path))
     store.put_object("evidence/source=a/year=2026/month=06/part-0.parquet", b"a")
     store.put_object("evidence/source=b/year=2026/month=07/part-0.parquet", b"b")
     store.put_object("evidence/source=c/year=2026/month=07/part-0.parquet", b"c")
@@ -125,7 +126,7 @@ def test_s3_store_list_objects_filters_prefix_and_parquet(s3) -> None:
 
 
 def test_s3_store_download_to_materializes_object(s3, tmp_path) -> None:
-    store = S3ArchiveStore(_settings())
+    store = S3ArchiveStore(_settings(tmp_path))
     store.put_object("evidence/source=a/year=2026/month=06/part-0.parquet", b"lake-bytes")
 
     dest = store.download_to(
@@ -141,7 +142,7 @@ def test_s3_query_archive_skips_unreadable_partition(session, s3, tmp_path, monk
     If all objects are unreadable it returns an honest empty result."""
     _seed_evidence(session, count=2, days_ago=11.0)
     _seed_evidence(session, count=1, days_ago=77.0, batch="b")
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
     RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
     keys = sorted(store.list_objects("evidence"))
@@ -174,7 +175,7 @@ def test_s3_second_batch_in_same_partition_merges_not_clobbers(session, s3, tmp_
     retention report show fake negative lake growth.
     """
     _seed_evidence(session, count=2, days_ago=11.0)
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
     compactor = RawEvidenceCompactor(store=store, settings=settings)
 
@@ -199,8 +200,10 @@ def test_s3_second_batch_in_same_partition_merges_not_clobbers(session, s3, tmp_
 
 
 def test_make_store_selects_backend_by_config(s3, tmp_path) -> None:
-    assert isinstance(make_store(_settings()), S3ArchiveStore)
-    local = _settings(archive_backend="local", archive_local_dir=str(tmp_path), minio_bucket=BUCKET)
+    assert isinstance(make_store(_settings(tmp_path)), S3ArchiveStore)
+    local = _settings(
+        tmp_path, archive_backend="local", archive_local_dir=str(tmp_path), minio_bucket=BUCKET
+    )
     assert isinstance(make_store(local), LocalArchiveStore)
 
 
@@ -209,7 +212,7 @@ def test_s3_compactor_writes_partitions_and_query_archive_reads_lake(session, s3
     the DuckDB query path materializes the objects and returns the rows."""
     source = _seed_evidence(session, count=2, days_ago=11.0)
     _seed_evidence(session, count=1, days_ago=77.0, batch="b")
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
 
     result = RawEvidenceCompactor(store=store, settings=settings).compact(session, DECISION_TS)
@@ -246,7 +249,7 @@ def test_s3_merge_retries_on_etag_conflict(session, s3, tmp_path, monkeypatch) -
     from ops.archive import PartitionConflictError
 
     _seed_evidence(session, count=2, days_ago=11.0)
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
     compactor = RawEvidenceCompactor(store=store, settings=settings)
     compactor.compact(session, DECISION_TS)
@@ -286,7 +289,7 @@ def test_s3_initial_create_race_merges_instead_of_clobbering(
     merge path, and land the full row set.
     """
     _seed_evidence(session, count=2, days_ago=11.0, batch="a")
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
     compactor = RawEvidenceCompactor(store=store, settings=settings)
     compactor.compact(session, DECISION_TS)  # real: creates a valid partition
@@ -314,34 +317,34 @@ def test_s3_initial_create_race_merges_instead_of_clobbering(
     assert rows == [{"n": 5}]
 
 
-def test_s3_put_object_if_absent_rejects_existing_object(s3) -> None:
+def test_s3_put_object_if_absent_rejects_existing_object(s3, tmp_path) -> None:
     """The conditional-create primitive rejects an existing key (moto-backed
     S3 semantics for IfNoneMatch="*")."""
     from botocore.exceptions import ClientError  # noqa: F401 - documents the mapping
 
     from ops.archive import PartitionConflictError
 
-    store = S3ArchiveStore(_settings())
+    store = S3ArchiveStore(_settings(tmp_path))
     store.put_object_if_absent("evidence/k.parquet", b"first")
     with pytest.raises(PartitionConflictError):
         store.put_object_if_absent("evidence/k.parquet", b"second")
 
 
-def test_s3_read_object_round_trips_stored_bytes(s3) -> None:
+def test_s3_read_object_round_trips_stored_bytes(s3, tmp_path) -> None:
     """M3: the S3 read-back primitive returns exactly the stored bytes, so
     the post-write hash verification compares against reality."""
-    store = S3ArchiveStore(_settings())
+    store = S3ArchiveStore(_settings(tmp_path))
     key = "evidence/source=x/year=2026/month=07/part-0.parquet"
     store.put_object(key, b"parquet-bytes")
     assert store.read_object(key) == b"parquet-bytes"
 
 
-def test_s3_same_size_corruption_fails_post_write_hash(s3, session, monkeypatch) -> None:
+def test_s3_same_size_corruption_fails_post_write_hash(s3, session, tmp_path, monkeypatch) -> None:
     """M3: same-size corruption on the S3 backend is caught by the read-back
     SHA-256 check (the size check alone would pass)."""
     from ops.archive import ArchiveWriteError
 
-    settings = _settings()
+    settings = _settings(tmp_path)
     store = S3ArchiveStore(settings)
     _seed_evidence(session, count=1, batch="a")
     session.commit()

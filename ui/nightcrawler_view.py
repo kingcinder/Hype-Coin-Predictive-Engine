@@ -662,8 +662,10 @@ def nightcrawler_view() -> None:
         rows = []
         for name, info in status.items():
             reliability = info.get("reliability", 0)
-            policy_disabled = info.get("status") == "disabled_by_policy"
-            if policy_disabled:
+            state = info.get("status")
+            policy_disabled = state == "disabled_by_policy"
+            skipped = state == "skipped"
+            if policy_disabled or skipped:
                 status_icon = "⚪"
             elif reliability >= 0.9:
                 status_icon = "\U0001f7e2"
@@ -671,18 +673,25 @@ def nightcrawler_view() -> None:
                 status_icon = "\U0001f7e1"
             else:
                 status_icon = "\U0001f534"
+            if policy_disabled:
+                fleet_state = "Disabled by policy"
+            elif skipped:
+                fleet_state = f"Skipped: {info.get('reason', 'not configured')}"
+            else:
+                fleet_state = "Active"
+            unavailable = policy_disabled or skipped
             rows.append(
                 {
                     "Status": status_icon,
                     "Crawler": _render_source_badge(name),
-                    "Fleet state": "Disabled by policy" if policy_disabled else "Active",
-                    "Reliability": "—" if policy_disabled else f"{reliability:.1%}",
-                    "Total Runs": "—" if policy_disabled else info.get("total_runs", 0),
-                    "Total Items": "—" if policy_disabled else info.get("total_items", 0),
-                    "Error Rate": "—" if policy_disabled else f"{info.get('error_rate', 0):.1%}",
-                    "Last Run": "—" if policy_disabled else str(info.get("last_run", "never"))[:19],
+                    "Fleet state": fleet_state,
+                    "Reliability": "—" if unavailable else f"{reliability:.1%}",
+                    "Total Runs": "—" if unavailable else info.get("total_runs", 0),
+                    "Total Items": "—" if unavailable else info.get("total_items", 0),
+                    "Error Rate": "—" if unavailable else f"{info.get('error_rate', 0):.1%}",
+                    "Last Run": "—" if unavailable else str(info.get("last_run", "never"))[:19],
                     "Freq Multiplier": (
-                        "—" if policy_disabled else f"{info.get('frequency_multiplier', 1.0):.2f}x"
+                        "—" if unavailable else f"{info.get('frequency_multiplier', 1.0):.2f}x"
                     ),
                 }
             )

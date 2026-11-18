@@ -9,7 +9,7 @@ from functools import lru_cache
 
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import get_settings, secret_value
 from common.logging import get_logger
 from common.time import utc_now
 from common.urls import redact_url
@@ -171,6 +171,7 @@ class RpcEndpointPool:
         return chosen
 
     def mark_success(self, url: str, *, live: bool = True) -> None:
+        """Restore endpoint health; ``live=False`` skips the live-success counter."""
         announce = False
         with self._lock:
             if url not in self._health:
@@ -449,6 +450,20 @@ def get_rpc_pool(chain_slug: str = "solana") -> RpcEndpointPool:
     )
 
 
+def _optional_public_fallback(chain_slug: str) -> str | None:
+    """Describe a keyless public pool without changing its health severity."""
+    settings = get_settings()
+    if chain_slug == "solana" and not secret_value(settings.helius_api_key):
+        return "optional public fallback (HELIUS_API_KEY unset)"
+    if (
+        chain_slug == "ethereum"
+        and not secret_value(settings.alchemy_api_key)
+        and not settings.quicknode_evm_rpc_url
+    ):
+        return "optional public fallback (ALCHEMY_API_KEY unset)"
+    return None
+
+
 def _pool_health_row(session: Session, chain_slug: str) -> None:
     pool = get_rpc_pool(chain_slug)
     states = pool.snapshot()
@@ -459,10 +474,10 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
         redact_url(state.url) for state in states if state.health < HEALTH_START and not state.down
     ]
     state = "red" if down else ("yellow" if degraded else "ok")
-    message = (
-        f"{chain_slug} rpc pool: {len(states)} endpoints, {len(down)} down, "
-        f"{len(degraded)} degraded"
-    )
+    message = f"{chain_slug} rpc pool: "
+    if fallback := _optional_public_fallback(chain_slug):
+        message += f"{fallback}; "
+    message += f"{len(states)} endpoints, {len(down)} down, {len(degraded)} degraded"
     if down:
         message = f"{message}; down={down[0]}"
     elif degraded:
@@ -473,8 +488,9 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
         message = f"{message}; last_success={redact_url(last_success)}"
     requests = sum(state.request_count for state in states)
     successes = sum(state.success_count for state in states)
-    if requests:
-        message = f"{message}; requests={requests} successes={successes}"
+    # Always report traffic, including zero.  An idle "0 down" row must not
+    # read as evidence that endpoints are serving requests.
+    message = f"{message}; requests={requests} successes={successes}"
     record_health(
         session,
         component=f"rpc_pool:{chain_slug}",

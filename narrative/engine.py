@@ -313,7 +313,8 @@ class NarrativeEngine:
                     endpoint_pool.mark_failure(endpoint_url)
                 raise
             if endpoint_pool is not None and endpoint_url is not None:
-                endpoint_pool.mark_success(endpoint_url)
+                # Narrative endpoints are HTTP sources, not JSON-RPC calls.
+                endpoint_pool.mark_success(endpoint_url, live=False)
             store_raw_evidence(
                 session,
                 source=source,
@@ -351,12 +352,31 @@ class NarrativeEngine:
             session.commit()
             return stored
         except Exception as exc:  # noqa: BLE001 - preserve per-source failure.
-            log.warning("narrative_crawl_failed", source=source_name, error=redact_url(str(exc)))
+            safe_error = redact_url(str(exc))
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            # Reddit disabled logged-out .json access. This crawler deliberately
+            # uses the public endpoint and does not implement OAuth, so a 403 is
+            # a provider-side block, not a missing REDDIT_CLIENT_* setting.
+            reddit_blocked = source_name == "reddit_public" and status == 403
+            log.warning(
+                "narrative_crawl_failed",
+                source=source_name,
+                error=safe_error,
+                provider_block=reddit_blocked,
+            )
+            if reddit_blocked:
+                message = (
+                    "blocked: Reddit returned 403 for the unauthenticated public JSON feed; "
+                    "this is a provider-side block of logged-out .json access, not a missing "
+                    "OAuth/REDDIT_CLIENT_* credential."
+                )
+            else:
+                message = safe_error
             record_health(
                 session,
                 component=f"source:{source_name}",
                 state="red",
-                message=redact_url(str(exc)),
+                message=message,
                 error_count=1,
             )
             session.commit()

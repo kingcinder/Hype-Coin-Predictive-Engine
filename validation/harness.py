@@ -725,6 +725,7 @@ def load_unresolved_outcome_count(session: Session) -> int:
     scored_ats = session.scalars(
         select(models.RiskOutcome.scored_at).where(
             models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.censored_at.is_(None),
             models.RiskOutcome.label_version == "v2_bounded",
         )
     ).all()

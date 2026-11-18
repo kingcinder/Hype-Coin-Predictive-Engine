@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import respx
-from httpx import Response
+from httpx import Request, Response
 from sqlalchemy import func, select
 
 from narrative.crawlers import (
@@ -61,6 +61,40 @@ def test_reddit_crawler_parses_public_json() -> None:
     assert len(items) == 1
     assert items[0]["title"] == "HYPE token presale"
     assert items[0]["source_domain"] == "reddit.com"
+
+
+def test_reddit_403_records_provider_block_not_missing_oauth(session) -> None:
+    class _BlockedReddit:
+        def fetch(self):
+            request = Request("GET", "https://www.reddit.com/r/CryptoMoonShots/new.json")
+            response = Response(403, request=request, text="<html>You've been blocked</html>")
+            response.raise_for_status()
+
+    seed_market_asset(session)
+    engine = NarrativeEngine()
+    count = engine._crawl_social(
+        session,
+        crawler=_BlockedReddit(),
+        source_name="reddit_public",
+        source_type="social",
+        base_url="https://www.reddit.com",
+        endpoint_pool=None,
+        endpoint_url=None,
+        decision_ts=NOW,
+    )
+
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:reddit_public")
+        .order_by(models.SystemHealth.id.desc())
+    )
+    assert count == 0
+    assert health is not None
+    assert health.state == "red"
+    assert health.message is not None
+    assert "provider-side block" in health.message
+    assert "not a missing OAuth" in health.message
+    assert "REDDIT_CLIENT_*" in health.message
 
 
 @respx.mock

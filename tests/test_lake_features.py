@@ -9,6 +9,7 @@ from common.config import Settings, get_settings
 from features.definitions import FEATURE_NAMES
 from features.factory import FeatureFactory, build_and_persist_features
 from features.lake import LAKE_FEATURE_NAMES, LakeFeatureFactory
+from ingestion.holder_tracker import record_holder_metrics
 from ops.archive import LocalArchiveStore, RawEvidenceCompactor
 from storage import models
 from storage.repository import (
@@ -109,14 +110,16 @@ def _seed_holder_evidence(
     source_name: str = "solana_rpc",
     mint_address: str | None = None,
     snapshots: list[tuple[int, list[tuple[str, float]]]] | None = None,
+    holder_counts: list[int | None] | None = None,
 ) -> None:
     """Seed the holder-snapshot RPC evidence (and, on the SQL side, the
     Holder rows it produces in production) for the parity comparison.
 
     ``source_name`` drives which chain_rpc source the evidence lands on
-    (``solana_rpc`` for Solana RPC, ``evm_holders`` for Blockscout) — the lake
+    (``solana_rpc`` for Solana RPC, ``evm_holders`` for GoPlus) — the lake
     reconstruction is chain-agnostic and must serve both. ``snapshots`` are
-    (hours_before_decision, accounts) pairs, defaulting to the Solana arc.
+    (hours_before_decision, accounts) pairs, defaulting to the Solana arc;
+    ``holder_counts`` optionally supplies the exact count for each snapshot.
     """
     source = get_or_create_source(
         session,
@@ -127,20 +130,26 @@ def _seed_holder_evidence(
     )
     mint = mint_address or asset.address
     snapshots = snapshots or [(2, SNAPSHOT_A), (0, SNAPSHOT_B)]
-    for hours_ago, accounts in snapshots:
+    if holder_counts is not None and len(holder_counts) != len(snapshots):
+        raise ValueError("holder_counts must align with snapshots")
+    for index, (hours_ago, accounts) in enumerate(snapshots):
         observed = DECISION - timedelta(hours=hours_ago)
+        payload = {
+            "asset_id": asset.id,
+            "mint": mint,
+            "supply": SUPPLY,
+            "largest_accounts": [
+                {"address": address, "uiAmountString": str(balance)}
+                for address, balance in accounts
+            ],
+        }
+        exact_count = holder_counts[index] if holder_counts is not None else None
+        if exact_count is not None:
+            payload["holder_count"] = exact_count
         store_raw_evidence(
             session,
             source=source,
-            payload={
-                "asset_id": asset.id,
-                "mint": mint,
-                "supply": SUPPLY,
-                "largest_accounts": [
-                    {"address": address, "uiAmountString": str(balance)}
-                    for address, balance in accounts
-                ],
-            },
+            payload=payload,
             observed_at=observed,
         )
         if with_sql_rows:
@@ -155,6 +164,15 @@ def _seed_holder_evidence(
                     observed_at=observed,
                     balance=balance,
                     pct_supply=balance / SUPPLY,
+                )
+            if exact_count is not None:
+                pcts = [balance / SUPPLY for _, balance in accounts]
+                record_holder_metrics(
+                    session,
+                    asset.id,
+                    top10_pct=sum(sorted(pcts, reverse=True)[:10]),
+                    holder_count=exact_count,
+                    observed_at=observed,
                 )
 
 
@@ -554,7 +572,7 @@ def test_build_and_persist_features_lake_source_switch(session, tmp_path, monkey
     # The on-chain holder and contract-flag features reconstruct from the
     # archived RPC evidence even with no live Holder/ContractFlag tables.
     assert output[asset.id]["holder_count"].value == pytest.approx(7.0)
-    assert output[asset.id]["holder_growth"].value == pytest.approx(2.0)
+    assert output[asset.id]["holder_growth"].value == pytest.approx(1.0)
     assert output[asset.id]["top_holder_concentration"].value == pytest.approx(0.28)
     # 1 low-liquidity scan + 2 contract-analysis findings (mint authority,
     # ownership not renounced) all reconstruct from the archived evidence.
@@ -604,7 +622,7 @@ def test_lake_read_path_matches_sql_read_path(session, tmp_path) -> None:
     # FULL contract-flag count (1 low_liquidity + 2 contract-analysis
     # findings) reconstruct identically from the lake.
     assert lake_values["holder_count"].value == pytest.approx(7.0)
-    assert lake_values["holder_growth"].value == pytest.approx(2.0)
+    assert lake_values["holder_growth"].value == pytest.approx(1.0)
     assert lake_values["top_holder_concentration"].value == pytest.approx(0.28)
     assert lake_values["suspicious_contract_flags"].value == pytest.approx(3.0)
 
@@ -735,12 +753,9 @@ def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
     assert lake_values["suspicious_contract_flags"].value == 0.0
 
 
-def test_lake_reconstructs_evm_holders_from_blockscout_evidence(session, tmp_path) -> None:
-    """The lake path reconstructs holder_count / holder_growth /
-    top_holder_concentration for a Base/Ethereum asset from the archived
-    ``evm_holders`` evidence exactly as for Solana — the
-    reconstruction is chain-agnostic, keyed on ``source_type='chain_rpc'``
-    plus the mint/supply/largest_accounts payload shape."""
+def test_lake_reconstructs_evm_holders_from_goplus_evidence(session, tmp_path) -> None:
+    """The lake reconstructs the exact GoPlus holder count while keeping
+    concentration from the ranked top-10 list, matching the SQL path."""
     chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
     created_at = DECISION - timedelta(hours=6)
     evm_address = "0xTokenBase11111111111111111111111111111111"
@@ -785,6 +800,7 @@ def test_lake_reconstructs_evm_holders_from_blockscout_evidence(session, tmp_pat
         with_sql_rows=True,
         source_name="evm_holders",
         snapshots=[(2, evm_a), (0, evm_b)],
+        holder_counts=[12, 42],
     )
     session.flush()
 
@@ -802,8 +818,8 @@ def test_lake_reconstructs_evm_holders_from_blockscout_evidence(session, tmp_pat
         store=LocalArchiveStore(tmp_path), settings=settings
     ).build_for_asset(asset_address=evm_address, decision_ts=DECISION)
 
-    assert lake_values["holder_count"].value == pytest.approx(7.0)
-    assert lake_values["holder_growth"].value == pytest.approx(2.0)
+    assert lake_values["holder_count"].value == pytest.approx(42.0)
+    assert lake_values["holder_growth"].value == pytest.approx(15.0)
     assert lake_values["top_holder_concentration"].value == pytest.approx(0.28)
     for name in ("holder_count", "holder_growth", "top_holder_concentration"):
         assert lake_values[name].missing == sql_values[name].missing, f"{name} missing"

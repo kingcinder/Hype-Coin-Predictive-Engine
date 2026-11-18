@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace as _replace
 from datetime import datetime
 from typing import cast
@@ -23,6 +24,13 @@ from storage import models
 from storage.repository import assets_for_ids
 
 log = get_logger(__name__)
+
+# Bounded scan diagnostics: a mature universe is thousands of assets, so a
+# per-asset log line would drown the scan. Checkpoint before each batch of 100
+# (the last start line identifies a hung asset), summarize at the same cadence,
+# and call out only assets that exceed the slow threshold.
+_SCORING_PROGRESS_EVERY = 100
+_SCORING_SLOW_ASSET_SECONDS = 2.0
 
 
 def _heuristic_band_from_score(h_score: float | None) -> str | None:
@@ -86,7 +94,20 @@ class ScoringEngine:
         result_by_asset: dict[int, ScoreResult] = {}  # per-asset ScoreResult for LLM re-upsert
         price_updates: list[PriceUpdate] = []
         ts_iso = decision_ts.isoformat()
-        for asset_id, features in feature_map.items():
+        total_assets = len(feature_map)
+        loop_started = time.monotonic()
+        for index, (asset_id, features) in enumerate(feature_map.items(), start=1):
+            asset_started = time.monotonic()
+            if index == 1 or index % _SCORING_PROGRESS_EVERY == 0 or index == total_assets:
+                log.info(
+                    "scoring_progress",
+                    phase="asset_start",
+                    asset_id=asset_id,
+                    processed=index - 1,
+                    total=total_assets,
+                    elapsed_sec=round(asset_started - loop_started, 3),
+                    decision_ts=ts_iso,
+                )
             raw = {name: feature.value for name, feature in features.items()}
             missing = [name for name, feature in features.items() if feature.missing]
             raw, masked_forecast = mask_unreliable_forecast(session, raw)
@@ -174,6 +195,29 @@ class ScoringEngine:
             # Per-asset commit: scoring an entire universe in one transaction
             # held SQLite's write lock for ~30s and starved the write queue.
             session.commit()
+            asset_elapsed = time.monotonic() - asset_started
+            if asset_elapsed >= _SCORING_SLOW_ASSET_SECONDS:
+                log.warning(
+                    "scoring_slow_asset",
+                    asset_id=asset_id,
+                    elapsed_sec=round(asset_elapsed, 3),
+                    processed=index,
+                    total=total_assets,
+                    decision_ts=ts_iso,
+                )
+            if index % _SCORING_PROGRESS_EVERY == 0 or index == total_assets:
+                elapsed = time.monotonic() - loop_started
+                log.info(
+                    "scoring_progress",
+                    phase="asset_complete",
+                    asset_id=asset_id,
+                    processed=index,
+                    total=total_assets,
+                    elapsed_sec=round(elapsed, 3),
+                    rate_per_sec=round(index / elapsed, 2) if elapsed > 0 else 0.0,
+                    last_asset_sec=round(asset_elapsed, 3),
+                    decision_ts=ts_iso,
+                )
         # ── Optional LLM batch layer, isolated by the phase watchdog ───────
         # Slow local generation must not hold the scan loop; timed-out daemon
         # work has bounded HTTP requests and is skipped until it unwinds.

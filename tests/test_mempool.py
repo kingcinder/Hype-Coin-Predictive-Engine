@@ -203,6 +203,80 @@ def test_evm_factory_watcher_seeds_pool_from_pair_created(session, monkeypatch) 
     assert round(float(snapshots[0].reserve_usd or 0.0), 2) == 5.0
 
 
+def test_evm_factory_watcher_falls_back_when_getlogs_is_unsupported(session, monkeypatch) -> None:
+    """Base discovery must not fail when the healthiest endpoint refuses getLogs.
+
+    Public endpoints can answer eth_blockNumber (and every eth_call) while
+    returning a JSON-RPC error for eth_getLogs. The watcher must keep the
+    endpoint healthy and try the next pool endpoint for the log query.
+    """
+    primary = "https://primary.base.example/"
+    fallback = "https://fallback.base.example/"
+    pool = RpcEndpointPool([primary, fallback], failure_threshold=2, chain_slug="base")
+    monkeypatch.setattr(
+        "ingestion.source_clients.get_rpc_pool",
+        lambda chain_slug: pool if chain_slug == "base" else RpcEndpointPool([]),
+    )
+    from ingestion.service import IngestionService
+
+    IngestionService().ensure_reference_data(session)
+    session.flush()
+    source = session.scalar(select(models.Source).where(models.Source.name == "evm_rpc"))
+    assert source is not None
+
+    token0 = "aaaabbbbccccddddeeeeffff0000111122223333"
+    token1 = "1111222233334444555566667777888899990000"
+    pair = "ffff000011112222333344445555666677778888"
+    factory = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
+    log_payload = {
+        "address": factory.lower(),
+        "topics": [
+            PAIR_CREATED_TOPIC,
+            _topic_address(token0),
+            _topic_address(token1),
+            _topic_address(pair),
+        ],
+        "data": _uint_word(1),
+        "blockNumber": "0x10",
+        "logIndex": "0x0",
+        "transactionHash": "0xabc",
+    }
+    calls: list[str] = []
+
+    def rpc_handler(request):
+        payload = json.loads(request.content)
+        method = payload["method"]
+        if method == "eth_blockNumber":
+            return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x100"})
+        if method == "eth_getLogs":
+            calls.append(str(request.url))
+            if str(request.url).startswith(primary):
+                return Response(
+                    200,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "error": {"code": -32601, "message": "method not found"},
+                    },
+                )
+            return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": [log_payload]})
+        return Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x"})
+
+    with respx.mock:
+        respx.post(primary).mock(side_effect=rpc_handler)
+        respx.post(fallback).mock(side_effect=rpc_handler)
+        watcher = EVMFactoryWatcher("base", factory)
+        monkeypatch.setattr(watcher, "_store_pair", lambda *_args, **_kwargs: True)
+        try:
+            count = watcher.watch(session, source=source, decision_ts=NOW)
+        finally:
+            watcher.close()
+
+    assert count == 1
+    assert calls == [primary, fallback]
+    assert pool.snapshot()[0].down is False
+
+
 def test_evm_factory_watcher_stable_token0_assigns_meme_base(session, monkeypatch) -> None:
     """H11: the volatile token is always the base even when the stablecoin is
     token0 (i.e. the stablecoin's address sorts lower)."""

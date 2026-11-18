@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Mapping
+import math
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.request import getproxies
 
@@ -11,7 +14,13 @@ import httpx
 # time (the exact site of the H26 InvalidURL crash); it is not re-exported at
 # the package top level.
 from httpx._utils import URLPattern
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from common.config import get_settings
 from common.logging import get_logger
@@ -125,6 +134,36 @@ def build_httpx_client(
         raise
 
 
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """Parse an HTTP ``Retry-After`` delay, or return None when unusable.
+
+    Supports both forms allowed by RFC 9110: delta-seconds and an HTTP-date.
+    Invalid, non-finite, or past dates fall back to the caller's configured
+    cooldown rather than extending the circuit indefinitely.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After")
+    if raw is None or not str(raw).strip():
+        return None
+    value = str(raw).strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = (retry_at - datetime.now(UTC)).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
 def _retryable_request_error(exc: BaseException) -> bool:
     """Retry transport failures and 429/5xx, never other 4xx client errors."""
     if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
@@ -149,6 +188,23 @@ def jittered_backoff(*, initial: float, maximum: float) -> Any:
         return factory(wait_initial=initial, wait_max=maximum)
     except TypeError:
         return factory(initial=initial, max=maximum)
+
+
+def retry_after_or_backoff(*, initial: float, maximum: float) -> Callable[[RetryCallState], float]:
+    """Wait for a 429's ``Retry-After``, otherwise use jittered backoff."""
+    fallback = jittered_backoff(initial=initial, maximum=maximum)
+
+    def wait(retry_state: RetryCallState) -> float:
+        outcome = retry_state.outcome
+        if outcome is not None and outcome.failed:
+            exc = outcome.exception()
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+                seconds = retry_after_seconds(exc)
+                if seconds is not None:
+                    return seconds
+        return float(fallback(retry_state))
+
+    return wait
 
 
 class HttpClient:
@@ -201,7 +257,7 @@ class HttpClient:
 
     @retry(
         retry=retry_if_exception(_retryable_request_error),
-        wait=jittered_backoff(initial=0.5, maximum=8.0),
+        wait=retry_after_or_backoff(initial=0.5, maximum=8.0),
         stop=stop_after_attempt(3),
         reraise=True,
     )

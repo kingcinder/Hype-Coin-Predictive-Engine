@@ -29,12 +29,20 @@ _TELEGRAM_BOT_TOKEN = re.compile(r"(/bot)[A-Za-z0-9:_-]{20,}")
 _DISCORD_WEBHOOK_TOKEN = re.compile(r"(/api/webhooks/\d+/)[A-Za-z0-9_-]{20,}")
 _SLACK_WEBHOOK_TOKEN = re.compile(r"(/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/)[A-Za-z0-9_-]+")
 _QUICKNODE_PATH_TOKEN = re.compile(r"^/[A-Za-z0-9_-]{12,}")
+# Exception messages embed the full request URL, so a hostname-gated check on
+# ``urlsplit`` is not enough: the entire message becomes the path.  Match the
+# QuickNode URL directly wherever it appears in the text.
+_QUICKNODE_URL_TOKEN = re.compile(
+    r"(https?://[A-Za-z0-9.-]+\.quiknode\.pro/)([A-Za-z0-9_-]{12,})(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 
 
 def redact_url(url: str) -> str:
     """Return ``url`` with sensitive query values replaced by ``***``."""
     if not url:
         return url
+    url = _QUICKNODE_URL_TOKEN.sub(r"\1***", url)
     try:
         parts = urlsplit(url)
     except ValueError:

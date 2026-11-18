@@ -478,15 +478,22 @@ def _open_drift_alert(
 ) -> None:
     """Open or re-arm the single deduped score_drift Alert."""
     existing = session.scalar(
-        select(models.Alert).where(
+        select(models.Alert)
+        .where(
             models.Alert.alert_type == SCORE_DRIFT_COMPONENT,
-            models.Alert.state == "open",
+            # An ACKed alert is still the active sign-off for this drift
+            # episode. Creating a second open alert here would leave an
+            # unacked alert behind after rescue closes the operator's ACKed
+            # one (the CLI probe runs before rescue).
+            models.Alert.state.in_(("open", AlertState.ACKED.value)),
         )
+        .order_by(desc(models.Alert.created_at))
+        .limit(1)
     )
     if existing is not None:
-        # Re-arm the message but keep the original creation time — the alert's
-        # age stays honest even across repeated red scans (mirrors
-        # ``ops/backtest_drift._open_drift_alert``).
+        # Refresh the message but keep the original creation time and state —
+        # the alert's age stays honest across repeated red scans, and an
+        # ACKed sign-off is not silently converted back to open.
         text = "; ".join(reasons) if reasons else "distribution drifted"
         existing.message = f"Score-drift: {text}"
         return

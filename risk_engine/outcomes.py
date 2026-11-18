@@ -8,11 +8,15 @@ calibrator so risk thresholds learn from real market outcomes.
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from common.config import get_settings
 from common.enums import RiskBand
@@ -50,10 +54,13 @@ class RiskOutcomeReport:
     total_collapsed: int = 0
     # Informational only: the health state is age-based, not growth-based.
     unresolved_grew: bool = False
-    # Predictions past their window that still have no established outcome
-    # (evaluated_at IS NULL). A growing count means withheld labels are
-    # accumulating instead of being resolved.
+    # Due predictions that still have no established outcome and are still
+    # eligible for labelling.  Permanently unlabelable windows are counted in
+    # ``censored`` instead, so they cannot grow this backlog forever.
     unresolved: int = 0
+    # Due predictions whose window closed with no collapse/survival phase.
+    # They remain in ``risk_outcomes`` for audit but are not re-evaluated.
+    censored: int = 0
     # ML-specific band outcomes, keyed by the band the ML scorer predicted
     # (from RiskOutcome.details["ml_risk_band"]).  These feed the calibrator's
     # ML probability thresholds so the ML scorer calibrates independently of
@@ -75,6 +82,11 @@ UNRESOLVED_OUTCOME_COMPONENT = "outcome_labels"
 #: Bounded label version for outcome tracking (v1_unbounded → v2_bounded)
 LABEL_VERSION = "v2_bounded"
 
+#: Persist this many outcome changes per transaction. SQLite has one writer;
+#: committing the backlog in bounded batches keeps that lock from spanning the
+#: whole evaluation when a large due backlog is labelled at once.
+OUTCOME_BATCH_SIZE = 500
+
 
 def _lifecycle_phase_as_of(session: Session, asset_id: int, as_of: datetime) -> str | None:
     """Return the most recent lifecycle phase at or before ``as_of``.
@@ -94,6 +106,41 @@ def _lifecycle_phase_as_of(session: Session, asset_id: int, as_of: datetime) -> 
         .limit(1)
     )
     return event.phase if event else None
+
+
+def _lifecycle_timelines(
+    session: Session,
+    asset_ids: set[int],
+    *,
+    as_of: datetime,
+) -> dict[int, tuple[list[datetime], list[str]]]:
+    """Load each asset's lifecycle phases once for a point-in-time lookup batch.
+
+    ``evaluate_outcomes`` used to issue one lifecycle query per pending outcome,
+    which is an N+1 scan over the entire outcome backlog.  A single bounded
+    read per asset lets the evaluation loop bisect the timeline instead.
+    """
+    timelines: dict[int, tuple[list[datetime], list[str]]] = {}
+    ids = sorted(asset_ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        rows = session.execute(
+            select(
+                models.LifecycleEvent.asset_id,
+                models.LifecycleEvent.ts,
+                models.LifecycleEvent.phase,
+            )
+            .where(
+                models.LifecycleEvent.asset_id.in_(chunk),
+                models.LifecycleEvent.ts <= as_of,
+            )
+            .order_by(models.LifecycleEvent.asset_id.asc(), models.LifecycleEvent.ts.asc())
+        ).all()
+        for asset_id, ts, phase in rows:
+            times, phases = timelines.setdefault(asset_id, ([], []))
+            times.append(ensure_utc(ts))
+            phases.append(phase)
+    return timelines
 
 
 def _price_change_since(
@@ -151,6 +198,82 @@ def _price_change_since(
     if entry is None or latest is None or entry <= 0:
         return None
     return (latest - entry) / entry
+
+
+def _expire_outcome_instances(session: Session, outcome_ids: Iterable[int]) -> None:
+    """Expire ORM copies after a Core update so callers see the new values."""
+    identity_map = session.identity_map
+    for outcome_id in outcome_ids:
+        instance = identity_map.get(identity_key(models.RiskOutcome, outcome_id))
+        if instance is not None:
+            session.expire(instance)
+
+
+def _flush_outcome_updates(
+    session: Session,
+    *,
+    decision_ts: datetime,
+    censored_by_phase: dict[str, list[int]],
+    legacy_ids: list[int],
+    evaluated_updates: list[dict[str, Any]],
+) -> None:
+    """Persist one outcome batch with set-based updates and a short commit.
+
+    A due backlog is mostly unlabelable rows with the same lifecycle phase.
+    Updating them one ORM object at a time emitted hundreds of UPDATE statements
+    per transaction and held SQLite's writer lock through the whole flush. One
+    ``IN`` update per phase keeps the transaction bounded and lets the engine's
+    write queue acquire the lock between batches.
+    """
+    touched: list[int] = []
+    # Execute on the Core connection: Session.execute() routes an UPDATE that
+    # targets a mapped entity through ORM bulk-update bookkeeping, which is
+    # both slower and cannot use a per-row bind parameter as the WHERE key.
+    connection = session.connection()
+    for phase, ids in censored_by_phase.items():
+        if not ids:
+            continue
+        connection.execute(
+            update(models.RiskOutcome)
+            .where(models.RiskOutcome.id.in_(ids))
+            .values(censored_at=decision_ts, lifecycle_phase_at_eval=phase)
+            .execution_options(synchronize_session=False)
+        )
+        touched.extend(ids)
+    if legacy_ids:
+        connection.execute(
+            update(models.RiskOutcome)
+            .where(models.RiskOutcome.id.in_(legacy_ids))
+            .values(censored_at=decision_ts)
+            .execution_options(synchronize_session=False)
+        )
+        touched.extend(legacy_ids)
+    if evaluated_updates:
+        connection.execute(_EVALUATED_OUTCOME_UPDATE, evaluated_updates)
+        touched.extend(int(item["outcome_id"]) for item in evaluated_updates)
+    if not touched:
+        return
+    session.commit()
+    _expire_outcome_instances(session, touched)
+    censored_by_phase.clear()
+    legacy_ids.clear()
+    evaluated_updates.clear()
+
+
+_EVALUATED_OUTCOME_UPDATE = (
+    update(models.RiskOutcome)
+    .where(models.RiskOutcome.id == bindparam("outcome_id"))
+    .values(
+        lifecycle_phase_at_eval=bindparam("lifecycle_phase_at_eval"),
+        price_change_pct=bindparam("price_change_pct"),
+        evaluated_at=bindparam("evaluated_at"),
+        label_version=bindparam("label_version"),
+        collapsed=bindparam("collapsed"),
+        rugged=bindparam("rugged"),
+        survived=bindparam("survived"),
+    )
+    .execution_options(synchronize_session=False)
+)
 
 
 def record_risk_outcome(
@@ -221,75 +344,138 @@ def evaluate_outcomes(
     Labels are bounded to each prediction's own observation window
     ``[scored_at, scored_at + window]``: only lifecycle state at or before
     window end may label the row.  When no lifecycle phase inside that window
-    establishes collapse or survival, the row is left unresolved
-    (``evaluated_at`` stays NULL) so it is never counted as a non-survival and
-    a later pass can retry it if backfilled data resolves the window.
+    establishes collapse or survival, the row is censored (``censored_at`` is
+    stamped, ``evaluated_at`` stays NULL) so it is never counted as a
+    non-survival and is not retried on every subsequent scan.  Backfilling the
+    window requires clearing ``censored_at`` before the next evaluation.
     """
     settings = get_settings()
     decision_ts = ensure_utc(decision_ts or utc_now())
     window = timedelta(hours=window_hours or settings.risk_outcome_window_hours)
 
-    outcomes = session.scalars(
-        select(models.RiskOutcome)
-        .where(models.RiskOutcome.evaluated_at.is_(None))
+    # Only outcomes whose observation window has elapsed can be labelled.
+    # Loading future rows made every scan pay for the full backlog even when
+    # none of those rows could advance.
+    due_cutoff = decision_ts - window
+    outcome_rows = session.execute(
+        select(
+            models.RiskOutcome.id,
+            models.RiskOutcome.asset_id,
+            models.RiskOutcome.score_id,
+            models.RiskOutcome.scored_at,
+            models.RiskOutcome.label_version,
+            models.RiskOutcome.lifecycle_phase_at_eval,
+        )
+        .where(
+            models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.censored_at.is_(None),
+            models.RiskOutcome.scored_at <= due_cutoff,
+        )
         .order_by(models.RiskOutcome.scored_at.asc())
     ).all()
+    timelines = _lifecycle_timelines(
+        session,
+        {row.asset_id for row in outcome_rows},
+        as_of=decision_ts,
+    )
     # Append-only relabels add a bounded-version row per score. When that row
     # already exists, stamping the legacy row's ``label_version`` too violates
     # ``uq_risk_outcomes_score_label`` and aborts the whole scan (surfacing as a
     # red worker health row). These scores are already covered.
-    current_version_scores = set(
-        session.scalars(
-            select(models.RiskOutcome.score_id).where(
-                models.RiskOutcome.label_version == LABEL_VERSION
+    # Only inspect the legacy due rows; loading every current-version score id
+    # made each scan scan the full outcome table even when no legacy row existed.
+    legacy_due_score_ids = [
+        row.score_id for row in outcome_rows if row.label_version != LABEL_VERSION
+    ]
+    current_version_scores: set[int] = set()
+    for start in range(0, len(legacy_due_score_ids), 500):
+        chunk = legacy_due_score_ids[start : start + 500]
+        current_version_scores.update(
+            session.scalars(
+                select(models.RiskOutcome.score_id).where(
+                    models.RiskOutcome.label_version == LABEL_VERSION,
+                    models.RiskOutcome.score_id.in_(chunk),
+                )
             )
         )
-    )
 
     evaluated = 0
     unresolved = 0
-    for outcome in outcomes:
+    censored = 0
+    censored_by_phase: dict[str, list[int]] = {}
+    legacy_ids: list[int] = []
+    evaluated_updates: list[dict[str, Any]] = []
+
+    def flush_batch() -> None:
+        _flush_outcome_updates(
+            session,
+            decision_ts=decision_ts,
+            censored_by_phase=censored_by_phase,
+            legacy_ids=legacy_ids,
+            evaluated_updates=evaluated_updates,
+        )
+
+    for index, outcome in enumerate(outcome_rows, start=1):
         if outcome.label_version != LABEL_VERSION and outcome.score_id in current_version_scores:
-            # Superseded legacy row: leave it untouched as v1 history.
+            # Superseded legacy row: leave its label untouched as v1 history,
+            # but retire it from the due backlog now that a bounded row covers
+            # the score.
+            legacy_ids.append(outcome.id)
+            censored += 1
+            if index % OUTCOME_BATCH_SIZE == 0:
+                flush_batch()
             continue
         score_time = ensure_utc(outcome.scored_at)
         window_end = score_time + window
         if window_end > decision_ts:
             continue
         # Only lifecycle state inside [score_time, window_end] may label this
-        # prediction.
-        phase = _lifecycle_phase_as_of(session, outcome.asset_id, window_end)
+        # prediction.  The timeline was batch-loaded above; bisect is exactly
+        # the old ``ORDER BY ts DESC LIMIT 1`` lookup without the N+1 queries.
+        phase: str | None = None
+        timeline = timelines.get(outcome.asset_id)
+        if timeline:
+            times, phases = timeline
+            timeline_index = bisect_right(times, window_end) - 1
+            if timeline_index >= 0:
+                phase = phases[timeline_index]
         if phase not in _COLLAPSE_PHASES and phase not in _SURVIVAL_PHASES:
             # Unresolved: no lifecycle state in the window, or a phase that is
             # neither collapse nor survival.  Do NOT stamp evaluated_at — an
             # outcome that cannot be established must not become a failure.
-            # Count it so a growing withheld-label backlog is visible.
-            outcome.lifecycle_phase_at_eval = phase or "unknown"
-            unresolved += 1
-            continue
-        outcome.lifecycle_phase_at_eval = phase
-        outcome.price_change_pct = _price_change_since(
-            session, outcome.asset_id, score_time, until=window_end
-        )
-        outcome.evaluated_at = decision_ts
-        outcome.label_version = LABEL_VERSION
-        outcome.collapsed = phase in _COLLAPSE_PHASES
-        outcome.rugged = phase == "rugged"
-        outcome.survived = phase in _SURVIVAL_PHASES
-        evaluated += 1
+            censored_by_phase.setdefault(phase or "unknown", []).append(outcome.id)
+            censored += 1
+        else:
+            evaluated_updates.append(
+                {
+                    "outcome_id": outcome.id,
+                    "lifecycle_phase_at_eval": phase,
+                    "price_change_pct": _price_change_since(
+                        session, outcome.asset_id, score_time, until=window_end
+                    ),
+                    "evaluated_at": decision_ts,
+                    "label_version": LABEL_VERSION,
+                    "collapsed": phase in _COLLAPSE_PHASES,
+                    "rugged": phase == "rugged",
+                    "survived": phase in _SURVIVAL_PHASES,
+                }
+            )
+            evaluated += 1
+        if index % OUTCOME_BATCH_SIZE == 0:
+            flush_batch()
 
-    if evaluated > 0:
-        session.flush()
+    flush_batch()
 
     # Compute band-level metrics
     report = RiskOutcomeReport(
         window_hours=window.total_seconds() / 3600,
         observation_ts=decision_ts,
         unresolved=unresolved,
+        censored=censored,
     )
 
-    # Publish the backlog to engine health and flag growth, so withheld labels
-    # cannot accumulate silently between passes.
+    # Publish the actionable backlog to engine health.  Censored rows are
+    # already retired, so they must not keep this component yellow/red forever.
     previous_unresolved = session.scalar(
         select(models.SystemHealth.error_count)
         .where(models.SystemHealth.component == UNRESOLVED_OUTCOME_COMPONENT)
@@ -304,6 +490,7 @@ def evaluate_outcomes(
     oldest = session.scalar(
         select(func.min(models.RiskOutcome.scored_at)).where(
             models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.censored_at.is_(None),
             models.RiskOutcome.label_version == LABEL_VERSION,
         )
     )
@@ -320,37 +507,69 @@ def evaluate_outcomes(
         state=state,
         error_count=unresolved,
         message=(
-            f"unresolved={unresolved} "
+            f"unresolved={unresolved} censored={censored} "
             f"previous={previous_unresolved if previous_unresolved is not None else 'none'}"
             f"{' GREW' if grew else ''}"
         ),
     )
 
-    for band in RiskBand:
-        band_outcomes = session.scalars(
-            select(models.RiskOutcome).where(
-                models.RiskOutcome.risk_band == band.value,
-                models.RiskOutcome.evaluated_at.is_not(None),
-            )
-        ).all()
-        if not band_outcomes:
+    # Release SQLite's single write lock before feeding the ensemble.  The
+    # ensemble persists its weights through its own session; leaving this
+    # session's outcome/health updates uncommitted makes that writer wait out
+    # the full busy timeout on every flush attempt, which is what turned the
+    # post-scoring calibration pass into a multi-minute (and eventually
+    # unbounded) stall once the outcome backlog grew large.
+    session.commit()
+
+    # One column-only pass over evaluated rows feeds both rule and ML band
+    # metrics. Hydrating the full ORM entity four times (once per rule band plus
+    # once for ML) made every calibration load >100k Python objects.
+    evaluated_rows = session.execute(
+        select(
+            models.RiskOutcome.risk_band,
+            models.RiskOutcome.details,
+            models.RiskOutcome.collapsed,
+            models.RiskOutcome.rugged,
+            models.RiskOutcome.survived,
+        ).where(models.RiskOutcome.evaluated_at.is_not(None))
+    ).all()
+    band_counts: dict[str, dict[str, int]] = {}
+    ml_counts: dict[str, dict[str, int]] = {}
+    for band_name, details, collapsed, rugged, survived in evaluated_rows:
+        counts = band_counts.setdefault(
+            band_name, {"total": 0, "collapsed": 0, "rugged": 0, "survived": 0}
+        )
+        counts["total"] += 1
+        counts["collapsed"] += int(bool(collapsed))
+        counts["rugged"] += int(bool(rugged))
+        counts["survived"] += int(bool(survived))
+        payload = details or {}
+        ml_band = payload.get("ml_risk_band") if payload.get("ml_prediction") else None
+        if not ml_band:
             continue
-        total = len(band_outcomes)
-        collapsed = sum(1 for o in band_outcomes if o.collapsed)
-        rugged = sum(1 for o in band_outcomes if o.rugged)
-        survived = sum(1 for o in band_outcomes if o.survived)
+        ml = ml_counts.setdefault(ml_band, {"total": 0, "collapsed": 0, "rugged": 0, "survived": 0})
+        ml["total"] += 1
+        ml["collapsed"] += int(bool(collapsed))
+        ml["rugged"] += int(bool(rugged))
+        ml["survived"] += int(bool(survived))
+
+    for band in RiskBand:
+        band_row = band_counts.get(band.value)
+        if band_row is None:
+            continue
+        total = band_row["total"]
+        collapsed = band_row["collapsed"]
+        survived = band_row["survived"]
         # NB: rugged rows are a subset of collapsed (see outcome.collapsed),
         # so unknown must NOT subtract rugged again or it goes negative.
-        unknown = total - collapsed - survived
-        precision = collapsed / total if total > 0 else 0.0
         report.bands[band.value] = BandOutcome(
             band=band,
             total_flagged=total,
             collapsed=collapsed,
-            rugged=rugged,
+            rugged=band_row["rugged"],
             survived=survived,
-            unknown=unknown,
-            precision=precision,
+            unknown=total - collapsed - survived,
+            precision=collapsed / total if total > 0 else 0.0,
         )
         report.total_flagged += total
         report.total_collapsed += collapsed
@@ -366,40 +585,20 @@ def evaluate_outcomes(
             band_outcome.recall = band_outcome.collapsed / total_collapsed_all
 
     # ── ML-specific band outcomes ────────────────────────────────────────
-    # Group evaluated outcomes by the band the ML scorer predicted (stored in
-    # details at scoring time).  Only rows where the ML scorer actually made
-    # an independent prediction (ml_prediction=True) count, so the ML
-    # thresholds learn from the ML signal, not rule-band duplicates.
-    ml_outcomes = session.scalars(
-        select(models.RiskOutcome).where(
-            models.RiskOutcome.evaluated_at.is_not(None),
-        )
-    ).all()
-    ml_by_band: dict[str, list[models.RiskOutcome]] = {}
-    for outcome in ml_outcomes:
-        details = outcome.details or {}
-        if not details.get("ml_prediction"):
-            continue
-        ml_band = details.get("ml_risk_band")
-        if not ml_band:
-            continue
-        ml_by_band.setdefault(ml_band, []).append(outcome)
-
-    for band_name, band_outcomes in ml_by_band.items():
-        total = len(band_outcomes)
-        collapsed = sum(1 for o in band_outcomes if o.collapsed)
-        rugged = sum(1 for o in band_outcomes if o.rugged)
-        survived = sum(1 for o in band_outcomes if o.survived)
-        # NB: rugged rows are a subset of collapsed (see outcome.collapsed),
-        # so unknown must NOT subtract rugged again or it goes negative.
-        unknown = total - collapsed - survived
+    # Grouped from the same pass above; only rows where the ML scorer actually
+    # made an independent prediction count, so the ML thresholds learn from the
+    # ML signal rather than rule-band duplicates.
+    for band_name, counts in ml_counts.items():
+        total = counts["total"]
+        collapsed = counts["collapsed"]
+        survived = counts["survived"]
         report.ml_bands[band_name] = BandOutcome(
             band=RiskBand(band_name),
             total_flagged=total,
             collapsed=collapsed,
-            rugged=rugged,
+            rugged=counts["rugged"],
             survived=survived,
-            unknown=unknown,
+            unknown=total - collapsed - survived,
             precision=collapsed / total if total > 0 else 0.0,
         )
         report.ml_total_flagged += total
@@ -409,6 +608,7 @@ def evaluate_outcomes(
         "risk_outcome_evaluation",
         evaluated=evaluated,
         unresolved=report.unresolved,
+        censored=report.censored,
         unresolved_grew=report.unresolved_grew,
         total_flagged=report.total_flagged,
         total_collapsed=report.total_collapsed,
@@ -434,6 +634,7 @@ def evaluate_outcomes(
         fed_count = 0
         max_feed = 100  # cap per evaluation pass to avoid ensemble overload
         settings = get_settings()
+        fed_rows: list[models.RiskOutcome] = []
         for row in recent_outcomes:
             if fed_count >= max_feed:
                 break
@@ -502,8 +703,22 @@ def evaluate_outcomes(
                     }
                 )
             ensemble_engine.record_outcomes(entries)
-            row.ensemble_fed_at = decision_ts
+            # Defer the marking write until after the ensemble's own session
+            # flushes.  Setting this column inside the loop re-acquired the
+            # scan session's write lock and re-created the lock inversion the
+            # commit above is meant to avoid.
+            fed_rows.append(row)
             fed_count += 1
+
+        for row in fed_rows:
+            row.ensemble_fed_at = decision_ts
+        if fed_rows:
+            session.flush()
+            # Commit the feedback markers before returning.  Leaving this
+            # transaction open makes the caller's calibration work hold
+            # SQLite's write lock for its whole duration, which is the same
+            # lock inversion the pre-ensemble commit above avoids.
+            session.commit()
     except Exception:  # noqa: BLE001
         pass  # ensemble feedback must never break outcome evaluation
 

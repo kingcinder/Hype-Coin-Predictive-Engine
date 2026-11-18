@@ -17,10 +17,14 @@ holder and contract-flag features from the archived RPC evidence payloads:
 - ``holder_count`` / ``holder_growth`` / ``top_holder_concentration`` come
   from ``chain_rpc`` holder-snapshot evidence (the ``solana_rpc``
   ``largest_accounts`` + ``supply`` payloads for Solana and the
-  ``evm_holders`` Blockscout payloads for Base/Ethereum — both of which the
-  SQL path turns into ``Holder`` rows), deduped per (hour, wallet) exactly
-  like ``insert_holder_once``. The reconstruction is chain-agnostic: it keys
-  on ``source_type='chain_rpc'`` plus the ``mint`` / ``supply`` /
+  ``evm_holders`` GoPlus token-security payloads for Base/Ethereum — both of
+  which the SQL path turns into ``Holder`` rows), deduped per (hour, wallet)
+  exactly like ``insert_holder_once``. When the payload carries the exact
+  ``holder_count`` GoPlus reports, that count is used; older evidence falls
+  back to the ranked-list length. Top-10 concentration always comes from the
+  ranked list, and growth is normalized to an hourly rate. The reconstruction
+  is chain-agnostic: it keys on
+  ``source_type='chain_rpc'`` plus the ``mint`` / ``supply`` /
   ``largest_accounts`` payload shape, so an asset on any chain replays the
   same way.
 - ``suspicious_contract_flags`` counts the evidence-backed contract flags:
@@ -57,7 +61,7 @@ from common.time import ensure_utc, floor_to_hour
 from features.factory import FeatureValue, _feature, compute_market_block
 from ops.archive import ArchiveStore, make_store
 from storage import models
-from storage.repository import upsert_feature
+from storage.repository import upsert_features
 from validation.leakage_guard import check_rows_point_in_time, require_decision_ts
 
 log = get_logger(__name__)
@@ -219,6 +223,8 @@ SELECT
     json_extract_string(payload_json, '$.mint') AS asset_address,
     date_trunc('hour', observed_at) AS ts,
     TRY_CAST(json_extract_string(payload_json, '$.supply') AS DOUBLE) AS supply,
+    TRY_CAST(json_extract_string(payload_json, '$.holder_count') AS BIGINT)
+        AS holder_count,
     json_extract_string(payload_json, '$.largest_accounts') AS accounts_json
 FROM raw
 ORDER BY observed_at
@@ -516,7 +522,7 @@ class LakeFeatureFactory:
 
         This is the ``feature_source="lake"`` replay path: it reads DuckDB
         over the archived evidence and writes feature rows exactly like the
-        SQL path (same ``upsert_feature``), without touching any live
+        SQL path (same batched ``upsert_features``), without touching any live
         normalized tables. All assets are reconstructed in one download /
         one DuckDB session per decision time.
         """
@@ -544,18 +550,12 @@ class LakeFeatureFactory:
                     f"asset_id={asset.id} decision_ts={decision_ts.isoformat()}"
                 )
             output[asset.id] = values
-            for value in values.values():
-                upsert_feature(
-                    session,
-                    asset_id=asset.id,
-                    decision_ts=decision_ts,
-                    feature_name=value.name,
-                    feature_value=value.value,
-                    source_count=value.source_count,
-                    freshness_score=value.freshness_score,
-                    missing_flag=value.missing,
-                    source_refs=value.source_refs,
-                )
+            upsert_features(
+                session,
+                asset_id=asset.id,
+                decision_ts=decision_ts,
+                values=values.values(),
+            )
         return output
 
     def _series_from_lake(self, asset_address: str, decision_ts: datetime) -> LakeMarketSeries:
@@ -745,9 +745,11 @@ class LakeFeatureFactory:
 
         Mirrors the SQL path's ``_holder_features``: holder rows are deduped
         per (hour, wallet) keeping the latest observation (the same
-        ``insert_holder_once`` semantics), the latest hour snapshot supplies
-        the count and top-10 concentration, and the most recent snapshot at
-        least one hour earlier supplies the growth delta.
+        ``insert_holder_once`` semantics), the payload's exact
+        ``holder_count`` supplies the count when present (falling back to the
+        ranked-list length), the top-10 concentration comes from the ranked
+        list, and the most recent snapshot at least one hour earlier supplies
+        the hourly growth rate.
         """
         if not addresses:
             return {}
@@ -763,6 +765,9 @@ class LakeFeatureFactory:
         by_asset: dict[str, dict[datetime, dict[str, tuple[datetime, float]]]] = {
             address: {} for address in addresses
         }
+        exact_by_asset: dict[str, dict[datetime, tuple[datetime, float]]] = {
+            address: {} for address in addresses
+        }
         for values in rows:
             record = dict(zip(columns, values, strict=True))
             address = str(record["asset_address"])
@@ -772,6 +777,11 @@ class LakeFeatureFactory:
             observed_at = ensure_utc(record["observed_at"])
             supply = record["supply"]
             accounts = json.loads(record["accounts_json"] or "[]")
+            exact_count = record["holder_count"]
+            if exact_count is not None:
+                current_exact = exact_by_asset[address].get(ts)
+                if current_exact is None or observed_at > current_exact[0]:
+                    exact_by_asset[address][ts] = (observed_at, float(exact_count))
             bucket = by_asset[address].setdefault(ts, {})
             for account in accounts:
                 wallet = str(account.get("address") or "")
@@ -795,14 +805,22 @@ class LakeFeatureFactory:
                 continue
             latest_ts = timestamps[-1]
             latest = hours[latest_ts]
-            holder_count = float(len(latest))
+            exact_latest = exact_by_asset[address].get(latest_ts)
+            holder_count = exact_latest[1] if exact_latest is not None else float(len(latest))
             concentration = float(
                 sum(sorted((pct for _, pct in latest.values()), reverse=True)[:10])
             )
             prior = [ts for ts in timestamps if ts <= decision_ts - timedelta(hours=1)]
             growth = None
             if prior:
-                growth = holder_count - float(len(hours[prior[-1]]))
+                prior_ts = prior[-1]
+                exact_prior = exact_by_asset[address].get(prior_ts)
+                prior_count = (
+                    exact_prior[1] if exact_prior is not None else float(len(hours[prior_ts]))
+                )
+                elapsed_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
+                if elapsed_hours > 0:
+                    growth = (holder_count - prior_count) / elapsed_hours
             out[address] = (holder_count, growth, concentration)
         return out
 

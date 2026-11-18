@@ -89,12 +89,21 @@ class EVMFactoryWatcher:
 
     # ------------------------------------------------------------------- helpers
 
-    def _rpc(self, method: str, params: list[Any]) -> Any:
+    def _rpc(
+        self,
+        method: str,
+        params: list[Any],
+        *,
+        http: HttpClient | None = None,
+        url: str | None = None,
+    ) -> Any:
+        endpoint = url or self._pool_url
+        client = http or self.http
         if self._pool is not None:
-            self._pool.record_request(self._pool_url)
+            self._pool.record_request(endpoint)
         try:
-            data = self.http.post_json(
-                self._pool_url,
+            data = client.post_json(
+                endpoint,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
             )
         except Exception as exc:
@@ -102,10 +111,10 @@ class EVMFactoryWatcher:
             # Alchemy Free's 10-block eth_getLogs cap), not an unhealthy
             # endpoint: degrading it would blacklist a working provider.
             if self._pool is not None and not _is_client_rejection(exc):
-                self._pool.mark_failure(self._pool_url)
+                self._pool.mark_failure(endpoint)
             raise
         if self._pool is not None:
-            self._pool.mark_success(self._pool_url)
+            self._pool.mark_success(endpoint)
         return data
 
     def _block_number(self) -> int | None:
@@ -139,7 +148,37 @@ class EVMFactoryWatcher:
         result = data.get("result") if isinstance(data, dict) else None
         if isinstance(result, list):
             return result
-        raise RuntimeError(f"{self.chain_slug}: eth_getLogs returned no result")
+        # Some endpoints answer eth_blockNumber but reject eth_getLogs with a
+        # JSON-RPC error over HTTP 200 (for example, a provider that does not
+        # serve log queries). The endpoint is alive, so do not mark it down;
+        # try the other healthy endpoints in the chain pool instead.
+        return self._fallback_pair_created_logs(params)
+
+    def _fallback_pair_created_logs(self, params: list[Any]) -> list[dict[str, Any]]:
+        """Run eth_getLogs on another healthy pool endpoint.
+
+        The primary endpoint stays healthy (it answered blockNumber); it simply
+        does not serve this method. Endpoints that return a list, including an
+        empty list, count as a successful answer.
+        """
+        if self._pool is None:
+            raise RuntimeError(f"{self.chain_slug}: eth_getLogs returned no result")
+        last_error: Exception | None = None
+        for state in self._pool.snapshot():
+            if state.url == self._pool_url or state.down:
+                continue
+            try:
+                with HttpClient(base_url=state.url) as client:
+                    data = self._rpc("eth_getLogs", params, http=client, url=state.url)
+            except Exception as exc:  # noqa: BLE001 - try the next healthy endpoint.
+                last_error = exc
+                continue
+            result = data.get("result") if isinstance(data, dict) else None
+            if isinstance(result, list):
+                return result
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"{self.chain_slug}: eth_getLogs unsupported by every pool endpoint")
 
     def _recent_pair_created_logs(
         self, from_block: int, to_block: int, *, max_chunks: int = 60, chunk_size: int = 10

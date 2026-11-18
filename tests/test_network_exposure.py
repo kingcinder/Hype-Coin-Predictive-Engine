@@ -19,8 +19,9 @@ def test_api_and_ui_bind_defaults_are_loopback() -> None:
 def test_lan_bind_is_allowed_only_with_explicit_authenticated_config() -> None:
     settings = Settings(
         _env_file=None,
-        api_host="0.0.0.0",
-        ui_host="0.0.0.0",
+        # Test fixture: intentionally exercises the LAN-bind validation path.
+        api_host="0.0.0.0",  # nosec B104
+        ui_host="0.0.0.0",  # nosec B104
         engine_allow_lan=True,
         engine_api_token="lan-test-token",
     )
@@ -28,7 +29,8 @@ def test_lan_bind_is_allowed_only_with_explicit_authenticated_config() -> None:
 
 
 def test_startup_rejects_lan_bind_with_bypass_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("API_HOST", "0.0.0.0")
+    # Test fixture: startup must reject this intentional wildcard bind.
+    monkeypatch.setenv("API_HOST", "0.0.0.0")  # nosec B104
     monkeypatch.setenv("ENGINE_ALLOW_LAN", "1")
     monkeypatch.setenv("ENGINE_API_AUTH_BYPASS", "1")
     monkeypatch.setenv("ENGINE_API_TOKEN", "")

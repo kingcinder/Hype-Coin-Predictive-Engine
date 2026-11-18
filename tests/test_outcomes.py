@@ -98,7 +98,7 @@ def _seed_prediction(
 
 
 def test_post_window_collapse_does_not_label_prediction(session) -> None:
-    """Score Day 0, window ends Day 2, collapse Day 4 -> unresolved, not collapsed."""
+    """Score Day 0, window ends Day 2, collapse Day 4 -> censored, not collapsed."""
     asset = seed_market_asset(session)
     outcome = _seed_prediction(session, asset)
     _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
@@ -108,6 +108,7 @@ def test_post_window_collapse_does_not_label_prediction(session) -> None:
     assert outcome.collapsed is False
     assert outcome.survived is False
     assert outcome.evaluated_at is None
+    assert outcome.censored_at is not None
     assert outcome.lifecycle_phase_at_eval == "unknown"
 
 
@@ -197,7 +198,61 @@ def test_price_change_ignores_snapshots_after_window_end(session) -> None:
     assert outcome.price_change_pct == pytest.approx(1.0)
 
 
-def test_report_counts_unresolved_rows_past_their_window(session) -> None:
+def test_evaluated_outcomes_commit_in_batches(session, monkeypatch) -> None:
+    """A large due backlog must not hold one write transaction to the end."""
+    from sqlalchemy import event
+
+    from risk_engine import outcomes as outcomes_module
+
+    monkeypatch.setattr(outcomes_module, "OUTCOME_BATCH_SIZE", 1)
+    first = seed_market_asset(session)
+    first_outcome = _seed_prediction(session, first)
+    _seed_lifecycle(session, first, "collapse", SCORED_AT + timedelta(hours=24))
+
+    second = seed_market_asset(
+        session,
+        address="BatchSecond111111111111111111111111111111",
+        pair_address="BatchSecondPair1111111111111111111111111",
+    )
+    second_outcome = _seed_prediction(session, second, model_version="test-batch-second")
+    _seed_lifecycle(session, second, "survivor", SCORED_AT + timedelta(hours=24))
+
+    commits: list[int] = []
+    event.listen(session, "after_commit", lambda _session: commits.append(1))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert ensure_utc(first_outcome.evaluated_at) == EVAL_TS
+    assert ensure_utc(second_outcome.evaluated_at) == EVAL_TS
+    assert len(commits) >= 2
+
+
+def test_censored_backlog_uses_one_update_per_batch(session, monkeypatch) -> None:
+    """Unlabelable due rows must be retired with set-based updates, not one
+    UPDATE per ORM object, so a 40k-row age-out cannot hold the writer lock."""
+    from sqlalchemy import event
+
+    from risk_engine import outcomes as outcomes_module
+
+    monkeypatch.setattr(outcomes_module, "OUTCOME_BATCH_SIZE", 3)
+    asset = seed_market_asset(session)
+    for index in range(6):
+        _seed_prediction(session, asset, model_version=f"test-censor-batch-{index}")
+
+    updates: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _record_update(_conn, _cursor, statement, _params, _context, _executemany):
+        if statement.lstrip().upper().startswith("UPDATE RISK_OUTCOMES"):
+            updates.append(statement)
+
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert report.censored == 6
+    assert len(updates) == 2
+
+
+def test_report_censors_rows_without_a_label_in_their_window(session) -> None:
     asset = seed_market_asset(session)
     withheld = _seed_prediction(session, asset)
     _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
@@ -215,17 +270,20 @@ def test_report_counts_unresolved_rows_past_their_window(session) -> None:
     report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
 
     assert withheld.evaluated_at is None
-    assert report.unresolved == 1
+    assert withheld.censored_at is not None
+    assert report.unresolved == 0
+    assert report.censored == 1
 
-    # The backlog stays visible on later passes instead of vanishing.
+    # A censored row is retired instead of retried on every later pass.
     report_again = evaluate_outcomes(
         session, decision_ts=EVAL_TS + timedelta(days=1), window_hours=WINDOW_HOURS
     )
-    assert report_again.unresolved == 1
+    assert report_again.unresolved == 0
+    assert report_again.censored == 0
 
 
-def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
-    """The backlog is a health component, and growth turns it yellow."""
+def test_censored_outcomes_clear_the_health_backlog(session) -> None:
+    """Unlabelable due rows are retired instead of pinning health yellow/red."""
     asset = seed_market_asset(session)
     _seed_prediction(session, asset)
     _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
@@ -247,41 +305,22 @@ def test_health_reports_unresolved_backlog_and_flags_growth(session) -> None:
         )
 
     report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
-    assert report.unresolved == 1
-    rows = _health_rows()
-    assert rows[-1].error_count == 1
-    # A backlog younger than three windows is yellow.
-    assert rows[-1].state == "yellow"
-
-    _seed_prediction(session, held, model_version="test-held")
-    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
-    assert report.unresolved == 2
-    rows = _health_rows()
-    assert rows[-1].error_count == 2
-    # Growth alone stays yellow; only age beyond three windows is red.
-    assert report.unresolved_grew is True
-    assert rows[-1].state == "yellow"
-    assert "GREW" in (rows[-1].message or "")
-
-    # Oldest unresolved row is now more than three windows old -> red.
-    report = evaluate_outcomes(
-        session, decision_ts=SCORED_AT + timedelta(days=7), window_hours=WINDOW_HOURS
-    )
-    assert report.unresolved == 2
-    rows = _health_rows()
-    assert rows[-1].state == "red"
-
-    # Backfill lifecycle state inside both windows: the backlog resolves and
-    # the component returns to ok.
-    for target in (asset, held):
-        _seed_lifecycle(session, target, "collapse", SCORED_AT + timedelta(hours=1))
-    report = evaluate_outcomes(
-        session, decision_ts=SCORED_AT + timedelta(days=7, hours=1), window_hours=WINDOW_HOURS
-    )
     assert report.unresolved == 0
+    assert report.censored == 1
     rows = _health_rows()
     assert rows[-1].error_count == 0
     assert rows[-1].state == "ok"
+    assert "censored=1" in (rows[-1].message or "")
+
+    # A second unlabelable prediction is censored too, not accumulated.
+    _seed_prediction(session, held, model_version="test-held")
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+    assert report.unresolved == 0
+    assert report.censored == 1
+    rows = _health_rows()
+    assert rows[-1].error_count == 0
+    assert rows[-1].state == "ok"
+    assert "GREW" not in (rows[-1].message or "")
 
 
 def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -> None:
@@ -306,6 +345,7 @@ def test_window_end_boundary_is_inclusive_and_one_second_later_is_not(session) -
     assert ensure_utc(inside_outcome.evaluated_at) == EVAL_TS
     assert after_outcome.collapsed is False
     assert after_outcome.evaluated_at is None
+    assert after_outcome.censored_at is not None
     assert after_outcome.lifecycle_phase_at_eval == "unknown"
 
 

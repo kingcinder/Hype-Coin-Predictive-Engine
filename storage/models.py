@@ -510,7 +510,15 @@ class AlertTypeControl(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
-    __table_args__ = (Index("ix_alerts_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_alerts_created_at", "created_at"),
+        # Scoring checks for an existing alert on every new score and the
+        # quality gate counts acknowledged alerts by type. Both lookups used
+        # to full-scan the alert table, which grows by thousands of rows per
+        # scan.
+        Index("ix_alerts_asset_score_type", "asset_id", "score_id", "alert_type"),
+        Index("ix_alerts_type_acked", "alert_type", "acked_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), nullable=False)
@@ -902,6 +910,9 @@ class RiskOutcome(Base):
     lifecycle_phase_at_score: Mapped[str] = mapped_column(String(32), nullable=False)
     # Populated after the observation window elapses
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when the observation window closed without a collapse/survival label.
+    # The row stays auditable but is no longer retried as an unresolved backlog.
+    censored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lifecycle_phase_at_eval: Mapped[str | None] = mapped_column(String(32))
     price_change_pct: Mapped[float | None] = mapped_column(Float)
     collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

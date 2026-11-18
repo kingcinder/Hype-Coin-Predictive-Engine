@@ -37,6 +37,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # A phase may legitimately hold the write lock while it persists one source's or
@@ -114,9 +116,15 @@ def _env_for(db_path: Path, api_port: int, ui_port: int, archive_dir: Path) -> d
 
 
 @contextmanager
-def _boot_engine(tmp_path: Path) -> Iterator[_Engine]:
+def _boot_engine(
+    tmp_path: Path,
+    *,
+    api_port: int | None = None,
+    ui_port: int | None = None,
+) -> Iterator[_Engine]:
     """Start ``python -m engine`` on a throwaway DB; always stop its group after."""
-    api_port, ui_port = _free_port(), _free_port()
+    api_port = api_port if api_port is not None else _free_port()
+    ui_port = ui_port if ui_port is not None else _free_port()
     db_path = tmp_path / "serpent.db"
     log_path = tmp_path / "engine.log"
     with log_path.open("wb") as log_fh:
@@ -410,6 +418,76 @@ def test_engine_stops_cleanly_on_sigint_mid_scan(tmp_path: Path) -> None:
         ):
             _fail(
                 "listeners survived shutdown "
+                f"(api_open={_port_accepts('127.0.0.1', engine.api_port)}, "
+                f"ui_open={_port_accepts('127.0.0.1', engine.ui_port)})",
+                engine,
+            )
+
+
+def test_engine_forced_shutdown_frees_standard_ports(tmp_path: Path) -> None:
+    """A second SIGINT must SIGKILL Streamlit and free ports 8000 and 8501.
+
+    The clean-SIGINT test above covers the graceful epilogue. This drives the
+    forced path that previously left a Streamlit worker orphaned: enter the
+    real shutdown epilogue, send a second signal, and prove the captured UI
+    process group is gone rather than still holding the standard ports.
+    """
+    for port in (8000, 8501):
+        if _port_accepts("127.0.0.1", port):
+            pytest.skip(f"standard engine port {port} is already in use")
+
+    with _boot_engine(tmp_path, api_port=8000, ui_port=8501) as engine:
+        if not _wait_until(
+            lambda: _port_accepts("127.0.0.1", engine.ui_port),
+            timeout=STARTUP_TIMEOUT_SECONDS,
+            engine=engine,
+        ):
+            _fail("the Streamlit UI never bound port 8501", engine)
+        if not _wait_until(
+            lambda: _health_rows(engine.db_path) > 0 and "engine_scan_complete" not in engine.log(),
+            timeout=STARTUP_TIMEOUT_SECONDS,
+            engine=engine,
+        ):
+            _fail("the first scan never started, so shutdown had no active scan", engine)
+
+        engine.proc.send_signal(signal.SIGINT)
+        if not _wait_until(
+            lambda: "engine_shutting_down" in engine.log(),
+            timeout=STOP_TIMEOUT_SECONDS,
+            engine=engine,
+        ):
+            _fail("the engine never entered its shutdown epilogue", engine)
+
+        # Send the second signal while the graceful epilogue is still running.
+        # The handler must kill the captured Streamlit group before os._exit.
+        engine.proc.send_signal(signal.SIGINT)
+        try:
+            returncode = engine.proc.wait(timeout=STOP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            _fail(
+                f"still running {STOP_TIMEOUT_SECONDS:.0f}s after the forced-exit signal",
+                engine,
+            )
+            raise  # unreachable: _fail always raises
+
+        log = engine.log()
+        if returncode != 130:
+            _fail(f"forced shutdown exited {returncode} instead of 130", engine)
+        if "engine_force_exit_second_signal" not in log:
+            _fail("the engine did not take its forced-exit path", engine)
+        if "engine_stopped" in log:
+            _fail("the engine completed the graceful epilogue instead of forcing exit", engine)
+        # The engine is already reaped; poll without its alive guard so a
+        # surviving Streamlit child cannot be hidden by the parent's exit.
+        if not _wait_until(
+            lambda: (
+                not _port_accepts("127.0.0.1", engine.api_port)
+                and not _port_accepts("127.0.0.1", engine.ui_port)
+            ),
+            timeout=15.0,
+        ):
+            _fail(
+                "forced shutdown left a listener bound "
                 f"(api_open={_port_accepts('127.0.0.1', engine.api_port)}, "
                 f"ui_open={_port_accepts('127.0.0.1', engine.ui_port)})",
                 engine,

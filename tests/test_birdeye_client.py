@@ -65,6 +65,42 @@ def test_token_meta_uses_v3_single_metadata_path() -> None:
         client.close()
 
 
+def test_token_meta_falls_back_to_overview_on_plan_gated_401() -> None:
+    client = _client()
+    try:
+        with respx.mock:
+            meta_route = respx.get(f"{BASE}/defi/v3/token/meta-data/single").mock(
+                return_value=httpx.Response(401, json={"success": False})
+            )
+            overview_route = respx.get(f"{BASE}/defi/token_overview").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "address": "Mint1",
+                            "symbol": "MINT",
+                            "name": "Mint One",
+                            "decimals": 6,
+                            "price": 1.5,
+                        },
+                    },
+                )
+            )
+            metadata = client.token_meta("Mint1")
+
+        assert meta_route.called
+        assert overview_route.called
+        assert metadata is not None
+        assert metadata["address"] == "Mint1"
+        assert metadata["symbol"] == "MINT"
+        assert metadata["name"] == "Mint One"
+        assert metadata["decimals"] == 6
+        assert overview_route.calls[0].request.url.params["address"] == "Mint1"
+    finally:
+        client.close()
+
+
 def test_trending_tokens_uses_token_trending_path() -> None:
     client = _client()
     try:

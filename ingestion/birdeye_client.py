@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from common.config import get_settings
 from common.http import HttpClient
-from ingestion.provider_gate import ProviderGate
+from ingestion.provider_gate import ProviderGate, retry_after_seconds
 
 _birdeye_gate = ProviderGate()
 
@@ -49,7 +51,7 @@ class BirdeyeClient:
             # Birdeye uses 403 for a key without permission, which is a
             # configuration error and must not trigger rate-limit cooldown.
             if status == 429:
-                _birdeye_gate.record_failure(exc)
+                _birdeye_gate.record_failure(exc, cooldown=retry_after_seconds(exc))
             raise
 
     def token_overview(self, address: str) -> dict[str, Any] | None:
@@ -72,13 +74,18 @@ class BirdeyeClient:
         Audited against the live API (2026-11): the old ``/defi/token_meta``
         path returns 404. The current endpoint is
         ``/defi/v3/token/meta-data/single``; access is plan-gated, so a key
-        without metadata permission returns 401 and this method returns
-        ``None``.
+        without metadata permission returns 401. In that case fall back to
+        ``token_overview`` for the identity fields it does expose.
         """
-        data = self._get_json(
-            "/defi/v3/token/meta-data/single",
-            params={"address": address},
-        )
+        try:
+            data = self._get_json(
+                "/defi/v3/token/meta-data/single",
+                params={"address": address},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401:
+                raise
+            return self.token_overview(address)
         if isinstance(data, dict) and data.get("success"):
             return data.get("data")
         return None

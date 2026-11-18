@@ -23,7 +23,9 @@ from ingestion.solana_swaps import (
 )
 from ingestion.source_clients import (
     EVMHolderClient,
+    EVMHolderSnapshot,
     GeckoTerminalClient,
+    GoPlusError,
     reset_geckoterminal_gate,
 )
 from ops.archive import LocalArchiveStore
@@ -502,6 +504,62 @@ def test_first_buy_trade_rate_limit_backs_off_for_rest_of_scan(monkeypatch) -> N
     assert fallback_calls == ["PoolRateLimit0"]
     assert service._first_buy_stats["gecko_failures"] == 1
     assert service._first_buy_stats["backoff_skipped"] == 1
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_first_buy_rate_limit_health_is_yellow_pacing(session, monkeypatch, status: int) -> None:
+    """The request that opens the GeckoTerminal cooldown is pacing, not red.
+
+    The RPC fallback may return nothing, but the first-buy feed must not paint
+    the scan red because the provider asked us to wait.
+    """
+    seed_reference(session)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+
+    def rate_limited(self, chain: str, pool: str):
+        request = httpx.Request("GET", f"https://api.geckoterminal.com/{pool}")
+        response = httpx.Response(status, request=request)
+        raise httpx.HTTPStatusError(str(status), request=request, response=response)
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+    monkeypatch.setattr(ingestion_service, "fetch_pool_swaps", lambda *args, **kwargs: [])
+
+    pair = NormalizedPair(
+        chain_slug="solana",
+        dex_id="raydium",
+        pair_address="PoolPacingHealth",
+        base_address="MintPacingHealth",
+        base_symbol="PACE",
+        base_name="Pacing Token",
+        quote_address="USDC",
+        quote_symbol="USDC",
+        quote_name="USD Coin",
+        pair_created_at=now,
+        price_usd=1.0,
+        volume_usd=0.0,
+        liquidity_usd=80000.0,
+        reserve_base=None,
+        reserve_quote=None,
+        buys=0,
+        sells=0,
+        trades=0,
+    )
+
+    service = IngestionService()
+    assert service._first_buy_swaps(pair, now, set()) == ([], False)
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "yellow"
+    assert health.error_count == 0
+    assert "pacing:" in health.message
+    assert "gecko_failures=1" in health.message
+    assert "rpc_fallback_hits=1" in health.message
+    assert "rpc_fallback_swaps=0" in health.message
 
 
 def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) -> None:
@@ -1146,13 +1204,30 @@ def test_evm_holder_client_uses_goplus_token_security() -> None:
             200,
             json={
                 "code": 1,
+                "message": "OK",
                 "result": {
                     address: {
+                        "token_name": "Example Token",
+                        "token_symbol": "EX",
                         "total_supply": "1000",
-                        "holder_count": "2",
+                        "holder_count": "250",
                         "holders": [
-                            {"address": "0xaaa", "balance": "700"},
-                            {"address": "0xbbb", "balance": "200"},
+                            {
+                                "address": "0xaaa",
+                                "tag": "",
+                                "is_contract": 0,
+                                "balance": "700",
+                                "percent": "0.7",
+                                "is_locked": 0,
+                            },
+                            {
+                                "address": "0xbbb",
+                                "tag": "Burn Address",
+                                "is_contract": 1,
+                                "balance": "200",
+                                "percent": "0.2",
+                                "is_locked": 1,
+                            },
                         ],
                     }
                 },
@@ -1161,16 +1236,54 @@ def test_evm_holder_client_uses_goplus_token_security() -> None:
     )
     client = EVMHolderClient("base")
     try:
-        assert client.token_supply(address) == 1000.0
-        assert client.top_holders(address) == [
-            {"address": "0xaaa", "uiAmountString": "700"},
-            {"address": "0xbbb", "uiAmountString": "200"},
-        ]
+        snapshot = client.snapshot(address)
     finally:
         client.close()
 
+    assert snapshot.supply == 1000.0
+    assert snapshot.holder_count == 250
+    assert snapshot.holders == [
+        {"address": "0xaaa", "uiAmountString": "700"},
+        {"address": "0xbbb", "uiAmountString": "200"},
+    ]
     assert len(route.calls) == 1
     assert route.calls[0].request.url.params["contract_addresses"] == address
+
+
+@respx.mock
+def test_evm_holder_client_rejects_empty_payload() -> None:
+    """GoPlus can answer HTTP 200 with code 1 and an empty result. That is
+    missing coverage, not a successful zero-holder snapshot."""
+    address = "0x1111111111111111111111111111111111111111"
+    respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 1, "message": "OK", "result": {}},
+        )
+    )
+    client = EVMHolderClient("base")
+    try:
+        with pytest.raises(GoPlusError, match="no token data"):
+            client.snapshot(address)
+    finally:
+        client.close()
+
+
+@respx.mock
+def test_evm_holder_client_rejects_provider_error() -> None:
+    address = "0x1111111111111111111111111111111111111111"
+    respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 4029, "message": "Request limit reached", "result": {}},
+        )
+    )
+    client = EVMHolderClient("base")
+    try:
+        with pytest.raises(GoPlusError, match="4029.*Request limit reached"):
+            client.snapshot(address)
+    finally:
+        client.close()
 
 
 def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
@@ -1221,16 +1334,22 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
         def close(self) -> None:
             return None
 
-        def token_supply(self, address: str) -> float:
+        def snapshot(self, address: str) -> EVMHolderSnapshot:
             assert address == asset.address
-            return 100.0
-
-        def top_holders(self, address: str):
-            assert address == asset.address
-            return [
-                {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
-                {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
-            ]
+            return EVMHolderSnapshot(
+                supply=100.0,
+                holder_count=57,
+                holders=[
+                    {
+                        "address": "0xaaa11111111111111111111111111111111111111",
+                        "uiAmountString": "70",
+                    },
+                    {
+                        "address": "0xbbb11111111111111111111111111111111111111",
+                        "uiAmountString": "20",
+                    },
+                ],
+            )
 
     monkeypatch.setattr(ingestion_service, "EVMHolderClient", FakeEVMHolderClient)
 
@@ -1251,10 +1370,20 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert evidence[0].payload["mint"] == asset.address
     assert evidence[0].payload["chain"] == "base"
     assert evidence[0].payload["supply"] == pytest.approx(100.0)
+    assert evidence[0].payload["holder_count"] == 57
     assert evidence[0].payload["largest_accounts"] == [
         {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
         {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
     ]
+
+    metric = session.scalar(
+        select(models.HolderMetric)
+        .where(models.HolderMetric.asset_id == asset.id)
+        .order_by(models.HolderMetric.ts.desc())
+    )
+    assert metric is not None
+    assert metric.holder_count == 57
+    assert float(metric.top10_pct or 0.0) == pytest.approx(0.9)
 
     health = session.scalar(
         select(models.SystemHealth)
@@ -1264,6 +1393,77 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert health is not None
     assert health.state == "ok"
     assert "2 holder rows across 1 chains" in (health.message or "")
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "GoPlus returned no token data",
+        "GoPlus error 4029: Request limit reached",
+    ],
+)
+def test_evm_holder_failures_mark_source_yellow(session, monkeypatch, error_message: str) -> None:
+    """Missing payloads and provider errors must reach source health instead
+    of looking like an empty-but-successful holder scan."""
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    service.settings.evm_holder_scan_limit = 1
+    service.settings.evm_holder_rpc_pause_seconds = 0.0
+    observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
+
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x4444444444444444444444444444444444444444",
+        symbol="FAIL",
+        name="Failing Token",
+        first_seen_at=observed_at - timedelta(hours=2),
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x5555555555555555555555555555555555555555",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=observed_at - timedelta(days=365),
+    )
+    upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="uniswap-v2-base",
+        pair_address="0x6666666666666666666666666666666666666666",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=observed_at - timedelta(hours=2),
+    )
+    session.commit()
+
+    class FailingEVMHolderClient:
+        def __init__(self, chain_slug: str) -> None:
+            assert chain_slug == "base"
+
+        def close(self) -> None:
+            return None
+
+        def snapshot(self, address: str) -> EVMHolderSnapshot:
+            assert address == asset.address
+            raise GoPlusError(error_message)
+
+    monkeypatch.setattr(ingestion_service, "EVMHolderClient", FailingEVMHolderClient)
+
+    assert service._ingest_evm_holder_snapshots(session) == 0
+
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:evm_holders")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.error_count == 1
+    assert "0 holder rows across 1 chains" in (health.message or "")
+    assert error_message in (health.message or "")
 
 
 def test_geckoterminal_new_pools_cooldown_is_yellow_not_red(session, monkeypatch) -> None:
@@ -1463,7 +1663,7 @@ def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypat
     assert health.state == "yellow"
     assert "pacing" in (health.message or "")
     assert "429" in (health.message or "")
-    assert "cooling down" in (health.message or "")
+    assert "cooling down for 3600s" in (health.message or "")
     assert health.error_count == 0
     assert calls == ["/defi/v2/tokens/new_listing"]
 
@@ -1481,6 +1681,43 @@ def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypat
     assert "deferred" in (health.message or "")
     assert health.error_count == 0
     assert calls == ["/defi/v2/tokens/new_listing"]
+
+
+def test_birdeye_429_honors_retry_after_header(session, monkeypatch) -> None:
+    """The provider's Retry-After delay replaces the configured cooldown."""
+    seed_reference(session)
+    monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 3600)
+    clock = [1000.0]
+    monkeypatch.setattr("ingestion.provider_gate.time.monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def rate_limited(self, path: str, **kwargs) -> None:
+        calls.append(path)
+        request = httpx.Request("GET", f"https://public-api.birdeye.so{path}")
+        response = httpx.Response(429, request=request, headers={"Retry-After": "7"})
+        raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    monkeypatch.setattr("common.http.HttpClient.get_json", rate_limited)
+    service = IngestionService()
+
+    assert service._ingest_birdeye_solana(session) == 0
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert "cooling down for 7s" in (health.message or "")
+
+    # At the header's deadline the gate reopens; a 3600s configured fallback
+    # would still defer this request without calling the provider.
+    clock[0] += 7.1
+    assert service._ingest_birdeye_solana(session) == 0
+    assert calls == [
+        "/defi/v2/tokens/new_listing",
+        "/defi/v2/tokens/new_listing",
+    ]
 
 
 def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:

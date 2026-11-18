@@ -5,12 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import structlog
 from sqlalchemy import select
 
 import crawlers.base as base_mod
 import crawlers.sources.cmc as cmc_mod
 import ingestion.service as ingestion_service
 import narrative.engine as narrative_mod
+from common.config import get_settings
+from common.logging import configure_logging, get_logger
 from crawlers.base import BaseCrawler
 from crawlers.sources.cmc import CMCCrawler
 from ingestion.service import IngestionService
@@ -71,22 +74,38 @@ def test_base_crawler_redacts_http_error_in_log_and_health(monkeypatch) -> None:
     _assert_redacted(crawler.health.last_error)
 
 
-def test_cmc_http_failure_log_redacts_url_key(monkeypatch) -> None:
+def test_cmc_http_failure_log_redacts_url_key(monkeypatch, capfd) -> None:
+    cmc_url = (
+        f"https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?api-key={SECRET}"
+    )
+    cmc_error = f"Server error '500 Internal Server Error' for url '{cmc_url}'"
+
     class _FailingHttp:
         is_closed = False
 
         def get(self, *_args, **_kwargs):
-            raise RuntimeError(HTTP_ERROR)
+            raise RuntimeError(cmc_error)
 
-    crawler = CMCCrawler(api_key="test-cmc-key")
+    crawler = CMCCrawler(api_key=SECRET)
     crawler._client = _FailingHttp()  # type: ignore[assignment]
-    captured = _CaptureLog()
-    monkeypatch.setattr(cmc_mod, "log", captured)
 
-    assert crawler._fetch_pro_items() == []
+    # CMC records this failure at DEBUG. Reconfigure the real logger long enough
+    # to capture its actual output, rather than substituting a fake log object.
+    old_config = structlog.get_config()
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    get_settings.cache_clear()
+    configure_logging()
+    monkeypatch.setattr(cmc_mod, "log", get_logger("crawlers.sources.cmc"))
+    try:
+        assert crawler._fetch_pro_items() == []
+        captured = capfd.readouterr()
+        logs = captured.out + captured.err
+    finally:
+        get_settings.cache_clear()
+        structlog.configure(**old_config)
 
-    assert captured.event == "cmc_pro_listings_failed"
-    _assert_redacted(captured.fields["error"])
+    assert "cmc_pro_listings_failed" in logs
+    _assert_redacted(logs)
 
 
 def test_dexscreener_ingestion_redacts_http_error_in_log_and_health(session, monkeypatch) -> None:

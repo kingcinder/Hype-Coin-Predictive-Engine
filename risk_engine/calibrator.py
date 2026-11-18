@@ -378,58 +378,60 @@ def _compute_reason_weights(
     Batch-loads all explanations to avoid N+1 queries, then computes the
     relative frequency of each reason in collapsed vs survived tokens.
     """
-    collapsed_outcomes = session.scalars(
-        select(models.RiskOutcome).where(
+    collapsed_score_ids = session.scalars(
+        select(models.RiskOutcome.score_id).where(
             models.RiskOutcome.evaluated_at.is_not(None),
             models.RiskOutcome.collapsed.is_(True),
         )
     ).all()
 
-    survived_outcomes = session.scalars(
-        select(models.RiskOutcome).where(
+    survived_score_ids = session.scalars(
+        select(models.RiskOutcome.score_id).where(
             models.RiskOutcome.evaluated_at.is_not(None),
             models.RiskOutcome.survived.is_(True),
         )
     ).all()
 
-    if not collapsed_outcomes:
+    if not collapsed_score_ids:
         return {}
 
-    # Batch-load all explanations by score_id to avoid N+1 queries
-    all_score_ids = list(
-        {o.score_id for o in collapsed_outcomes} | {o.score_id for o in survived_outcomes}
-    )
-    explanations = session.scalars(
-        select(models.ScoreExplanation).where(models.ScoreExplanation.score_id.in_(all_score_ids))
-    ).all()
-    explanation_by_score = {e.score_id: e for e in explanations}
+    # Batch-load only the reason lists by score_id. Hydrating full RiskOutcome
+    # and ScoreExplanation entities for every labelled row was pure overhead in
+    # a calibration pass that only needs two fields.
+    all_score_ids = sorted(set(collapsed_score_ids) | set(survived_score_ids))
+    explanation_by_score: dict[int, list[str]] = {}
+    for start in range(0, len(all_score_ids), 500):
+        chunk = all_score_ids[start : start + 500]
+        rows = session.execute(
+            select(models.ScoreExplanation.score_id, models.ScoreExplanation.risk_reasons).where(
+                models.ScoreExplanation.score_id.in_(chunk)
+            )
+        ).all()
+        for score_id, reasons in rows:
+            explanation_by_score[int(score_id)] = list(reasons or [])
 
     # Get the risk reasons for collapsed and survived tokens via their scores
     collapsed_reasons: dict[str, int] = {}
     survived_reasons: dict[str, int] = {}
 
-    for outcome in collapsed_outcomes:
-        explanation = explanation_by_score.get(outcome.score_id)
-        if explanation:
-            for reason in explanation.risk_reasons:
-                # Normalize reason to a category key
-                key = reason.split(":")[0].strip()[:60]
-                collapsed_reasons[key] = collapsed_reasons.get(key, 0) + 1
+    for score_id in collapsed_score_ids:
+        for reason in explanation_by_score.get(int(score_id), ()):
+            # Normalize reason to a category key
+            key = reason.split(":")[0].strip()[:60]
+            collapsed_reasons[key] = collapsed_reasons.get(key, 0) + 1
 
-    for outcome in survived_outcomes:
-        explanation = explanation_by_score.get(outcome.score_id)
-        if explanation:
-            for reason in explanation.risk_reasons:
-                key = reason.split(":")[0].strip()[:60]
-                survived_reasons[key] = survived_reasons.get(key, 0) + 1
+    for score_id in survived_score_ids:
+        for reason in explanation_by_score.get(int(score_id), ()):
+            key = reason.split(":")[0].strip()[:60]
+            survived_reasons[key] = survived_reasons.get(key, 0) + 1
 
     # Compute weights: reasons that appear more in collapsed vs survived
     # get higher weights
     weights: dict[str, float] = {}
     all_keys = set(collapsed_reasons.keys()) | set(survived_reasons.keys())
 
-    total_collapsed = len(collapsed_outcomes) or 1
-    total_survived = len(survived_outcomes) or 1
+    total_collapsed = len(collapsed_score_ids) or 1
+    total_survived = len(survived_score_ids) or 1
 
     for key in all_keys:
         collapsed_freq = collapsed_reasons.get(key, 0) / total_collapsed

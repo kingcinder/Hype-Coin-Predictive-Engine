@@ -235,8 +235,9 @@ path also reconstructs the on-chain features from the archived RPC evidence:
 `chain_rpc` holder-snapshot payloads — `solana_rpc` for Solana and the
 `evm_holders` source for Base/Ethereum (GoPlus token-security API, no key),
 both shaped `largest_accounts` + `supply` and deduped per
-hour/wallet like `insert_holder_once`, so the reconstruction is
-chain-agnostic — and `suspicious_contract_flags` as the
+hour/wallet like `insert_holder_once`; GoPlus evidence also carries the exact
+`holder_count`, used for the count while top-10 concentration stays list-derived
+and growth is normalized hourly, so the reconstruction is chain-agnostic — and `suspicious_contract_flags` as the
 FULL count of evidence-backed contract flags: `low_liquidity` scans
 (`reserve_in_usd` below `min_discovery_liquidity_usd`) plus the contract
 analyzer's findings (honeypot patterns, mint authority, ownership not

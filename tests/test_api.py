@@ -205,6 +205,8 @@ def test_api_endpoints_return_fixture_data(session, monkeypatch: pytest.MonkeyPa
                 "probe_successes",
                 "probe_failures",
                 "probe_history",
+                "request_count",
+                "success_count",
             }
             <= set(endpoint)
             for chain in pools
@@ -513,13 +515,18 @@ def test_rpc_pool_api_prefers_persisted_worker_snapshot(session) -> None:
 
 
 def test_rpc_pool_api_excludes_retired_endpoints_from_older_snapshot(session) -> None:
-    """Only the newest snapshot timestamp for each chain is rendered."""
-    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    """Only endpoints from the chain's newest snapshot are rendered.
 
-    def add(chain: str, url: str, ts: datetime) -> None:
+    The old per-URL ``max(ts)`` query kept each URL's own latest row, so
+    retired endpoints from an older scan survived beside the current pool.
+    """
+    newest = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    older = newest - timedelta(minutes=10)
+
+    def add(url: str, ts: datetime) -> None:
         session.add(
             models.RpcPoolSnapshot(
-                chain_slug=chain,
+                chain_slug="solana",
                 url=url,
                 ts=ts,
                 health=1.0,
@@ -528,23 +535,20 @@ def test_rpc_pool_api_excludes_retired_endpoints_from_older_snapshot(session) ->
                 probe_count=0,
                 probe_successes=0,
                 probe_failures=0,
-                request_count=0,
-                success_count=0,
-                probe_history=[],
             )
         )
 
-    add("solana", "https://solana-rpc.rpcpool.example", decision_ts - timedelta(minutes=10))
-    add("solana", "https://solana.ankr.example", decision_ts - timedelta(minutes=10))
-    add("solana", "https://mainnet.helius-rpc.com/?api-key=***", decision_ts)
-    add("solana", "https://api.mainnet-beta.solana.com", decision_ts)
+    add("https://solana-rpc.rpcpool.example", older)
+    add("https://solana.ankr.example", older)
+    add("https://mainnet.helius-rpc.com/?api-key=***", newest)
+    add("https://api.mainnet-beta.solana.com", newest)
     session.commit()
 
     solana = next(row for row in rpc_pool_states(session) if row.chain == "solana")
-    assert [endpoint.url for endpoint in solana.endpoints] == [
+    assert {endpoint.url for endpoint in solana.endpoints} == {
         "https://mainnet.helius-rpc.com/?api-key=***",
         "https://api.mainnet-beta.solana.com",
-    ]
+    }
 
 
 def test_velocity_features_endpoint_reports_live_values(session) -> None:
