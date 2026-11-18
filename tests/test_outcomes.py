@@ -16,12 +16,13 @@ from sqlalchemy import select
 from common.time import ensure_utc
 from risk_engine.outcomes import (
     UNRESOLVED_OUTCOME_COMPONENT,
+    _lifecycle_timelines,
     evaluate_outcomes,
     record_risk_outcome,
 )
 from storage import models
 from storage.repository import insert_market_snapshot_once
-from tests.conftest import seed_market_asset
+from tests.conftest import seed_market_asset, seed_reference
 
 SCORED_AT = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 WINDOW_HOURS = 48.0
@@ -95,6 +96,48 @@ def _seed_prediction(
     )
     assert outcome is not None
     return outcome
+
+
+def test_lifecycle_timelines_load_more_than_500_assets(session) -> None:
+    """The batched timeline read must not drop assets after the first 500."""
+    chain, _source = seed_reference(session)
+    assets = [
+        models.Asset(
+            chain_id=chain.id,
+            address=f"BulkTimeline{index:04d}",
+            symbol=f"BULK{index:04d}",
+            first_seen_at=SCORED_AT,
+        )
+        for index in range(501)
+    ]
+    session.add_all(assets)
+    session.flush()
+    session.add_all(
+        models.LifecycleEvent(
+            asset_id=asset.id,
+            phase="seeding",
+            event_type="phase_transition",
+            ts=SCORED_AT,
+            observed_at=SCORED_AT,
+            confidence=0.9,
+            details={},
+        )
+        for asset in assets
+    )
+    session.flush()
+
+    timelines = _lifecycle_timelines(
+        session,
+        {asset.id for asset in assets},
+        as_of=SCORED_AT + timedelta(minutes=1),
+    )
+
+    assert len(assets) == 501
+    assert len(timelines) == len(assets)
+    for asset in assets:
+        times, phases = timelines[asset.id]
+        assert times == [SCORED_AT]
+        assert phases == ["seeding"]
 
 
 def test_post_window_collapse_does_not_label_prediction(session) -> None:

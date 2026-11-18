@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from features.factory import FeatureFactory, _load_source_names
+from features.factory import FeatureFactory, FeatureValue, _load_source_names
 from scoring.engine import ScoringEngine
 from storage import models
 from storage.repository import (
@@ -14,6 +14,7 @@ from storage.repository import (
     insert_market_snapshot_once,
     store_raw_evidence,
     upsert_asset,
+    upsert_features,
     upsert_pool_and_pair,
     upsert_social_mention,
 )
@@ -28,6 +29,63 @@ def _features_by_name(session, asset, decision_ts, *, source_names=None) -> dict
         source_names=source_names,
     )
     return {value.name: value for value in values}
+
+
+def test_upsert_features_updates_existing_row_without_duplicates(session) -> None:
+    """A second scan for the same asset/time updates the feature, not duplicates it."""
+    asset = seed_market_asset(session)
+    decision_ts = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    first = upsert_features(
+        session,
+        asset_id=asset.id,
+        decision_ts=decision_ts,
+        values=[
+            FeatureValue(
+                "kol_velocity",
+                1.0,
+                False,
+                source_count=2,
+                freshness_score=0.9,
+                source_refs={"source": "first"},
+            )
+        ],
+    )
+    session.commit()
+    feature_id = first[0].id
+
+    second = upsert_features(
+        session,
+        asset_id=asset.id,
+        decision_ts=decision_ts,
+        values=[
+            FeatureValue(
+                "kol_velocity",
+                2.5,
+                True,
+                source_count=4,
+                freshness_score=0.8,
+                source_refs={"source": "second"},
+            )
+        ],
+    )
+    session.commit()
+
+    rows = session.scalars(
+        select(models.Feature).where(
+            models.Feature.asset_id == asset.id,
+            models.Feature.decision_ts == decision_ts,
+            models.Feature.feature_name == "kol_velocity",
+        )
+    ).all()
+    assert len(rows) == 1
+    assert second[0].id == feature_id
+    assert rows[0].id == feature_id
+    assert rows[0].feature_value == 2.5
+    assert rows[0].missing_flag is True
+    assert rows[0].source_count == 4
+    assert rows[0].freshness_score == 0.8
+    assert rows[0].source_refs == {"source": "second"}
 
 
 def test_load_source_names_is_one_batched_map(session) -> None:
