@@ -258,10 +258,79 @@ def test_run_harness_reports_unresolved_outcome_backlog(session) -> None:
     assert report.unresolved_outcomes == 1
     assert report.database_digest["unresolved_outcomes"] == 1
     assert any("unresolved" in note for note in report.notes)
-    # B4 top-of-file label accounting: no v2 row resolved, one still unresolved.
+    # B4 top-of-file label accounting: no v2 row resolved; the row is
+    # unresolved, not censored.
     assert report.resolved == 0
-    assert report.censored == 1
+    assert report.censored == 0
     assert report.retrospective_exploratory["text"] == "no confirmatory claim"
+
+
+def test_run_harness_reports_censored_outcomes_separately(session) -> None:
+    """Censored rows leave the unresolved backlog and get their own count."""
+    from datetime import UTC, datetime, timedelta
+
+    from storage import models
+    from storage.repository import upsert_asset
+    from tests.conftest import seed_reference
+    from validation.harness import run_harness
+
+    chain, _source = seed_reference(session)
+    scored_at = datetime.now(UTC) - timedelta(days=10)
+    censored_at = datetime.now(UTC) - timedelta(days=1)
+
+    def seed_outcome(*, suffix: str, censored: bool) -> None:
+        asset = upsert_asset(
+            session,
+            chain_id=chain.id,
+            address=f"Separate{suffix}1111111111111111111111111111",
+            symbol=f"S{suffix[:2]}",
+            name=f"Separate {suffix} Fixture",
+            first_seen_at=datetime(2026, 5, 1, tzinfo=UTC),
+        )
+        score = models.Score(
+            asset_id=asset.id,
+            decision_ts=scored_at,
+            observed_at=scored_at,
+            hype=0.5,
+            ethos=0.5,
+            risk=0.5,
+            liquidity_access=0.5,
+            manipulation=0.1,
+            confidence=0.8,
+            uncertainty=0.2,
+            catalyst=0.3,
+            exit_risk=0.4,
+            research_priority=0.5,
+            risk_band="YELLOW",
+            model_version=f"test-separate-{suffix}",
+        )
+        session.add(score)
+        session.flush()
+        session.add(
+            models.RiskOutcome(
+                asset_id=asset.id,
+                score_id=score.id,
+                risk_band="YELLOW",
+                scored_at=scored_at,
+                lifecycle_phase_at_score="seeding",
+                lifecycle_phase_at_eval="ignition" if censored else None,
+                censored_at=censored_at if censored else None,
+                label_version="v2_bounded",
+            )
+        )
+
+    seed_outcome(suffix="Unresolved", censored=False)
+    seed_outcome(suffix="Censored", censored=True)
+    session.commit()
+
+    report = run_harness(session, min_samples=1)
+
+    assert report.unresolved_outcomes == 1
+    assert report.database_digest["unresolved_outcomes"] == 1
+    assert report.censored == 1
+    assert report.resolved == 0
+    assert any("1 unresolved outcome row(s)" in note for note in report.notes)
+    assert any("resolved=0 censored=1" in note for note in report.notes)
 
 
 # ── run_harness leakage-audit wiring (H24) ──────────────────────────────────

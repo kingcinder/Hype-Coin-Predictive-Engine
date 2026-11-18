@@ -1137,6 +1137,7 @@ def run_harness(
     censored_outcomes = session.scalar(
         select(func.count(models.RiskOutcome.id)).where(
             models.RiskOutcome.evaluated_at.is_(None),
+            models.RiskOutcome.censored_at.is_not(None),
             models.RiskOutcome.label_version == "v2_bounded",
         )
     )
