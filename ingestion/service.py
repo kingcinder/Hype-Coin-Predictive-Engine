@@ -127,12 +127,12 @@ class IngestionService:
 
     def _reset_first_buy_stats(self) -> None:
         self._first_buy_provider_backoff = False
-        self._first_buy_rate_limited = False
         self._first_buy_stats = {
             "pools": 0,
             "budget_skipped": 0,
             "backoff_skipped": 0,
             "gecko_failures": 0,
+            "provider_failures": 0,
             "rpc_fallback_hits": 0,
             "rpc_fallback_swaps": 0,
             "swaps": 0,
@@ -899,7 +899,7 @@ class IngestionService:
         errors: list[str] = []
         client = SolanaRpcClient()
         try:
-            for asset in assets:
+            for index, asset in enumerate(assets):
                 try:
                     supply = client.get_token_supply(asset.address)
                     sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
@@ -975,7 +975,10 @@ class IngestionService:
                 # Per-asset commit: the RPC calls above are network I/O and must
                 # not run inside an open write transaction.
                 self._commit_stage(session)
-                sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
+                # The wait guards the next asset's first RPC request; there is
+                # nothing to pace after the final asset.
+                if index + 1 < len(assets):
+                    sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
             state = "ok" if not errors else "yellow"
             message = f"{count} holder rows across {len(assets)} assets"
             if errors:
@@ -1020,6 +1023,7 @@ class IngestionService:
         errors: list[str] = []
         scanned_chains: list[str] = []
         found_chains: list[str] = []
+        first_request = True
         for chain_slug in evm_chains:
             chain = self._chain(session, chain_slug)
             if not chain:
@@ -1037,9 +1041,13 @@ class IngestionService:
             client = EVMHolderClient(chain_slug)
             try:
                 for asset in assets:
+                    # One provider call carries supply, the exact count, and the
+                    # ranked list, so pace only before another GoPlus request.
+                    # This also covers the gap between chains.
+                    if not first_request:
+                        sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
+                    first_request = False
                     try:
-                        # One provider call carries supply, the exact count, and
-                        # the ranked list; pace between assets only.
                         snapshot = client.snapshot(asset.address)
                         supply = snapshot.supply
                         accounts = snapshot.holders
@@ -1095,7 +1103,6 @@ class IngestionService:
                         session.rollback()
                         errors.append(f"{chain_slug}:{asset.address}: {exc}")
                     self._commit_stage(session)
-                    sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
             finally:
                 client.close()
         if found_chains:
@@ -1125,7 +1132,7 @@ class IngestionService:
             return 0
         assets = self._holder_scan_assets(session, chain.id, self.settings.solana_holder_scan_limit)
         observed_at = utc_now()
-        for asset in assets:
+        for index, asset in enumerate(assets):
             try:
                 collect_asset_safety(session, asset, observed_at=observed_at)
             except Exception as exc:  # noqa: BLE001 - isolate malformed provider/account data.
@@ -1136,7 +1143,9 @@ class IngestionService:
                     error=redact_url(str(exc)),
                 )
             self._commit_stage(session)
-            sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
+            # Pace only before the next asset's RPC calls; no trailing wait.
+            if index + 1 < len(assets):
+                sleep(max(0.0, self.settings.solana_holder_rpc_pause_seconds))
         record_health(
             session,
             component="source:solana_safety",
@@ -1342,8 +1351,11 @@ class IngestionService:
             gecko_failed = True
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if isinstance(exc, CircuitOpen) or status in RATE_LIMIT_STATUSES:
+                # The backoff flag is the source of truth for pacing; reuse it
+                # instead of tracking the same rate-limit state twice.
                 self._first_buy_provider_backoff = True
-                self._first_buy_rate_limited = True
+            else:
+                self._first_buy_stats["provider_failures"] += 1
             self._first_buy_stats["gecko_failures"] += 1
             log.warning(
                 "first_buy_trades_failed",
@@ -1397,36 +1409,41 @@ class IngestionService:
     def _record_first_buy_health(self, session: Session) -> None:
         stats = self._first_buy_stats
         skipped = stats["budget_skipped"] + stats["backoff_skipped"]
+        rate_limited = self._first_buy_provider_backoff
+        provider_failures = stats["provider_failures"]
         if stats["gecko_failures"] == 0 and skipped == 0:
             state = "ok"
-        elif (
-            self._first_buy_rate_limited
-            or stats["gecko_failures"] == 0
-            or stats["rpc_fallback_swaps"] > 0
-        ):
+        elif provider_failures == 0 or stats["rpc_fallback_swaps"] > 0:
             # A rate-limit/cooldown or cap/backoff skip means some pools were
-            # not checked, so the scan is degraded, not failed. Only a genuine
-            # provider failure with no recovery stays red.
+            # not checked, so the scan is degraded, not failed. A non-rate
+            # provider failure recovers only when the fallback returned swaps.
             state = "yellow"
         else:
             state = "red"
         message = " ".join(f"{key}={value}" for key, value in stats.items())
-        if self._first_buy_rate_limited:
-            message = (
-                "pacing: GeckoTerminal rate limited; first-buy fetches deferred "
-                f"for the rest of this scan; {message}"
+        if rate_limited:
+            detail = (
+                "pacing: GeckoTerminal rate limited or cooling down; first-buy "
+                f"fetches deferred for the rest of this scan; {message}"
             )
+            if provider_failures:
+                detail = (
+                    "pacing with provider failures: GeckoTerminal rate limited; "
+                    f"{provider_failures} other provider request(s) failed; "
+                    f"first-buy fetches deferred for the rest of this scan; {message}"
+                )
+            message = detail
         record_health(
             session,
             component="source:first_buy_feed",
             state=state,
             message=message,
-            error_count=0 if self._first_buy_rate_limited else stats["gecko_failures"],
+            error_count=provider_failures,
         )
         log.info(
             "first_buy_feed_health",
             state=state,
-            rate_limited=self._first_buy_rate_limited,
+            rate_limited=rate_limited,
             **stats,
         )
 

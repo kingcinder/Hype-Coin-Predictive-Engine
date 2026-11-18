@@ -562,6 +562,67 @@ def test_first_buy_rate_limit_health_is_yellow_pacing(session, monkeypatch, stat
     assert "rpc_fallback_swaps=0" in health.message
 
 
+def test_first_buy_mixed_rate_limit_and_provider_failure_reports_both(session, monkeypatch) -> None:
+    """A real provider failure must stay an error even when a rate limit also occurs."""
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+    statuses = iter((500, 429))
+    calls: list[str] = []
+
+    def mixed_failures(self, chain: str, pool: str):
+        calls.append(pool)
+        status = next(statuses)
+        request = httpx.Request("GET", f"https://api.geckoterminal.com/{pool}")
+        raise httpx.HTTPStatusError(
+            str(status), request=request, response=httpx.Response(status, request=request)
+        )
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", mixed_failures)
+    monkeypatch.setattr(ingestion_service, "fetch_pool_swaps", lambda *args, **kwargs: [])
+
+    def pair(address: str) -> NormalizedPair:
+        return NormalizedPair(
+            chain_slug="solana",
+            dex_id="raydium",
+            pair_address=address,
+            base_address="MintMixedHealth",
+            base_symbol="MIXED",
+            base_name="Mixed Health Token",
+            quote_address="USDC",
+            quote_symbol="USDC",
+            quote_name="USD Coin",
+            pair_created_at=now,
+            price_usd=1.0,
+            volume_usd=0.0,
+            liquidity_usd=80000.0,
+            reserve_base=None,
+            reserve_quote=None,
+            buys=0,
+            sells=0,
+            trades=0,
+        )
+
+    service = IngestionService()
+    assert service._first_buy_swaps(pair("PoolMixed0"), now, set()) == ([], False)
+    assert service._first_buy_swaps(pair("PoolMixed1"), now, set()) == ([], False)
+    assert calls == ["PoolMixed0", "PoolMixed1"]
+    assert service._first_buy_stats["provider_failures"] == 1
+    assert service._first_buy_stats["gecko_failures"] == 2
+    assert service._first_buy_provider_backoff is True
+
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "red"
+    assert health.error_count == 1
+    assert "pacing with provider failures:" in health.message
+    assert "provider_failures=1" in health.message
+    assert "gecko_failures=2" in health.message
+
+
 def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) -> None:
     """The 429 backoff is per scan: the next scan fetches that pool again.
 
@@ -939,6 +1000,9 @@ def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkey
     service = IngestionService()
     service.ensure_reference_data(session)
     service.settings.solana_holder_scan_limit = 1
+    pause = service.settings.solana_holder_rpc_pause_seconds
+    sleeps: list[float] = []
+    monkeypatch.setattr(ingestion_service, "sleep", sleeps.append)
     observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
     monkeypatch.setattr(ingestion_service, "utc_now", lambda: observed_at)
 
@@ -960,7 +1024,11 @@ def test_solana_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkey
     monkeypatch.setattr(ingestion_service, "SolanaRpcClient", FakeSolanaRpcClient)
 
     assert service._ingest_solana_holder_snapshots(session) == 2
+    # One pause between the two RPC calls, not a trailing pause after the
+    # final (and only) asset.
+    assert sleeps == [pause]
     assert service._ingest_solana_holder_snapshots(session) == 2
+    assert sleeps == [pause, pause]
     session.commit()
 
     holders = session.scalars(select(models.Holder).where(models.Holder.asset_id == asset.id)).all()
@@ -1476,6 +1544,66 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert health is not None
     assert health.state == "ok"
     assert "2 holder rows across 1 chains" in (health.message or "")
+
+
+def test_evm_holder_scan_paces_between_chains_without_trailing_wait(session, monkeypatch) -> None:
+    """Pace before each later GoPlus request, including across chain boundaries."""
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    monkeypatch.setattr(service.settings, "target_chains_csv", "base,ethereum")
+    monkeypatch.setattr(service.settings, "evm_holder_scan_limit", 1)
+    pause = service.settings.evm_holder_rpc_pause_seconds
+    observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: observed_at)
+
+    for index, slug in enumerate(("base", "ethereum")):
+        chain = get_or_create_chain(
+            session, slug, name=slug.title(), vm_type="evm", native_symbol="ETH"
+        )
+        asset = upsert_asset(
+            session,
+            chain_id=chain.id,
+            address=f"0x{index + 1:040x}",
+            symbol=f"PAIR{index}",
+            name=f"Pacing Token {index}",
+            first_seen_at=observed_at - timedelta(hours=2),
+        )
+        quote = upsert_asset(
+            session,
+            chain_id=chain.id,
+            address=f"0x{index + 100:040x}",
+            symbol="WETH",
+            name="Wrapped Ether",
+            first_seen_at=observed_at - timedelta(days=365),
+        )
+        upsert_pool_and_pair(
+            session,
+            chain_id=chain.id,
+            dex_id="uniswap-v2",
+            pair_address=f"0x{index + 200:040x}",
+            base_asset_id=asset.id,
+            quote_asset_id=quote.id,
+            created_at_source=observed_at - timedelta(hours=2),
+        )
+    session.flush()
+
+    class FakeEVMHolderClient:
+        def __init__(self, chain_slug: str) -> None:
+            self.chain_slug = chain_slug
+
+        def close(self) -> None:
+            return None
+
+        def snapshot(self, address: str) -> EVMHolderSnapshot:
+            return EVMHolderSnapshot(supply=100.0, holder_count=0, holders=[])
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(ingestion_service, "EVMHolderClient", FakeEVMHolderClient)
+    monkeypatch.setattr(ingestion_service, "sleep", sleeps.append)
+
+    assert service._ingest_evm_holder_snapshots(session) == 0
+    # The first request is immediate; the next chain's first request waits once.
+    assert sleeps == [pause]
 
 
 @pytest.mark.parametrize(
