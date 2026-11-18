@@ -112,6 +112,36 @@ def test_post_window_collapse_does_not_label_prediction(session) -> None:
     assert outcome.lifecycle_phase_at_eval == "unknown"
 
 
+def test_terminal_backfill_inside_window_recovers_censored_outcome(session) -> None:
+    """A late terminal event inside the window must reopen a censored row."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    # First evaluation sees only a non-terminal phase inside the window, so
+    # the prediction is censored rather than labelled.
+    _seed_lifecycle(session, asset, "ignition", SCORED_AT + timedelta(hours=6))
+
+    first = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert first.censored == 1
+    assert outcome.evaluated_at is None
+    assert outcome.censored_at is not None
+    assert outcome.lifecycle_phase_at_eval == "ignition"
+
+    # Backfill a terminal event inside the original 48h observation window.
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+    recovery_ts = EVAL_TS + timedelta(hours=1)
+
+    second = evaluate_outcomes(session, decision_ts=recovery_ts, window_hours=WINDOW_HOURS)
+
+    assert second.censored == 0
+    assert outcome.censored_at is None
+    assert ensure_utc(outcome.evaluated_at) == recovery_ts
+    assert outcome.collapsed is True
+    assert outcome.rugged is False
+    assert outcome.survived is False
+    assert outcome.lifecycle_phase_at_eval == "collapse"
+
+
 def test_collapse_inside_window_labels_collapsed(session) -> None:
     asset = seed_market_asset(session)
     outcome = _seed_prediction(session, asset)
@@ -225,6 +255,147 @@ def test_evaluated_outcomes_commit_in_batches(session, monkeypatch) -> None:
     assert ensure_utc(first_outcome.evaluated_at) == EVAL_TS
     assert ensure_utc(second_outcome.evaluated_at) == EVAL_TS
     assert len(commits) >= 2
+
+
+def test_large_due_backlog_uses_bounded_batches_and_short_lock_holds(session) -> None:
+    """A realistic due backlog must commit every 500 rows, not hold one lock.
+
+    The independent probe is a second SQLite connection that repeatedly asks
+    for the writer lock.  Its longest blocked interval is the observed lock
+    hold; the elapsed time covers the whole outcome-evaluation pass.
+    """
+    import sqlite3
+    import threading
+    import time
+
+    from sqlalchemy import event
+
+    from risk_engine import outcomes as outcomes_module
+
+    backlog = 5000
+    assert outcomes_module.OUTCOME_BATCH_SIZE == 500
+    asset = seed_market_asset(session)
+    scores = [
+        models.Score(
+            asset_id=asset.id,
+            decision_ts=SCORED_AT,
+            observed_at=SCORED_AT,
+            hype=0.5,
+            ethos=0.5,
+            risk=90.0,
+            liquidity_access=0.5,
+            manipulation=0.1,
+            confidence=80.0,
+            uncertainty=0.2,
+            catalyst=0.3,
+            exit_risk=0.9,
+            research_priority=0.5,
+            risk_band="BLACK",
+            model_version=f"test-large-backlog-{index}",
+        )
+        for index in range(backlog)
+    ]
+    session.add_all(scores)
+    session.flush()
+    session.add_all(
+        [
+            models.RiskOutcome(
+                asset_id=asset.id,
+                score_id=score.id,
+                risk_band="BLACK",
+                scored_at=SCORED_AT,
+                lifecycle_phase_at_score="seeding",
+                label_version="v2_bounded",
+                details={},
+            )
+            for score in scores
+        ]
+    )
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+    session.commit()
+
+    commits: list[int] = []
+    write_started: float | None = None
+    write_holds: list[float] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _mark_write(  # type: ignore[no-untyped-def]
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        nonlocal write_started
+        if write_started is None and statement.lstrip().upper().startswith(
+            ("UPDATE", "INSERT", "DELETE")
+        ):
+            write_started = time.perf_counter()
+
+    @event.listens_for(session, "after_commit")
+    def _finish_commit(_session) -> None:  # type: ignore[no-untyped-def]
+        nonlocal write_started
+        commits.append(1)
+        if write_started is not None:
+            write_holds.append(time.perf_counter() - write_started)
+            write_started = None
+
+    db_path = str(session.get_bind().url.database)
+    assert db_path
+    stop = threading.Event()
+    ready = threading.Event()
+    holds: list[float] = []
+
+    def probe_writer_lock() -> None:
+        connection = sqlite3.connect(db_path, timeout=0.005)
+        connection.execute("PRAGMA busy_timeout=5")
+        blocked_since: float | None = None
+        ready.set()
+        try:
+            while not stop.is_set():
+                attempt = time.monotonic()
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower():
+                        if blocked_since is None:
+                            blocked_since = attempt
+                        time.sleep(0.002)
+                        continue
+                    raise
+                if blocked_since is not None:
+                    holds.append(attempt - blocked_since)
+                    blocked_since = None
+                connection.execute("ROLLBACK")
+                time.sleep(0.002)
+        finally:
+            if blocked_since is not None:
+                holds.append(time.monotonic() - blocked_since)
+            connection.close()
+
+    thread = threading.Thread(target=probe_writer_lock, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5)
+    started = time.perf_counter()
+    try:
+        report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+    finally:
+        elapsed = time.perf_counter() - started
+        stop.set()
+        thread.join(timeout=5)
+
+    max_lock_hold = max(holds, default=0.0)
+    max_write_txn = max(write_holds, default=0.0)
+    assert write_holds, "no write transaction was observed"
+    print(
+        "large_outcome_backlog "
+        f"rows={backlog} elapsed={elapsed:.3f}s max_probe_lock={max_lock_hold:.3f}s "
+        f"max_write_txn={max_write_txn:.3f}s commits={len(commits)}"
+    )
+
+    assert report.total_flagged == backlog
+    assert report.total_collapsed == backlog
+    # One commit at each 500-row boundary plus the final health/ensemble writes.
+    assert len(commits) >= 10
+    assert elapsed < 60.0, f"outcome evaluation took {elapsed:.1f}s"
+    assert max_lock_hold < 10.0, f"writer lock held for {max_lock_hold:.1f}s"
+    assert max_write_txn < 10.0, f"write transaction held for {max_write_txn:.1f}s"
 
 
 def test_censored_backlog_uses_one_update_per_batch(session, monkeypatch) -> None:

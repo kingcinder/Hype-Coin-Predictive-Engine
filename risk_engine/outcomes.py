@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import bindparam, func, select, update
+from sqlalchemy import bindparam, func, or_, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
 
@@ -74,6 +74,7 @@ class RiskOutcomeReport:
 #: window end (including no event at all) cannot label a prediction.
 _COLLAPSE_PHASES = frozenset({"collapse", "dead", "rugged"})
 _SURVIVAL_PHASES = frozenset({"survivor", "parabolic", "saturation"})
+_TERMINAL_PHASES = _COLLAPSE_PHASES | _SURVIVAL_PHASES
 
 #: ``SystemHealth`` component carrying the unresolved-label backlog, so
 #: withheld outcomes are visible in ``/health`` without grepping logs.
@@ -267,6 +268,7 @@ _EVALUATED_OUTCOME_UPDATE = (
         lifecycle_phase_at_eval=bindparam("lifecycle_phase_at_eval"),
         price_change_pct=bindparam("price_change_pct"),
         evaluated_at=bindparam("evaluated_at"),
+        censored_at=bindparam("censored_at"),
         label_version=bindparam("label_version"),
         collapsed=bindparam("collapsed"),
         rugged=bindparam("rugged"),
@@ -346,8 +348,9 @@ def evaluate_outcomes(
     window end may label the row.  When no lifecycle phase inside that window
     establishes collapse or survival, the row is censored (``censored_at`` is
     stamped, ``evaluated_at`` stays NULL) so it is never counted as a
-    non-survival and is not retried on every subsequent scan.  Backfilling the
-    window requires clearing ``censored_at`` before the next evaluation.
+    non-survival and is not retried on every subsequent scan.  If a terminal
+    lifecycle event is later backfilled inside the window, the censored row is
+    re-opened and evaluated normally.
     """
     settings = get_settings()
     decision_ts = ensure_utc(decision_ts or utc_now())
@@ -357,6 +360,20 @@ def evaluate_outcomes(
     # Loading future rows made every scan pay for the full backlog even when
     # none of those rows could advance.
     due_cutoff = decision_ts - window
+    # Censored rows are normally retired, but a later terminal-event backfill
+    # inside their window must be able to reopen them.  Load a censored row
+    # only when its asset now has a terminal event at/after the score time;
+    # the bounded window check below decides whether it is actually eligible.
+    terminal_backfill = (
+        select(models.LifecycleEvent.id)
+        .where(
+            models.LifecycleEvent.asset_id == models.RiskOutcome.asset_id,
+            models.LifecycleEvent.ts >= models.RiskOutcome.scored_at,
+            models.LifecycleEvent.ts <= decision_ts,
+            models.LifecycleEvent.phase.in_(_TERMINAL_PHASES),
+        )
+        .exists()
+    )
     outcome_rows = session.execute(
         select(
             models.RiskOutcome.id,
@@ -365,11 +382,12 @@ def evaluate_outcomes(
             models.RiskOutcome.scored_at,
             models.RiskOutcome.label_version,
             models.RiskOutcome.lifecycle_phase_at_eval,
+            models.RiskOutcome.censored_at,
         )
         .where(
             models.RiskOutcome.evaluated_at.is_(None),
-            models.RiskOutcome.censored_at.is_(None),
             models.RiskOutcome.scored_at <= due_cutoff,
+            or_(models.RiskOutcome.censored_at.is_(None), terminal_backfill),
         )
         .order_by(models.RiskOutcome.scored_at.asc())
     ).all()
@@ -419,9 +437,10 @@ def evaluate_outcomes(
         if outcome.label_version != LABEL_VERSION and outcome.score_id in current_version_scores:
             # Superseded legacy row: leave its label untouched as v1 history,
             # but retire it from the due backlog now that a bounded row covers
-            # the score.
-            legacy_ids.append(outcome.id)
-            censored += 1
+            # the score.  An already-censored legacy row is already retired.
+            if outcome.censored_at is None:
+                legacy_ids.append(outcome.id)
+                censored += 1
             if index % OUTCOME_BATCH_SIZE == 0:
                 flush_batch()
             continue
@@ -439,10 +458,14 @@ def evaluate_outcomes(
             timeline_index = bisect_right(times, window_end) - 1
             if timeline_index >= 0:
                 phase = phases[timeline_index]
-        if phase not in _COLLAPSE_PHASES and phase not in _SURVIVAL_PHASES:
-            # Unresolved: no lifecycle state in the window, or a phase that is
-            # neither collapse nor survival.  Do NOT stamp evaluated_at — an
-            # outcome that cannot be established must not become a failure.
+        if phase not in _TERMINAL_PHASES:
+            # Unresolved: no terminal lifecycle state in the window.  Do NOT
+            # stamp evaluated_at — an outcome that cannot be established must
+            # not become a failure.  A row already censored stays retired; it
+            # was loaded only because a later terminal event exists, and that
+            # event is outside this observation window.
+            if outcome.censored_at is not None:
+                continue
             censored_by_phase.setdefault(phase or "unknown", []).append(outcome.id)
             censored += 1
         else:
@@ -454,6 +477,8 @@ def evaluate_outcomes(
                         session, outcome.asset_id, score_time, until=window_end
                     ),
                     "evaluated_at": decision_ts,
+                    # A recovered row is no longer retired after evaluation.
+                    "censored_at": None,
                     "label_version": LABEL_VERSION,
                     "collapsed": phase in _COLLAPSE_PHASES,
                     "rugged": phase == "rugged",
