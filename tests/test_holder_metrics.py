@@ -37,6 +37,29 @@ def test_two_hours_growth_is_hundred(session) -> None:
     assert row.holder_growth_per_hour == Decimal("100")
 
 
+def test_non_aligned_observations_use_actual_elapsed_hours(session) -> None:
+    """Snapshots at 10:15 and 11:45 keep their real observation times, so
+    growth uses the actual 1.5-hour delta rather than floored hour buckets."""
+    asset = seed_market_asset(session)
+    first = record_holder_metrics(
+        session,
+        asset.id,
+        top10_pct=None,
+        holder_count=100,
+        observed_at=datetime(2026, 5, 1, 10, 15, tzinfo=UTC),
+    )
+    second = record_holder_metrics(
+        session,
+        asset.id,
+        top10_pct=None,
+        holder_count=300,
+        observed_at=datetime(2026, 5, 1, 11, 45, tzinfo=UTC),
+    )
+    assert first.ts == datetime(2026, 5, 1, 10, 15, tzinfo=UTC)
+    assert second.ts == datetime(2026, 5, 1, 11, 45, tzinfo=UTC)
+    assert second.holder_growth_per_hour == Decimal("133.333333")
+
+
 def test_exact_holder_count_and_hourly_growth_use_metrics(session) -> None:
     """The exact metric count and hourly growth survive even though only ten
     Holder rows exist, while concentration still comes from those rows."""

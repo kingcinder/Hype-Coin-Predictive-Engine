@@ -894,6 +894,53 @@ def test_lake_read_path_ignores_other_assets(session, tmp_path) -> None:
     assert lake_values["suspicious_contract_flags"].value == 0.0
 
 
+def test_lake_evm_growth_uses_actual_observation_times(session, tmp_path) -> None:
+    """GoPlus observations at 09:30 and 11:20 must produce the actual 1h50m
+    growth rate, not a two-hour rate from floored hour buckets."""
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0xTokenBaseNonAligned1111111111111111111111",
+        symbol="EVMA",
+        name="EVM Aligned",
+        first_seen_at=DECISION - timedelta(hours=6),
+    )
+    evm_a = [
+        (f"0x{letter * 40}", balance)
+        for letter, (_, balance) in zip("abcde", SNAPSHOT_A, strict=True)
+    ]
+    evm_b = evm_a + [("0xf" * 40, 600.0), ("0xe" * 40, 700.0)]
+    _seed_holder_evidence(
+        session,
+        asset,
+        with_sql_rows=True,
+        source_name="evm_holders",
+        snapshots=[(2.5, evm_a), (2 / 3, evm_b)],
+        holder_counts=[12, 42],
+    )
+    session.flush()
+
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    sql_values = {
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+    }
+    lake_values = LakeFeatureFactory(
+        store=LocalArchiveStore(tmp_path), settings=settings
+    ).build_for_asset(asset_address=asset.address, decision_ts=DECISION)
+
+    assert sql_values["holder_count"].value == pytest.approx(42.0)
+    assert lake_values["holder_count"].value == pytest.approx(42.0)
+    assert sql_values["holder_growth"].value == pytest.approx(30.0 / (110.0 / 60.0))
+    assert lake_values["holder_growth"].value == pytest.approx(30.0 / (110.0 / 60.0))
+    assert lake_values["holder_growth"].value == pytest.approx(sql_values["holder_growth"].value)
+
+
 def test_lake_reconstructs_evm_holders_from_goplus_evidence(session, tmp_path) -> None:
     """The lake reconstructs the exact GoPlus holder count while keeping
     concentration from the ranked top-10 list, matching the SQL path."""

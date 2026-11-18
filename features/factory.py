@@ -730,14 +730,20 @@ class FeatureFactory:
             # Older/manual metric rows may not carry growth. Derive the hourly
             # rate from exact metric counts when possible, then fall back to the
             # legacy top-holder rows.
+            prior_cutoff = decision_ts - timedelta(hours=1)
+            if metric is not None:
+                # Growth is anchored to the exact latest observation, not the
+                # decision hour, so non-aligned snapshots use their real delta.
+                prior_cutoff = ensure_utc(metric.ts) - timedelta(hours=1)
+            prior_metric_query = select(models.HolderMetric).where(
+                models.HolderMetric.asset_id == asset_id,
+                models.HolderMetric.ts <= prior_cutoff,
+            )
+            if metric is not None:
+                # The latest observation is not its own prior observation.
+                prior_metric_query = prior_metric_query.where(models.HolderMetric.ts < metric.ts)
             prior_metric = session.scalar(
-                select(models.HolderMetric)
-                .where(
-                    models.HolderMetric.asset_id == asset_id,
-                    models.HolderMetric.ts <= decision_ts - timedelta(hours=1),
-                )
-                .order_by(models.HolderMetric.ts.desc())
-                .limit(1)
+                prior_metric_query.order_by(models.HolderMetric.ts.desc()).limit(1)
             )
             if (
                 metric is not None
@@ -751,13 +757,19 @@ class FeatureFactory:
                 if hours > 0:
                     growth = (holder_count - float(prior_metric.holder_count)) / hours
             else:
-                prior_ts = session.scalar(
-                    select(func.max(models.Holder.ts)).where(
-                        models.Holder.asset_id == asset_id,
-                        models.Holder.ts <= decision_ts - timedelta(hours=1),
-                        models.Holder.observed_at <= decision_ts,
-                    )
+                holder_prior_cutoff = (
+                    ensure_utc(latest_ts) - timedelta(hours=1)
+                    if latest_ts is not None
+                    else decision_ts - timedelta(hours=1)
                 )
+                prior_ts_query = select(func.max(models.Holder.ts)).where(
+                    models.Holder.asset_id == asset_id,
+                    models.Holder.ts <= holder_prior_cutoff,
+                    models.Holder.observed_at <= decision_ts,
+                )
+                if latest_ts is not None:
+                    prior_ts_query = prior_ts_query.where(models.Holder.ts < latest_ts)
+                prior_ts = session.scalar(prior_ts_query)
                 if prior_ts is not None and latest_ts is not None:
                     prior_count = session.scalar(
                         select(func.count())

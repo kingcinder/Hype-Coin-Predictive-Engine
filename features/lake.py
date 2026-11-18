@@ -853,28 +853,57 @@ class LakeFeatureFactory:
         decision_ts = ensure_utc(naive_ts)
         out: dict[str, tuple[float | None, float | None, float | None]] = {}
         for address, hours in by_asset.items():
-            timestamps = sorted(ts for ts in hours if ts <= decision_ts)
-            if not timestamps:
-                out[address] = (None, None, None)
-                continue
-            latest_ts = timestamps[-1]
-            latest = hours[latest_ts]
-            exact_latest = exact_by_asset[address].get(latest_ts)
-            holder_count = exact_latest[1] if exact_latest is not None else float(len(latest))
+            exacts = exact_by_asset[address]
+            exact_candidates = [
+                (ts, observed, count)
+                for ts, (observed, count) in exacts.items()
+                if observed <= decision_ts
+            ]
+            if exact_candidates:
+                # The exact GoPlus count carries its real observation time;
+                # use that, not the hour bucket, for growth.
+                latest_ts, latest_observed, exact_latest_count = max(
+                    exact_candidates, key=lambda item: item[1]
+                )
+                latest = hours[latest_ts]
+                holder_count = exact_latest_count
+            else:
+                timestamps = sorted(ts for ts in hours if ts <= decision_ts)
+                if not timestamps:
+                    out[address] = (None, None, None)
+                    continue
+                latest_ts = timestamps[-1]
+                latest_observed = latest_ts
+                latest = hours[latest_ts]
+                holder_count = float(len(latest))
             concentration = float(
                 sum(sorted((pct for _, pct in latest.values()), reverse=True)[:10])
             )
-            prior = [ts for ts in timestamps if ts <= decision_ts - timedelta(hours=1)]
+            exact_prior_candidates = [
+                (ts, observed, count)
+                for ts, (observed, count) in exacts.items()
+                if ts < latest_ts and observed <= latest_observed - timedelta(hours=1)
+            ]
             growth = None
-            if prior:
-                prior_ts = prior[-1]
-                exact_prior = exact_by_asset[address].get(prior_ts)
-                prior_count = (
-                    exact_prior[1] if exact_prior is not None else float(len(hours[prior_ts]))
+            if exact_prior_candidates:
+                prior_ts, prior_observed, prior_count = max(
+                    exact_prior_candidates, key=lambda item: item[1]
                 )
-                elapsed_hours = (latest_ts - prior_ts).total_seconds() / 3600.0
+                elapsed_hours = (latest_observed - prior_observed).total_seconds() / 3600.0
                 if elapsed_hours > 0:
                     growth = (holder_count - prior_count) / elapsed_hours
+            elif not exact_candidates:
+                prior = [
+                    ts
+                    for ts in timestamps
+                    if ts < latest_ts and ts <= latest_observed - timedelta(hours=1)
+                ]
+                if prior:
+                    prior_ts = prior[-1]
+                    prior_count = float(len(hours[prior_ts]))
+                    elapsed_hours = (latest_observed - prior_ts).total_seconds() / 3600.0
+                    if elapsed_hours > 0:
+                        growth = (holder_count - prior_count) / elapsed_hours
             out[address] = (holder_count, growth, concentration)
         return out
 

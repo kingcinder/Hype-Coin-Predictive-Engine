@@ -1286,6 +1286,89 @@ def test_evm_holder_client_rejects_provider_error() -> None:
         client.close()
 
 
+@respx.mock
+def test_evm_holder_scan_empty_goplus_result_is_yellow_not_zero_holder_ok(
+    session, monkeypatch
+) -> None:
+    """A code-1 GoPlus response with ``result: {}`` is missing coverage.
+
+    The scan must surface the provider reason on a yellow health row and must
+    not report an ok scan with zero holder rows/metrics.
+    """
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    service.settings.evm_holder_scan_limit = 1
+    service.settings.evm_holder_rpc_pause_seconds = 0.0
+    observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
+    monkeypatch.setattr(ingestion_service, "utc_now", lambda: observed_at)
+
+    created = observed_at - timedelta(hours=2)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x1111111111111111111111111111111111111111",
+        symbol="EMPTY",
+        name="Empty GoPlus",
+        first_seen_at=created,
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x2222222222222222222222222222222222222222",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=created - timedelta(days=365),
+    )
+    upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="uniswap-v2-base",
+        pair_address="0x3333333333333333333333333333333333333333",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=created,
+    )
+    session.flush()
+
+    respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 1, "message": "OK", "result": {}},
+        )
+    )
+
+    assert service._ingest_evm_holder_snapshots(session) == 0
+    session.commit()
+
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:evm_holders")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.error_count == 1
+    assert "GoPlus returned no token data" in (health.message or "")
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(models.Holder)
+            .where(models.Holder.asset_id == asset.id)
+        )
+        == 0
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(models.HolderMetric)
+            .where(models.HolderMetric.asset_id == asset.id)
+        )
+        == 0
+    )
+
+
+@respx.mock
 def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
     """The EVM holder scan (GoPlus) stores the same evidence shape as the
     Solana path on the evm_holders chain_rpc source, writes Holder rows with
