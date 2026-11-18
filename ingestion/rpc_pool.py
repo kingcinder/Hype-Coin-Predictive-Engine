@@ -171,6 +171,7 @@ class RpcEndpointPool:
         return chosen
 
     def mark_success(self, url: str, *, live: bool = True) -> None:
+        """Restore endpoint health; ``live=False`` skips the live-success counter."""
         announce = False
         with self._lock:
             if url not in self._health:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 from features.factory import FeatureFactory
+from ingestion.rpc_pool import RpcEndpointPool
 from radar.liquidity import BURN_TOPIC, TRANSFER_TOPIC, ZERO_TOPIC, LiquidityRemovalWatcher
 from risk_engine.rules import assess_risk
 from storage import models
@@ -98,6 +99,35 @@ def test_liquidity_watcher_detects_burns_and_withdrawals_before_risk(session, mo
     )
     assert assessment.score > 0
     assert any("LP burn/withdrawal" in reason for reason in assessment.reasons)
+
+
+def test_lp_removal_counts_each_successful_rpc_call(monkeypatch) -> None:
+    class FakeHttpClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def post_json(self, _path, *, json, **_kwargs):
+            if json["method"] == "eth_blockNumber":
+                return {"result": "0x100"}
+            return {"result": []}
+
+    monkeypatch.setattr("radar.liquidity.HttpClient", FakeHttpClient)
+    pool = RpcEndpointPool(["https://base.example.com"])
+
+    assert (
+        LiquidityRemovalWatcher()._logs_from_endpoint("https://base.example.com", "base", pool, [])
+        == []
+    )
+
+    state = pool.snapshot()[0]
+    assert state.request_count == 2
+    assert state.success_count == 2
 
 
 def test_transfer_mint_is_not_mistaken_for_lp_burn(session) -> None:

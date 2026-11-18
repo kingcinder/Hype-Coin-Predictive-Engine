@@ -1870,8 +1870,8 @@ def feed_health() -> None:
     st.caption(
         "Endpoint state comes from the latest persisted worker snapshot, with a local "
         "fallback before the first scan. Probe history records background and scan-time "
-        "liveness checks; RPC requests count JSON-RPC calls since pool initialization, "
-        "separately from probes."
+        "liveness checks; RPC requests and successes count JSON-RPC calls since pool "
+        "initialization, separately from probes."
     )
     for chain in pool_data:
         st.markdown(f"**{chain['chain'].upper()} · {chain['state'].upper()}**")
@@ -1894,6 +1894,7 @@ def feed_health() -> None:
                     ),
                     "probes": endpoint["probe_count"],
                     "RPC requests": endpoint["request_count"],
+                    "RPC successes": endpoint["success_count"],
                 }
             )
             for probe in endpoint.get("probe_history") or []:
@@ -1943,12 +1944,22 @@ def rpc_pool_status() -> None:
                     "health_score": endpoint["health"],
                     "consecutive_failures": endpoint["consecutive_failures"],
                     "RPC requests": endpoint["request_count"],
+                    "RPC successes": endpoint["success_count"],
                     "status": "DOWN" if endpoint["down"] else "up",
                 }
             )
         df = pd.DataFrame(rows)
         st.dataframe(
-            df[["endpoint", "status", "health", "consecutive_failures", "RPC requests"]],
+            df[
+                [
+                    "endpoint",
+                    "status",
+                    "health",
+                    "consecutive_failures",
+                    "RPC requests",
+                    "RPC successes",
+                ]
+            ],
             width="stretch",
             hide_index=True,
         )

@@ -169,6 +169,8 @@ class LiquidityRemovalWatcher:
             latest = self._hex_int(latest_payload.get("result"))
             if latest is None:
                 raise RuntimeError(f"{chain_slug}: invalid eth_blockNumber response")
+            if pool is not None:
+                pool.mark_success(rpc_url)
             start = max(0, latest - max(1, self.settings.liquidity_removal_lookback_blocks))
             if pool is not None:
                 pool.record_request(rpc_url)
@@ -188,8 +190,8 @@ class LiquidityRemovalWatcher:
                     ],
                 },
             )
-        if pool is not None:
-            pool.mark_success(rpc_url)
+            if pool is not None:
+                pool.mark_success(rpc_url)
         result = payload.get("result") if isinstance(payload, dict) else None
         return result if isinstance(result, list) else []
 

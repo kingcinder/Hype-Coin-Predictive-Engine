@@ -313,7 +313,8 @@ class NarrativeEngine:
                     endpoint_pool.mark_failure(endpoint_url)
                 raise
             if endpoint_pool is not None and endpoint_url is not None:
-                endpoint_pool.mark_success(endpoint_url)
+                # Narrative endpoints are HTTP sources, not JSON-RPC calls.
+                endpoint_pool.mark_success(endpoint_url, live=False)
             store_raw_evidence(
                 session,
                 source=source,

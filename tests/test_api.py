@@ -205,6 +205,8 @@ def test_api_endpoints_return_fixture_data(session, monkeypatch: pytest.MonkeyPa
                 "probe_successes",
                 "probe_failures",
                 "probe_history",
+                "request_count",
+                "success_count",
             }
             <= set(endpoint)
             for chain in pools

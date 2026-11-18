@@ -509,7 +509,8 @@ def _render_health_body() -> None:
                                 "Down": "\u274c" if ep.get("down") else "\u2705",
                                 "Probes": ep.get("probe_count", 0),
                                 "RPC requests": ep.get("request_count", 0),
-                                "Success": (
+                                "RPC successes": ep.get("success_count", 0),
+                                "Probe success": (
                                     f"{ep.get('probe_successes', 0)}/{ep.get('probe_count', 0)}"
                                 ),
                             }
