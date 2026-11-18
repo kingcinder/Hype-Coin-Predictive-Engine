@@ -8,10 +8,12 @@ from sqlalchemy import select
 
 from common.config import Settings
 from common.time import ensure_utc, utc_now
+from features.factory import compute_market_block
 from ops import parity as parity_module
 from ops.archive import LocalArchiveStore, RawEvidenceCompactor
 from ops.notifier import notify_parity_mismatch
 from ops.parity import (
+    compare_asset,
     parity_decision_ts,
     parity_due,
     run_parity,
@@ -349,6 +351,69 @@ def _add_sql_only_holder(session, asset) -> None:
         )
     )
     session.flush()
+
+
+def test_market_block_latest_tie_is_order_independent() -> None:
+    """Several pools can share one hourly snapshot. The SQL path and the lake
+    return those ties in different orders, so the selected latest row must be
+    deterministic rather than input-order dependent."""
+    from types import SimpleNamespace
+
+    observed = DECISION - timedelta(minutes=5)
+    rows = [
+        SimpleNamespace(
+            ts=DECISION - timedelta(hours=1),
+            observed_at=observed,
+            source_id=2,
+            pair_id=pair_id,
+            price_usd=price,
+            volume_usd=volume,
+            buys=buys,
+            sells=sells,
+        )
+        for pair_id, price, volume, buys, sells in (
+            (110, 0.0004277, 3_547.0, 52, 31),
+            (112, 0.0004847, 255.0, 18, 11),
+            (117, 0.0002626, 128.0, 2, 6),
+        )
+    ]
+    asset = SimpleNamespace(first_seen_at=DECISION - timedelta(hours=6))
+
+    def block(order):
+        values = compute_market_block(
+            asset=asset,
+            pairs=[],
+            market_rows=order,
+            liquidity_rows=[],
+            decision_ts=DECISION,
+        )
+        return {name: (value.value, value.missing) for name, value in values.items()}
+
+    assert block(rows) == block(list(reversed(rows)))
+
+
+def test_parity_one_sided_missing_is_coverage_not_divergence(session, tmp_path) -> None:
+    """A stale/partial archive must not turn SQL-present, lake-missing features
+    into parity mismatches. Missingness is coverage; only shared values compare."""
+    from features.factory import FeatureValue
+    from features.lake import LAKE_FEATURE_NAMES
+
+    settings = _settings(tmp_path)
+    asset = _seed_consistent(session, tmp_path, settings)
+    lake_values = {
+        name: FeatureValue(name=name, value=0.0, missing=True) for name in LAKE_FEATURE_NAMES
+    }
+
+    mismatches = compare_asset(
+        session,
+        asset,
+        decision_ts=DECISION,
+        tolerance=settings.parity_tolerance,
+        settings=settings,
+        lake_values=lake_values,
+    )
+
+    assert mismatches == []
 
 
 def test_parity_ok_on_consistent_lake(session, tmp_path) -> None:

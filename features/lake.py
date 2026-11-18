@@ -90,26 +90,122 @@ LAKE_FEATURE_NAMES: tuple[str, ...] = (
 
 _RECONSTRUCT_SQL = """
 WITH raw AS (
-    SELECT observed_at, source_id, payload_json
+    SELECT
+        observed_at,
+        source_id,
+        payload_json,
+        json_extract_string(payload_json, '$.new_pools') IS NOT NULL AS is_new_pools_feed,
+        json_extract_string(payload_json, '$.attributes.address') IS NOT NULL AS is_pool_payload,
+        json_extract_string(payload_json, '$.pairAddress') IS NOT NULL AS is_dex_pair_payload
     FROM read_parquet($files, union_by_name = true)
     WHERE source_type = 'market_data'
       AND observed_at <= $decision_ts
-      AND json_extract_string(payload_json, '$.new_pools') IS NOT NULL
+      AND (
+          json_extract_string(payload_json, '$.new_pools') IS NOT NULL
+          OR json_extract_string(payload_json, '$.attributes.address') IS NOT NULL
+          OR json_extract_string(payload_json, '$.pairAddress') IS NOT NULL
+      )
 ),
 pools AS (
     SELECT
         r.observed_at AS observed_at,
         r.source_id AS source_id,
+        r.is_new_pools_feed AS is_new_pools_feed,
         t.pool AS pool
     FROM raw AS r
     CROSS JOIN UNNEST(
         from_json(json_extract_string(r.payload_json, '$.new_pools'), '["JSON"]')
     ) AS t(pool)
+    WHERE r.is_new_pools_feed
+    UNION ALL
+    SELECT
+        r.observed_at AS observed_at,
+        r.source_id AS source_id,
+        FALSE AS is_new_pools_feed,
+        r.payload_json AS pool
+    FROM raw AS r
+    WHERE NOT r.is_new_pools_feed AND r.is_pool_payload
+    UNION ALL
+    -- DexScreener returns one pair per payload with its own field names; map
+    -- it onto the GeckoTerminal shape the rest of this query consumes.
+    SELECT
+        r.observed_at AS observed_at,
+        r.source_id AS source_id,
+        FALSE AS is_new_pools_feed,
+        json_object(
+            'attributes', json_object(
+                'address', json_extract_string(r.payload_json, '$.pairAddress'),
+                'base_token_price_usd', json_extract_string(r.payload_json, '$.priceUsd'),
+                'volume_usd', json_object(
+                    'h1', CASE
+                        WHEN COALESCE(
+                            TRY_CAST(
+                                json_extract_string(r.payload_json, '$.volume.h1') AS DOUBLE
+                            ),
+                            0
+                        ) = 0 THEN NULL
+                        ELSE json_extract_string(r.payload_json, '$.volume.h1')
+                    END,
+                    'h24', CASE
+                        WHEN COALESCE(
+                            TRY_CAST(
+                                json_extract_string(r.payload_json, '$.volume.h24') AS DOUBLE
+                            ),
+                            0
+                        ) = 0 THEN NULL
+                        ELSE json_extract_string(r.payload_json, '$.volume.h24')
+                    END,
+                    'm5', CASE
+                        WHEN COALESCE(
+                            TRY_CAST(
+                                json_extract_string(r.payload_json, '$.volume.m5') AS DOUBLE
+                            ),
+                            0
+                        ) = 0 THEN NULL
+                        ELSE json_extract_string(r.payload_json, '$.volume.m5')
+                    END
+                ),
+                'transactions', json_object(
+                    'h1', json_object(
+                        'buys', json_extract_string(r.payload_json, '$.txns.h1.buys'),
+                        'sells', json_extract_string(r.payload_json, '$.txns.h1.sells')
+                    ),
+                    'h24', json_object(
+                        'buys', json_extract_string(r.payload_json, '$.txns.h24.buys'),
+                        'sells', json_extract_string(r.payload_json, '$.txns.h24.sells')
+                    ),
+                    'm5', json_object(
+                        'buys', json_extract_string(r.payload_json, '$.txns.m5.buys'),
+                        'sells', json_extract_string(r.payload_json, '$.txns.m5.sells')
+                    )
+                ),
+                'reserve_in_usd', json_extract_string(r.payload_json, '$.liquidity.usd'),
+                'pool_created_at', strftime(
+                    to_timestamp(
+                        TRY_CAST(
+                            json_extract_string(r.payload_json, '$.pairCreatedAt') AS BIGINT
+                        ) / 1000.0
+                    ) AT TIME ZONE 'UTC',
+                    '%Y-%m-%dT%H:%M:%SZ'
+                )
+            ),
+            'relationships', json_object(
+                'base_token', json_object(
+                    'data', json_object(
+                        'id',
+                        'dex_' || json_extract_string(r.payload_json, '$.baseToken.address')
+                    )
+                )
+            )
+        ) AS pool
+    FROM raw AS r
+    WHERE r.is_dex_pair_payload
 ),
 norm AS (
     SELECT
         observed_at,
         source_id,
+        is_new_pools_feed,
         date_trunc('hour', observed_at) AS ts,
         split_part(
             json_extract_string(pool, '$.relationships.base_token.data.id'), '_', 2
@@ -119,64 +215,19 @@ norm AS (
         TRY_CAST(json_extract_string(pool, '$.attributes.base_token_price_usd') AS DOUBLE)
             AS price_usd,
         COALESCE(
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.volume_usd.h1') AS DOUBLE
-                ),
-                0.0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.volume_usd.h24') AS DOUBLE
-                ),
-                0.0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.volume_usd.m5') AS DOUBLE
-                ),
-                0.0
-            )
+            TRY_CAST(json_extract_string(pool, '$.attributes.volume_usd.h1') AS DOUBLE),
+            TRY_CAST(json_extract_string(pool, '$.attributes.volume_usd.h24') AS DOUBLE),
+            TRY_CAST(json_extract_string(pool, '$.attributes.volume_usd.m5') AS DOUBLE)
         ) AS volume_usd,
         COALESCE(
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.h1.buys') AS BIGINT
-                ),
-                0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.h24.buys') AS BIGINT
-                ),
-                0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.m5.buys') AS BIGINT
-                ),
-                0
-            )
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.h1.buys') AS BIGINT),
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.h24.buys') AS BIGINT),
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.m5.buys') AS BIGINT)
         ) AS buys,
         COALESCE(
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.h1.sells') AS BIGINT
-                ),
-                0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.h24.sells') AS BIGINT
-                ),
-                0
-            ),
-            NULLIF(
-                TRY_CAST(
-                    json_extract_string(pool, '$.attributes.transactions.m5.sells') AS BIGINT
-                ),
-                0
-            )
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.h1.sells') AS BIGINT),
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.h24.sells') AS BIGINT),
+            TRY_CAST(json_extract_string(pool, '$.attributes.transactions.m5.sells') AS BIGINT)
         ) AS sells,
         TRY_CAST(json_extract_string(pool, '$.attributes.reserve_in_usd') AS DOUBLE)
             AS reserve_usd
@@ -185,15 +236,18 @@ norm AS (
       AND pair_address IS NOT NULL
       AND LIST_CONTAINS($asset_addresses, base_address)
 ),
--- First observation wins per (pair, hour): the same first-wins dedup the SQL
--- path's insert_market_snapshot_once applies per (pair, ts, source).
+-- One row per (pair, hour, source), matching insert_market_snapshot_once.
+-- One row per (pair, hour, source), matching insert_market_snapshot_once's
+-- first-wins dedup. Both ingestion shapes are represented: the aggregate
+-- ``new_pools`` feed and the per-pool payload, whichever was observed first.
 deduped AS (
     SELECT *
     FROM (
         SELECT
             *,
             row_number() OVER (
-                PARTITION BY pair_address, ts ORDER BY observed_at
+                PARTITION BY pair_address, ts, source_id
+                ORDER BY observed_at
             ) AS rn
         FROM norm
     )
@@ -202,7 +256,7 @@ deduped AS (
 SELECT base_address, observed_at, source_id, ts, pair_address, pool_created_at,
        price_usd, volume_usd, buys, sells, reserve_usd
 FROM deduped
-ORDER BY ts
+ORDER BY ts, source_id, observed_at
 """
 
 

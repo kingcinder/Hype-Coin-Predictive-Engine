@@ -158,9 +158,37 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _latest_snapshot_before(rows: Sequence[Any], cutoff: datetime):
+def _market_sort_key(row: Any) -> tuple:
+    """Stable ordering for market rows across both read paths.
+
+    Multiple pools/sources can share the same hourly ``ts``. Picking whichever
+    row happened to come first made ``latest_market`` depend on SQL insertion
+    order versus the lake's Parquet order. The key deliberately uses only
+    fields present on both ORM and reconstructed rows.
+    """
+    return (
+        ensure_utc(row.ts),
+        int(row.source_id),
+        _safe_float(row.price_usd, float("-inf")),
+        _safe_float(row.volume_usd, float("-inf")),
+        _safe_float(row.buys, -1.0),
+        _safe_float(row.sells, -1.0),
+        ensure_utc(row.observed_at),
+    )
+
+
+def _liquidity_sort_key(row: Any) -> tuple:
+    return (
+        ensure_utc(row.ts),
+        int(row.source_id),
+        _safe_float(row.reserve_usd, float("-inf")),
+        ensure_utc(row.observed_at),
+    )
+
+
+def _latest_snapshot_before(rows: Sequence[Any], cutoff: datetime, key=_market_sort_key):
     candidates = [row for row in rows if ensure_utc(row.ts) <= ensure_utc(cutoff)]
-    return max(candidates, key=lambda row: row.ts) if candidates else None
+    return max(candidates, key=key) if candidates else None
 
 
 def _feature(
@@ -215,24 +243,30 @@ def compute_market_block(
     from the Parquet lake. Both paths provably compute identical values.
     """
     decision_ts = ensure_utc(decision_ts)
-    market_rows = [
-        row
-        for row in market_rows
-        if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
-    ]
-    liquidity_rows = [
-        row
-        for row in liquidity_rows
-        if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
-    ]
+    market_rows = sorted(
+        [
+            row
+            for row in market_rows
+            if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
+        ],
+        key=_market_sort_key,
+    )
+    liquidity_rows = sorted(
+        [
+            row
+            for row in liquidity_rows
+            if ensure_utc(row.ts) <= decision_ts and ensure_utc(row.observed_at) <= decision_ts
+        ],
+        key=_liquidity_sort_key,
+    )
     known_pairs = [
         pair
         for pair in pairs
         if getattr(pair, "created_at", None) is not None
         and ensure_utc(pair.created_at) <= decision_ts
     ]
-    latest_market = max(market_rows, key=lambda row: row.ts) if market_rows else None
-    latest_liquidity = max(liquidity_rows, key=lambda row: row.ts) if liquidity_rows else None
+    latest_market = market_rows[-1] if market_rows else None
+    latest_liquidity = liquidity_rows[-1] if liquidity_rows else None
 
     current_price = _safe_float(latest_market.price_usd, None) if latest_market else None
     m5 = _latest_snapshot_before(market_rows, decision_ts - timedelta(minutes=5))
@@ -250,7 +284,9 @@ def compute_market_block(
         volume_accel = latest_volume / baseline
 
     latest_liq = _safe_float(latest_liquidity.reserve_usd, None) if latest_liquidity else None
-    prev_liq_row = _latest_snapshot_before(liquidity_rows, decision_ts - timedelta(hours=1))
+    prev_liq_row = _latest_snapshot_before(
+        liquidity_rows, decision_ts - timedelta(hours=1), key=_liquidity_sort_key
+    )
     liquidity_change = _pct_return(
         latest_liq, _safe_float(prev_liq_row.reserve_usd, None) if prev_liq_row else None
     )
@@ -322,7 +358,7 @@ def _venue_agreement(market_rows: Sequence[Any], decision_ts: datetime) -> float
     for row in market_rows:
         if ensure_utc(row.ts) <= ensure_utc(decision_ts) and row.price_usd is not None:
             current = latest_by_pair.get(row.pair_id)
-            if current is None or ensure_utc(row.ts) > ensure_utc(current.ts):
+            if current is None or _market_sort_key(row) > _market_sort_key(current):
                 latest_by_pair[row.pair_id] = row
     prices = [_safe_float(row.price_usd, 0.0) for row in latest_by_pair.values() if row.price_usd]
     if len(prices) < 2:

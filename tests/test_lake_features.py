@@ -507,6 +507,147 @@ def _seed_lake_only(session, tmp_path) -> models.Asset:
     return asset
 
 
+def test_lake_market_reconstruction_keeps_zero_h1_values(session, tmp_path) -> None:
+    """The live normalizer uses ``h1`` even when its counts/volume are zero.
+
+    The lake must do the same rather than falling through to h24/m5, which
+    would silently replace a quiet hour with a day's activity.
+    """
+    source = get_or_create_source(
+        session,
+        name="geckoterminal",
+        source_type="market_data",
+        tier="venue",
+        base_url="https://api.geckoterminal.com",
+    )
+    created_at = DECISION - timedelta(hours=6)
+    first = _pool_payload(
+        pair_address=PAIR_ADDRESS,
+        price=1.0,
+        volume=6_000.0,
+        liquidity=50_000.0,
+        buys=5,
+        sells=5,
+        created_at=created_at,
+    )
+    latest = _pool_payload(
+        pair_address=PAIR_ADDRESS,
+        price=1.1,
+        volume=0.0,
+        liquidity=51_000.0,
+        buys=0,
+        sells=1,
+        created_at=created_at,
+    )
+    latest["attributes"]["volume_usd"]["h24"] = "6000.0"
+    latest["attributes"]["transactions"]["h24"] = {"buys": 17, "sells": 3}
+    latest["attributes"]["transactions"]["m5"] = {"buys": 9, "sells": 2}
+    for hours_ago, pool in ((2, first), (1 / 6.0, latest)):
+        store_raw_evidence(
+            session,
+            source=source,
+            payload={"chain": "solana", "new_pools": [pool]},
+            observed_at=DECISION - timedelta(hours=hours_ago),
+        )
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    values = LakeFeatureFactory(
+        store=LocalArchiveStore(tmp_path), settings=settings
+    ).build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
+    assert values["unique_buyers_estimate"].value == 0.0
+    assert values["buy_sell_ratio"].value == 0.5
+    assert values["volume_acceleration"].value == 0.0
+
+
+def test_lake_reads_single_pool_payloads(session, tmp_path) -> None:
+    """Per-pool evidence is the authoritative snapshot shape the normalizer
+    writes; the lake must reconstruct it, not just the ``new_pools`` feed."""
+    source = get_or_create_source(
+        session,
+        name="geckoterminal",
+        source_type="market_data",
+        tier="venue",
+        base_url="https://api.geckoterminal.com",
+    )
+    pool = _pool_payload(
+        pair_address=PAIR_ADDRESS,
+        price=2.0,
+        volume=12_000.0,
+        liquidity=50_000.0,
+        buys=7,
+        sells=3,
+        created_at=DECISION - timedelta(hours=6),
+    )
+    store_raw_evidence(
+        session,
+        source=source,
+        payload=pool,
+        observed_at=DECISION - timedelta(minutes=5),
+    )
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    values = LakeFeatureFactory(
+        store=LocalArchiveStore(tmp_path), settings=settings
+    ).build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
+    assert values["unique_buyers_estimate"].value == 7.0
+    assert values["buy_sell_ratio"].value == 2.0
+    assert values["liquidity_depth"].value == 50_000.0
+
+
+def test_lake_reads_dexscreener_pair_payloads(session, tmp_path) -> None:
+    """DexScreener stores one pair per payload with different field names; the
+    lake must normalize that shape too, not just GeckoTerminal's."""
+    source = get_or_create_source(
+        session,
+        name="dexscreener",
+        source_type="market_data",
+        tier="venue",
+        base_url="https://api.dexscreener.com",
+    )
+    created_at = DECISION - timedelta(hours=6)
+    payload = {
+        "chainId": "solana",
+        "pairAddress": PAIR_ADDRESS,
+        "baseToken": {"address": BASE_ADDRESS, "symbol": "LAKE"},
+        "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
+        "priceUsd": "2.0",
+        "pairCreatedAt": int(created_at.timestamp() * 1000),
+        "volume": {"h1": "12000.0", "h24": "72000.0", "m5": "1000.0"},
+        "txns": {
+            "h1": {"buys": 7, "sells": 3},
+            "h24": {"buys": 70, "sells": 30},
+            "m5": {"buys": 2, "sells": 1},
+        },
+        "liquidity": {"usd": "50000.0"},
+    }
+    store_raw_evidence(
+        session,
+        source=source,
+        payload=payload,
+        observed_at=DECISION - timedelta(minutes=5),
+    )
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    values = LakeFeatureFactory(
+        store=LocalArchiveStore(tmp_path), settings=settings
+    ).build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
+    assert values["unique_buyers_estimate"].value == 7.0
+    assert values["buy_sell_ratio"].value == 2.0
+    assert values["liquidity_depth"].value == 50_000.0
+
+
 def test_lake_feature_names_are_subset_of_full_set() -> None:
     assert set(LAKE_FEATURE_NAMES) <= set(FEATURE_NAMES)
     assert len(LAKE_FEATURE_NAMES) == len(set(LAKE_FEATURE_NAMES))

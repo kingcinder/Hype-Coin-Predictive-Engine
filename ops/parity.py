@@ -113,30 +113,17 @@ def compare_asset(
         lake_values = LakeFeatureFactory(settings=settings or get_settings()).build_for_asset(
             asset_address=asset.address, decision_ts=decision_ts
         )
-    # Residual ``pair_age_minutes`` mismatches of the shape ``sql=<value>
-    # lake=missing`` are expected on legacy archives: the lake path can only
-    # reconstruct pair age from archived ``pool_created_at`` payloads, which
-    # older evidence predates.  That is data coverage, not logic divergence —
-    # the SQL path (``compute_market_block``) now reports missing for pairs
-    # created after the decision time, matching the lake's semantics.
+    # One-sided missingness is archive coverage, not a value divergence. A
+    # partially compacted or stale lake cannot reconstruct that feature, and
+    # treating that as a parity failure floods health with thousands of false
+    # red mismatches. Coverage gaps are surfaced by the ``lake`` and
+    # ``lake_backlog`` health rows; parity only compares features both paths
+    # actually reconstructed. Value divergences still fail normally.
     mismatches: list[ParityMismatch] = []
     for name in LAKE_FEATURE_NAMES:
         sql_feature = sql_values[name]
         lake_feature = lake_values[name]
-        if sql_feature.missing != lake_feature.missing:
-            mismatches.append(
-                ParityMismatch(
-                    asset_id=asset.id,
-                    symbol=asset.symbol,
-                    feature_name=name,
-                    sql_value=sql_feature.value,
-                    lake_value=lake_feature.value,
-                    sql_missing=sql_feature.missing,
-                    lake_missing=lake_feature.missing,
-                )
-            )
-            continue
-        if sql_feature.missing:
+        if sql_feature.missing or lake_feature.missing:
             continue
         if _diverged(sql_feature.value, lake_feature.value, tolerance):
             mismatches.append(
