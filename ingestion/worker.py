@@ -42,18 +42,12 @@ def main() -> None:
     # of several run modes). Apply the alembic chain so e.g. 0020's
     # score_drift_runs exists before the first drift probe, and existing DBs
     # get pending column/table additions — idempotent, never blocks boot.
-    from storage.database import run_migrations
-
-    run_migrations()
-
-    if args.once or not args.loop:
-        result = run_once()
-        log.info("worker_once_complete", result=result)
-        return
-
     # Single-writer guard: refuse to start if another process already owns the
     # SQLite file (a second writer causes "database is locked" loop wedges).
-    from storage.database import acquire_sqlite_writer_lock
+    # Acquire it before migrations and before the one-shot branch: `--once` is
+    # a full scan too, and bypassing the guard let it contend with a running
+    # engine until the outcome/calibration writes timed out.
+    from storage.database import acquire_sqlite_writer_lock, run_migrations
 
     _db_lock: int | None = None
     try:
@@ -62,6 +56,13 @@ def main() -> None:
         log.critical("worker_sqlite_writer_conflict", error=str(exc))
         print(str(exc))
         raise SystemExit(1) from None
+
+    run_migrations()
+
+    if args.once or not args.loop:
+        result = run_once()
+        log.info("worker_once_complete", result=result)
+        return
 
     ensure_background_probe()
     iteration = 0

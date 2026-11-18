@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
+import api.main as api_main
 from api.main import app
 from common.config import get_settings
 from ingestion.market_analysis import (
@@ -155,6 +156,42 @@ def test_contract_search_returns_dexscreener_candidates_for_unstored_ca(
     assert response.status_code == 200
     assert response.json()[0]["external"] is True
     assert response.json()[0]["pair_address"] == "0xpair456"
+
+
+def test_asset_search_live_failure_log_redacts_quicknode_key(
+    market_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed live search must not echo a QuickNode path token in its log."""
+    address = "0xabcdef0123456789abcdef0123456789abcdef03"
+    token = "fake-quicknode-token-0123456789abcdef"
+    error = f"Client error '401 Unauthorized' for url 'https://example.quiknode.pro/{token}/'"
+
+    class FailingDexScreenerClient:
+        def search_pairs(self, query: str) -> list[dict]:
+            assert query == address
+            raise RuntimeError(error)
+
+        def close(self) -> None:
+            pass
+
+    emitted: dict[str, object] = {}
+
+    class CaptureLog:
+        def warning(self, event: str, **kwargs: object) -> None:
+            emitted["event"] = event
+            emitted.update(kwargs)
+
+    monkeypatch.setattr("ingestion.source_clients.DexScreenerClient", FailingDexScreenerClient)
+    monkeypatch.setattr(api_main, "log", CaptureLog())
+
+    response = market_client.get("/assets/search", params={"q": address})
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert emitted["event"] == "market_asset_live_search_failed"
+    logged = str(emitted["error"])
+    assert token not in logged
+    assert "quiknode.pro/***" in logged
 
 
 def test_independent_narrative_prompt_uses_only_provided_market_evidence(

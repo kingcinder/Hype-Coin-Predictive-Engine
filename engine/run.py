@@ -614,6 +614,22 @@ def run_engine_phases(
     return phase_error, last_nc_run_monotonic
 
 
+def _record_scan_failure(
+    exc: Exception,
+    *,
+    iteration: int,
+    engine_state: Any,
+    watchdog_state: Any,
+) -> None:
+    """Log and record one failed scan without leaking credentials from its URL."""
+    from ops.watchdog import on_scan_failure
+
+    safe_error = redact_url(str(exc))
+    log.exception("engine_scan_failed", iteration=iteration, error=safe_error)
+    engine_state.mark_error(safe_error)
+    on_scan_failure(watchdog_state)
+
+
 def main() -> None:
     from common.config import ensure_api_token, get_settings
     from common.network import validate_network_exposure
@@ -766,7 +782,6 @@ def main() -> None:
     from ingestion.worker import run_once
     from ops.watchdog import (
         WatchdogState,
-        on_scan_failure,
         on_scan_success,
         run_watchdog,
     )
@@ -791,9 +806,12 @@ def main() -> None:
                 engine_state.mark_scan_result(result)
                 log.info("engine_scan_complete", iteration=iteration, result=result)
             except Exception as exc:  # noqa: BLE001 - individual scan failure must not kill the engine
-                log.exception("engine_scan_failed", iteration=iteration, error=redact_url(str(exc)))
-                engine_state.mark_error(redact_url(str(exc)))
-                on_scan_failure(_watchdog_state)
+                _record_scan_failure(
+                    exc,
+                    iteration=iteration,
+                    engine_state=engine_state,
+                    watchdog_state=_watchdog_state,
+                )
             else:
                 on_scan_success(_watchdog_state)
 

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
+
+from common.http import retry_after_seconds
+
+__all__ = ["RATE_LIMIT_STATUSES", "CircuitOpen", "ProviderGate", "retry_after_seconds"]
 
 RATE_LIMIT_STATUSES = frozenset({403, 429})
 
@@ -37,12 +42,15 @@ class ProviderGate:
         if wait > 0:
             time.sleep(wait)
 
-    def record_failure(self, exc: BaseException) -> None:
+    def record_failure(self, exc: BaseException, *, cooldown: float | None = None) -> None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status not in RATE_LIMIT_STATUSES:
             return
+        effective = self._cooldown if cooldown is None else max(0.0, cooldown)
+        if not math.isfinite(effective):
+            effective = self._cooldown
         with self._lock:
-            self._blocked_until = max(self._blocked_until, time.monotonic() + self._cooldown)
+            self._blocked_until = max(self._blocked_until, time.monotonic() + effective)
 
     def is_open(self) -> bool:
         with self._lock:

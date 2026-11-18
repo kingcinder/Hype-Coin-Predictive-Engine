@@ -910,6 +910,9 @@ class RiskOutcome(Base):
     lifecycle_phase_at_score: Mapped[str] = mapped_column(String(32), nullable=False)
     # Populated after the observation window elapses
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when the observation window closed without a collapse/survival label.
+    # The row stays auditable but is no longer retried as an unresolved backlog.
+    censored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lifecycle_phase_at_eval: Mapped[str | None] = mapped_column(String(32))
     price_change_pct: Mapped[float | None] = mapped_column(Float)
     collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

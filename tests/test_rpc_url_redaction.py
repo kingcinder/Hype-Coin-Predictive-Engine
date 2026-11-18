@@ -113,6 +113,21 @@ def test_redact_url_masks_quicknode_path_token() -> None:
     assert "quiknode.pro/***" in redact_url(quicknode)
 
 
+def test_redact_url_masks_quicknode_token_inside_http_error_text() -> None:
+    """A QuickNode key in an embedded httpx URL must not survive in error text."""
+    error = (
+        "Client error '401 Unauthorized' for url "
+        "'https://example.quiknode.pro/fake-quicknode-token-0123456789abcdef/'"
+    )
+
+    redacted = redact_url(error)
+
+    assert "fake-quicknode-token" not in redacted
+    assert "0123456789abcdef" not in redacted
+    assert "quiknode.pro/***" in redacted
+    assert "Client error '401 Unauthorized'" in redacted
+
+
 def test_redact_url_masks_webhook_and_bot_tokens_in_paths() -> None:
     telegram = "https://api.telegram.org/bot123456789:AAHfake-token-value/sendMessage"
     discord = "https://discord.com/api/webhooks/123456789012345678/fake-discord-webhook-token-value"

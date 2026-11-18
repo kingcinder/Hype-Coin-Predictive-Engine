@@ -90,6 +90,35 @@ def test_429_and_5xx_responses_are_retried(monkeypatch, status: int) -> None:
     assert _status_attempts(monkeypatch, status) == 3
 
 
+def test_429_retries_honor_retry_after_header(monkeypatch) -> None:
+    sleeps: list[float] = []
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            429,
+            request=request,
+            headers={"Retry-After": "7"},
+            json={"success": False},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = HttpClient(base_url="https://example.test")
+    client.close()
+    client._client = httpx.Client(base_url="https://example.test", transport=transport)
+    monkeypatch.setattr(client._request_json.retry, "sleep", sleeps.append)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get_json("/probe")
+    finally:
+        client.close()
+
+    assert attempts == 3
+    assert sleeps == [7.0, 7.0]
+
+
 @pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
 def test_timeouts_and_transport_errors_are_retried(monkeypatch, exc_type) -> None:
     attempts = 0

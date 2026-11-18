@@ -487,8 +487,9 @@ def _pool_health_row(session: Session, chain_slug: str) -> None:
         message = f"{message}; last_success={redact_url(last_success)}"
     requests = sum(state.request_count for state in states)
     successes = sum(state.success_count for state in states)
-    if requests:
-        message = f"{message}; requests={requests} successes={successes}"
+    # Always report traffic, including zero.  An idle "0 down" row must not
+    # read as evidence that endpoints are serving requests.
+    message = f"{message}; requests={requests} successes={successes}"
     record_health(
         session,
         component=f"rpc_pool:{chain_slug}",

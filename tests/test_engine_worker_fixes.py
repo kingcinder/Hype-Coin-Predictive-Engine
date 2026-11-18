@@ -192,6 +192,133 @@ def test_worker_loop_isolates_stage_failures(monkeypatch: pytest.MonkeyPatch) ->
     }
 
 
+# ── Scan-failure log redaction ──────────────────────────────────────────────
+
+
+def test_engine_scan_failure_log_redacts_quicknode_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import engine.run as engine_run
+    import ops.watchdog as watchdog_mod
+
+    token = "fake-quicknode-token-0123456789abcdef"
+    error = f"Client error '401 Unauthorized' for url 'https://example.quiknode.pro/{token}/'"
+    emitted: dict[str, object] = {}
+
+    class CaptureLog:
+        def exception(self, event: str, **kwargs: object) -> None:
+            emitted["event"] = event
+            emitted.update(kwargs)
+
+    class EngineState:
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def mark_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    state = EngineState()
+    monkeypatch.setattr(engine_run, "log", CaptureLog())
+    monkeypatch.setattr(watchdog_mod, "on_scan_failure", lambda _state: None)
+
+    engine_run._record_scan_failure(  # noqa: SLF001 - exercises the engine catch path helper.
+        RuntimeError(error),
+        iteration=7,
+        engine_state=state,
+        watchdog_state=object(),
+    )
+
+    assert emitted["event"] == "engine_scan_failed"
+    assert emitted["iteration"] == 7
+    logged = str(emitted["error"])
+    assert token not in logged
+    assert "quiknode.pro/***" in logged
+    assert state.errors and token not in state.errors[0]
+    assert "quiknode.pro/***" in state.errors[0]
+
+
+def test_worker_once_acquires_writer_guard_before_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-shot full scan must not bypass the single-writer guard."""
+    import sys
+
+    import ingestion.worker as worker_mod
+
+    emitted: dict[str, object] = {}
+    called = {"migrations": False, "scan": False}
+
+    class CaptureLog:
+        def critical(self, event: str, **kwargs: object) -> None:
+            emitted["event"] = event
+            emitted.update(kwargs)
+
+    def run_migrations() -> None:
+        called["migrations"] = True
+
+    def scan() -> None:
+        called["scan"] = True
+
+    def lock_conflict(_settings: object) -> int:
+        raise RuntimeError("another process already holds the SQLite writer lock")
+
+    monkeypatch.setattr(sys, "argv", ["worker", "--once"])
+    monkeypatch.setattr(worker_mod, "log", CaptureLog())
+    monkeypatch.setattr(worker_mod, "run_once", scan)
+    monkeypatch.setattr("storage.database.run_migrations", run_migrations)
+    monkeypatch.setattr("storage.database.acquire_sqlite_writer_lock", lock_conflict)
+
+    with pytest.raises(SystemExit) as error:
+        worker_mod.main()
+
+    assert error.value.code == 1
+    assert emitted["event"] == "worker_sqlite_writer_conflict"
+    assert called == {"migrations": False, "scan": False}
+
+
+def test_worker_scan_failure_log_redacts_quicknode_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    import ingestion.worker as worker_mod
+
+    token = "fake-quicknode-token-0123456789abcdef"
+    error = f"Client error '401 Unauthorized' for url 'https://example.quiknode.pro/{token}/'"
+    emitted: dict[str, object] = {}
+
+    class CaptureLog:
+        def exception(self, event: str, **kwargs: object) -> None:
+            emitted["event"] = event
+            emitted.update(kwargs)
+
+        def info(self, _event: str, **_kwargs: object) -> None:
+            pass
+
+        def critical(self, _event: str, **_kwargs: object) -> None:
+            pass
+
+    def fail_run_once():
+        raise RuntimeError(error)
+
+    def stop_loop(_iteration: int, _interval: float) -> None:
+        raise _StopLoop()
+
+    monkeypatch.setattr(sys, "argv", ["worker", "--loop"])
+    monkeypatch.setattr("storage.database.run_migrations", lambda: None)
+    monkeypatch.setattr("storage.database.acquire_sqlite_writer_lock", lambda _settings: 42)
+    monkeypatch.setattr(worker_mod, "ensure_background_probe", lambda: None)
+    monkeypatch.setattr(worker_mod, "log", CaptureLog())
+    monkeypatch.setattr(worker_mod, "run_once", fail_run_once)
+    monkeypatch.setattr(worker_mod, "maybe_run_forecast", lambda: {"status": "skipped"})
+    monkeypatch.setattr(worker_mod, "maybe_run_retention", lambda: {"skipped": True})
+    monkeypatch.setattr(worker_mod, "maybe_run_parity", lambda: {"skipped": True})
+    monkeypatch.setattr(worker_mod, "maybe_run_score_drift", lambda: {"skipped": True})
+    monkeypatch.setattr(worker_mod, "backoff_sleep_seconds", stop_loop)
+
+    with pytest.raises(_StopLoop):
+        worker_mod.main()
+
+    assert emitted["event"] == "worker_scan_failed"
+    logged = str(emitted["error"])
+    assert token not in logged
+    assert "quiknode.pro/***" in logged
+
+
 # ── M6: stop-aware watchdog phases ────────────────────────────────────────
 
 

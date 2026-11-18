@@ -426,6 +426,72 @@ def test_health_reports_selected_and_last_successful_endpoint_redacted(
         settings.rpc_pool_enabled = original_enabled
 
 
+def test_record_pool_health_reports_zero_traffic_for_idle_chain(session, monkeypatch) -> None:
+    """An idle chain's healthy row must still show that no traffic was served."""
+    from common.config import get_settings
+    from ingestion import rpc_pool as rpc_pool_module
+    from storage import models
+
+    pool = RpcEndpointPool(["https://idle.example.com"], failure_threshold=1)
+    monkeypatch.setattr(rpc_pool_module, "POOL_CHAINS", ("solana",))
+    monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda _chain: pool)
+    monkeypatch.setattr(get_settings(), "rpc_pool_enabled", True)
+
+    rpc_pool_module.record_pool_health(session)
+    session.flush()
+
+    row = session.scalar(
+        select(models.SystemHealth).where(models.SystemHealth.component == "rpc_pool:solana")
+    )
+    assert row is not None
+    assert row.state == "ok"
+    message = row.message or ""
+    assert "1 endpoints, 0 down, 0 degraded" in message
+    assert "requests=0 successes=0" in message
+
+
+def test_health_report_updates_selected_and_last_success_after_failover(
+    session, monkeypatch
+) -> None:
+    """A failure must move both reported URLs to the endpoint that took over."""
+    from ingestion import rpc_pool as rpc_pool_module
+    from storage import models
+
+    first = "https://rpc-a.example.com"
+    second = "https://rpc-b.example.com"
+    pool = RpcEndpointPool([first, second], failure_threshold=2, chain_slug="solana")
+    monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda _chain: pool)
+
+    def reported_message() -> str:
+        row = session.scalar(
+            select(models.SystemHealth)
+            .where(models.SystemHealth.component == "rpc_pool:solana")
+            .order_by(models.SystemHealth.id.desc())
+            .limit(1)
+        )
+        assert row is not None
+        return row.message or ""
+
+    assert pool.pick() == first
+    pool.record_request(first)
+    pool.mark_success(first)
+    rpc_pool_module._pool_health_row(session, "solana")
+    message = reported_message()
+    assert f"selected={first}" in message
+    assert f"last_success={first}" in message
+
+    pool.mark_failure(first)
+    assert pool.pick() == second
+    pool.record_request(second)
+    pool.mark_success(second)
+    rpc_pool_module._pool_health_row(session, "solana")
+    message = reported_message()
+    assert f"selected={second}" in message
+    assert f"last_success={second}" in message
+    assert f"selected={first}" not in message
+    assert f"last_success={first}" not in message
+
+
 def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monkeypatch) -> None:
     from ingestion import rpc_pool as rpc_pool_module
     from storage import models
@@ -455,6 +521,84 @@ def test_persist_pool_snapshots_writes_endpoint_state_and_history(session, monke
     )
     assert solana is not None
     assert solana.success_count == 1
+
+
+def test_rpc_pool_snapshots_keep_helius_and_alchemy_counts_separate_from_health(
+    session, monkeypatch
+) -> None:
+    """Per-endpoint snapshot counts must not be confused with chain health rows."""
+    from common.config import get_settings
+    from ingestion import rpc_pool as rpc_pool_module
+    from storage import models
+
+    helius = "https://mainnet.helius-rpc.com/?api-key=helius-secret"
+    alchemy = "https://eth-mainnet.g.alchemy.com/v2/alchemy-secret"
+    publicnode = "https://solana-rpc.publicnode.com"
+    meowrpc = "https://eth.meowrpc.com"
+    pools = {
+        "solana": RpcEndpointPool([helius, publicnode], failure_threshold=1),
+        "ethereum": RpcEndpointPool([alchemy, meowrpc], failure_threshold=1),
+    }
+    monkeypatch.setattr(rpc_pool_module, "POOL_CHAINS", ("solana", "ethereum"))
+    monkeypatch.setattr(rpc_pool_module, "get_rpc_pool", lambda chain: pools[chain])
+    monkeypatch.setattr(get_settings(), "rpc_pool_enabled", True)
+
+    solana_pool = pools["solana"]
+    assert solana_pool.pick() == helius
+    solana_pool.record_request(helius)
+    solana_pool.mark_success(helius)
+    solana_pool.record_request(publicnode)
+
+    eth_pool = pools["ethereum"]
+    for _ in range(2):
+        eth_pool.record_request(meowrpc)
+        eth_pool.mark_success(meowrpc)
+    eth_pool.record_request(meowrpc)
+    assert eth_pool.pick() == alchemy
+    eth_pool.record_request(alchemy)
+    eth_pool.mark_success(alchemy)
+
+    assert rpc_pool_module.persist_pool_snapshots(session) == 4
+    rpc_pool_module.record_pool_health(session)
+    session.flush()
+
+    snapshots = {
+        (row.chain_slug, row.url): row for row in session.scalars(select(models.RpcPoolSnapshot))
+    }
+    assert set(snapshots) == {
+        ("solana", "https://mainnet.helius-rpc.com/?api-key=***"),
+        ("solana", publicnode),
+        ("ethereum", "https://eth-mainnet.g.alchemy.com/v2/***"),
+        ("ethereum", meowrpc),
+    }
+    assert snapshots[("solana", "https://mainnet.helius-rpc.com/?api-key=***")].request_count == 1
+    assert snapshots[("solana", "https://mainnet.helius-rpc.com/?api-key=***")].success_count == 1
+    assert snapshots[("solana", publicnode)].request_count == 1
+    assert snapshots[("solana", publicnode)].success_count == 0
+    assert snapshots[("ethereum", "https://eth-mainnet.g.alchemy.com/v2/***")].request_count == 1
+    assert snapshots[("ethereum", "https://eth-mainnet.g.alchemy.com/v2/***")].success_count == 1
+    assert snapshots[("ethereum", meowrpc)].request_count == 3
+    assert snapshots[("ethereum", meowrpc)].success_count == 2
+
+    health = {
+        row.component: row
+        for row in session.scalars(
+            select(models.SystemHealth).where(models.SystemHealth.component.like("rpc_pool:%"))
+        )
+    }
+    assert set(health) == {"rpc_pool:solana", "rpc_pool:ethereum"}
+    for component, selected, requests in (
+        (
+            "rpc_pool:solana",
+            "https://mainnet.helius-rpc.com/?api-key=***",
+            "requests=2 successes=1",
+        ),
+        ("rpc_pool:ethereum", "https://eth-mainnet.g.alchemy.com/v2/***", "requests=4 successes=3"),
+    ):
+        message = health[component].message or ""
+        assert requests in message
+        assert f"selected={selected}" in message
+        assert f"last_success={selected}" in message
 
 
 def test_record_pool_health_writes_per_chain_rows(session, monkeypatch) -> None:

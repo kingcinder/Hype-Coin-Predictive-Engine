@@ -27,7 +27,7 @@ from ingestion.normalizers import (
     normalize_geckoterminal_pool,
     normalize_geckoterminal_trades,
 )
-from ingestion.provider_gate import RATE_LIMIT_STATUSES, CircuitOpen
+from ingestion.provider_gate import RATE_LIMIT_STATUSES, CircuitOpen, retry_after_seconds
 from ingestion.rpc_pool import (
     POOL_CHAINS,
     get_rpc_pool,
@@ -123,6 +123,7 @@ class IngestionService:
 
     def _reset_first_buy_stats(self) -> None:
         self._first_buy_provider_backoff = False
+        self._first_buy_rate_limited = False
         self._first_buy_stats = {
             "pools": 0,
             "budget_skipped": 0,
@@ -653,7 +654,12 @@ class IngestionService:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             safe_error = redact_url(str(exc))
             if status == 429:
-                cooldown = self.settings.provider_circuit_break_seconds
+                header_cooldown = retry_after_seconds(exc)
+                cooldown = (
+                    self.settings.provider_circuit_break_seconds
+                    if header_cooldown is None
+                    else header_cooldown
+                )
                 record_health(
                     session,
                     component="source:birdeye",
@@ -1319,6 +1325,7 @@ class IngestionService:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if isinstance(exc, CircuitOpen) or status in RATE_LIMIT_STATUSES:
                 self._first_buy_provider_backoff = True
+                self._first_buy_rate_limited = True
             self._first_buy_stats["gecko_failures"] += 1
             log.warning(
                 "first_buy_trades_failed",
@@ -1374,21 +1381,36 @@ class IngestionService:
         skipped = stats["budget_skipped"] + stats["backoff_skipped"]
         if stats["gecko_failures"] == 0 and skipped == 0:
             state = "ok"
-        elif stats["gecko_failures"] == 0 or stats["rpc_fallback_swaps"] > 0:
-            # A cap/backoff skip means some pools were not checked, so the scan
-            # must not look healthy even when no request failed outright.
+        elif (
+            self._first_buy_rate_limited
+            or stats["gecko_failures"] == 0
+            or stats["rpc_fallback_swaps"] > 0
+        ):
+            # A rate-limit/cooldown or cap/backoff skip means some pools were
+            # not checked, so the scan is degraded, not failed. Only a genuine
+            # provider failure with no recovery stays red.
             state = "yellow"
         else:
             state = "red"
         message = " ".join(f"{key}={value}" for key, value in stats.items())
+        if self._first_buy_rate_limited:
+            message = (
+                "pacing: GeckoTerminal rate limited; first-buy fetches deferred "
+                f"for the rest of this scan; {message}"
+            )
         record_health(
             session,
             component="source:first_buy_feed",
             state=state,
             message=message,
-            error_count=stats["gecko_failures"],
+            error_count=0 if self._first_buy_rate_limited else stats["gecko_failures"],
         )
-        log.info("first_buy_feed_health", state=state, **stats)
+        log.info(
+            "first_buy_feed_health",
+            state=state,
+            rate_limited=self._first_buy_rate_limited,
+            **stats,
+        )
 
     @staticmethod
     def _tracked_wallets(chain_slug: str) -> set[str]:

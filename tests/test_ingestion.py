@@ -504,6 +504,62 @@ def test_first_buy_trade_rate_limit_backs_off_for_rest_of_scan(monkeypatch) -> N
     assert service._first_buy_stats["backoff_skipped"] == 1
 
 
+@pytest.mark.parametrize("status", [403, 429])
+def test_first_buy_rate_limit_health_is_yellow_pacing(session, monkeypatch, status: int) -> None:
+    """The request that opens the GeckoTerminal cooldown is pacing, not red.
+
+    The RPC fallback may return nothing, but the first-buy feed must not paint
+    the scan red because the provider asked us to wait.
+    """
+    seed_reference(session)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(get_settings(), "first_buy_trade_max_pools_per_scan", 8)
+
+    def rate_limited(self, chain: str, pool: str):
+        request = httpx.Request("GET", f"https://api.geckoterminal.com/{pool}")
+        response = httpx.Response(status, request=request)
+        raise httpx.HTTPStatusError(str(status), request=request, response=response)
+
+    monkeypatch.setattr(ingestion_service.GeckoTerminalClient, "pool_trades", rate_limited)
+    monkeypatch.setattr(ingestion_service, "fetch_pool_swaps", lambda *args, **kwargs: [])
+
+    pair = NormalizedPair(
+        chain_slug="solana",
+        dex_id="raydium",
+        pair_address="PoolPacingHealth",
+        base_address="MintPacingHealth",
+        base_symbol="PACE",
+        base_name="Pacing Token",
+        quote_address="USDC",
+        quote_symbol="USDC",
+        quote_name="USD Coin",
+        pair_created_at=now,
+        price_usd=1.0,
+        volume_usd=0.0,
+        liquidity_usd=80000.0,
+        reserve_base=None,
+        reserve_quote=None,
+        buys=0,
+        sells=0,
+        trades=0,
+    )
+
+    service = IngestionService()
+    assert service._first_buy_swaps(pair, now, set()) == ([], False)
+    service._record_first_buy_health(session)
+    session.commit()
+
+    health = session.scalars(
+        select(models.SystemHealth).where(models.SystemHealth.component == "source:first_buy_feed")
+    ).one()
+    assert health.state == "yellow"
+    assert health.error_count == 0
+    assert "pacing:" in health.message
+    assert "gecko_failures=1" in health.message
+    assert "rpc_fallback_hits=1" in health.message
+    assert "rpc_fallback_swaps=0" in health.message
+
+
 def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) -> None:
     """The 429 backoff is per scan: the next scan fetches that pool again.
 
@@ -1463,7 +1519,7 @@ def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypat
     assert health.state == "yellow"
     assert "pacing" in (health.message or "")
     assert "429" in (health.message or "")
-    assert "cooling down" in (health.message or "")
+    assert "cooling down for 3600s" in (health.message or "")
     assert health.error_count == 0
     assert calls == ["/defi/v2/tokens/new_listing"]
 
@@ -1481,6 +1537,43 @@ def test_birdeye_sustained_429_is_yellow_pacing_with_cooldown(session, monkeypat
     assert "deferred" in (health.message or "")
     assert health.error_count == 0
     assert calls == ["/defi/v2/tokens/new_listing"]
+
+
+def test_birdeye_429_honors_retry_after_header(session, monkeypatch) -> None:
+    """The provider's Retry-After delay replaces the configured cooldown."""
+    seed_reference(session)
+    monkeypatch.setattr(get_settings(), "birdeye_api_key", "test-birdeye-key")
+    monkeypatch.setattr(get_settings(), "provider_circuit_break_seconds", 3600)
+    clock = [1000.0]
+    monkeypatch.setattr("ingestion.provider_gate.time.monotonic", lambda: clock[0])
+    calls: list[str] = []
+
+    def rate_limited(self, path: str, **kwargs) -> None:
+        calls.append(path)
+        request = httpx.Request("GET", f"https://public-api.birdeye.so{path}")
+        response = httpx.Response(429, request=request, headers={"Retry-After": "7"})
+        raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    monkeypatch.setattr("common.http.HttpClient.get_json", rate_limited)
+    service = IngestionService()
+
+    assert service._ingest_birdeye_solana(session) == 0
+    health = session.scalars(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:birdeye")
+        .order_by(models.SystemHealth.ts.desc())
+    ).first()
+    assert health is not None
+    assert "cooling down for 7s" in (health.message or "")
+
+    # At the header's deadline the gate reopens; a 3600s configured fallback
+    # would still defer this request without calling the provider.
+    clock[0] += 7.1
+    assert service._ingest_birdeye_solana(session) == 0
+    assert calls == [
+        "/defi/v2/tokens/new_listing",
+        "/defi/v2/tokens/new_listing",
+    ]
 
 
 def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
