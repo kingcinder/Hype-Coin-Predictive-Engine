@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -245,9 +246,23 @@ class SolanaRpcClient:
         return data if isinstance(data, dict) else None
 
 
+@dataclass(frozen=True)
+class EVMHolderSnapshot:
+    """One GoPlus token-security response in the shape the scan consumes."""
+
+    supply: float | None
+    holder_count: int | None
+    holders: list[dict[str, Any]]
+
+
+class GoPlusError(RuntimeError):
+    """GoPlus returned an error or no usable token payload."""
+
+
 class EVMHolderClient:
-    """Top-holder snapshots for EVM tokens via GoPlus's keyless token-security
-    API: one response carries ``total_supply`` plus the ranked holder list.
+    """One-request holder snapshots for EVM tokens via GoPlus's keyless
+    token-security API: ``total_supply``, exact ``holder_count``, and the
+    ranked top-holder list all arrive in the same response.
 
     GoPlus covers Base and Ethereum without a Blockscout/Etherscan key. The
     supply and balances are human token units, so pct-of-supply and ranking are
@@ -270,7 +285,7 @@ class EVMHolderClient:
         self.http.close()
 
     def _payload(self, address: str) -> dict[str, Any]:
-        """Fetch (and cache) the token-security payload for one contract."""
+        """Fetch (and cache) the token payload, rejecting provider errors."""
         cached = self._payloads.get(address.lower())
         if cached is not None:
             return cached
@@ -278,34 +293,44 @@ class EVMHolderClient:
             f"/api/v1/token_security/{self.chain_id}",
             params={"contract_addresses": address},
         )
-        result = data.get("result") if isinstance(data, dict) else None
-        payload = result.get(address.lower(), {}) if isinstance(result, dict) else {}
-        if not isinstance(payload, dict):
-            payload = {}
+        if not isinstance(data, dict):
+            raise GoPlusError("GoPlus returned a malformed response")
+        code = data.get("code")
+        if code not in (1, 2):
+            message = str(data.get("message") or "unknown provider error")
+            raise GoPlusError(f"GoPlus error {code}: {message}")
+        result = data.get("result")
+        payload = result.get(address.lower()) if isinstance(result, dict) else None
+        if not isinstance(payload, dict) or not payload:
+            raise GoPlusError("GoPlus returned no token data")
         self._payloads[address.lower()] = payload
         return payload
 
-    def token_supply(self, address: str) -> float | None:
-        """Total supply in human token units, or None when GoPlus has no data."""
+    def snapshot(self, address: str) -> EVMHolderSnapshot:
+        """Fetch and normalize the single provider response for one token."""
+        payload = self._payload(address)
         try:
-            return float(self._payload(address)["total_supply"])
+            supply = float(payload["total_supply"])
         except (KeyError, TypeError, ValueError):
-            return None
-
-    def top_holders(self, address: str) -> list[dict[str, Any]]:
-        """Ranked top holders normalized to the canonical evidence shape
-        the lake reconstruction parses (``[{address, uiAmountString}]``)."""
-        items = self._payload(address).get("holders") or []
-        out: list[dict[str, Any]] = []
-        for item in items:
+            supply = None
+        try:
+            holder_count = int(str(payload["holder_count"]))
+        except (KeyError, TypeError, ValueError):
+            holder_count = None
+        if holder_count is not None and holder_count < 0:
+            holder_count = None
+        holders: list[dict[str, Any]] = []
+        for item in payload.get("holders") or []:
             if not isinstance(item, dict):
                 continue
             address_hash = item.get("address")
             balance = item.get("balance")
             if not address_hash or balance is None:
                 continue
-            out.append({"address": str(address_hash), "uiAmountString": str(balance)})
-        return out
+            holders.append({"address": str(address_hash), "uiAmountString": str(balance)})
+        if holder_count is None and holders:
+            holder_count = len(holders)
+        return EVMHolderSnapshot(supply=supply, holder_count=holder_count, holders=holders)
 
 
 class EtherscanClient:

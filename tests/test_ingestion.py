@@ -23,7 +23,9 @@ from ingestion.solana_swaps import (
 )
 from ingestion.source_clients import (
     EVMHolderClient,
+    EVMHolderSnapshot,
     GeckoTerminalClient,
+    GoPlusError,
     reset_geckoterminal_gate,
 )
 from ops.archive import LocalArchiveStore
@@ -1202,13 +1204,30 @@ def test_evm_holder_client_uses_goplus_token_security() -> None:
             200,
             json={
                 "code": 1,
+                "message": "OK",
                 "result": {
                     address: {
+                        "token_name": "Example Token",
+                        "token_symbol": "EX",
                         "total_supply": "1000",
-                        "holder_count": "2",
+                        "holder_count": "250",
                         "holders": [
-                            {"address": "0xaaa", "balance": "700"},
-                            {"address": "0xbbb", "balance": "200"},
+                            {
+                                "address": "0xaaa",
+                                "tag": "",
+                                "is_contract": 0,
+                                "balance": "700",
+                                "percent": "0.7",
+                                "is_locked": 0,
+                            },
+                            {
+                                "address": "0xbbb",
+                                "tag": "Burn Address",
+                                "is_contract": 1,
+                                "balance": "200",
+                                "percent": "0.2",
+                                "is_locked": 1,
+                            },
                         ],
                     }
                 },
@@ -1217,16 +1236,54 @@ def test_evm_holder_client_uses_goplus_token_security() -> None:
     )
     client = EVMHolderClient("base")
     try:
-        assert client.token_supply(address) == 1000.0
-        assert client.top_holders(address) == [
-            {"address": "0xaaa", "uiAmountString": "700"},
-            {"address": "0xbbb", "uiAmountString": "200"},
-        ]
+        snapshot = client.snapshot(address)
     finally:
         client.close()
 
+    assert snapshot.supply == 1000.0
+    assert snapshot.holder_count == 250
+    assert snapshot.holders == [
+        {"address": "0xaaa", "uiAmountString": "700"},
+        {"address": "0xbbb", "uiAmountString": "200"},
+    ]
     assert len(route.calls) == 1
     assert route.calls[0].request.url.params["contract_addresses"] == address
+
+
+@respx.mock
+def test_evm_holder_client_rejects_empty_payload() -> None:
+    """GoPlus can answer HTTP 200 with code 1 and an empty result. That is
+    missing coverage, not a successful zero-holder snapshot."""
+    address = "0x1111111111111111111111111111111111111111"
+    respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 1, "message": "OK", "result": {}},
+        )
+    )
+    client = EVMHolderClient("base")
+    try:
+        with pytest.raises(GoPlusError, match="no token data"):
+            client.snapshot(address)
+    finally:
+        client.close()
+
+
+@respx.mock
+def test_evm_holder_client_rejects_provider_error() -> None:
+    address = "0x1111111111111111111111111111111111111111"
+    respx.get("https://api.gopluslabs.io/api/v1/token_security/8453").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 4029, "message": "Request limit reached", "result": {}},
+        )
+    )
+    client = EVMHolderClient("base")
+    try:
+        with pytest.raises(GoPlusError, match="4029.*Request limit reached"):
+            client.snapshot(address)
+    finally:
+        client.close()
 
 
 def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypatch) -> None:
@@ -1277,16 +1334,22 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
         def close(self) -> None:
             return None
 
-        def token_supply(self, address: str) -> float:
+        def snapshot(self, address: str) -> EVMHolderSnapshot:
             assert address == asset.address
-            return 100.0
-
-        def top_holders(self, address: str):
-            assert address == asset.address
-            return [
-                {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
-                {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
-            ]
+            return EVMHolderSnapshot(
+                supply=100.0,
+                holder_count=57,
+                holders=[
+                    {
+                        "address": "0xaaa11111111111111111111111111111111111111",
+                        "uiAmountString": "70",
+                    },
+                    {
+                        "address": "0xbbb11111111111111111111111111111111111111",
+                        "uiAmountString": "20",
+                    },
+                ],
+            )
 
     monkeypatch.setattr(ingestion_service, "EVMHolderClient", FakeEVMHolderClient)
 
@@ -1307,10 +1370,20 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert evidence[0].payload["mint"] == asset.address
     assert evidence[0].payload["chain"] == "base"
     assert evidence[0].payload["supply"] == pytest.approx(100.0)
+    assert evidence[0].payload["holder_count"] == 57
     assert evidence[0].payload["largest_accounts"] == [
         {"address": "0xaaa11111111111111111111111111111111111111", "uiAmountString": "70"},
         {"address": "0xbbb11111111111111111111111111111111111111", "uiAmountString": "20"},
     ]
+
+    metric = session.scalar(
+        select(models.HolderMetric)
+        .where(models.HolderMetric.asset_id == asset.id)
+        .order_by(models.HolderMetric.ts.desc())
+    )
+    assert metric is not None
+    assert metric.holder_count == 57
+    assert float(metric.top10_pct or 0.0) == pytest.approx(0.9)
 
     health = session.scalar(
         select(models.SystemHealth)
@@ -1320,6 +1393,77 @@ def test_evm_holder_snapshot_ingest_is_bounded_and_idempotent(session, monkeypat
     assert health is not None
     assert health.state == "ok"
     assert "2 holder rows across 1 chains" in (health.message or "")
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "GoPlus returned no token data",
+        "GoPlus error 4029: Request limit reached",
+    ],
+)
+def test_evm_holder_failures_mark_source_yellow(session, monkeypatch, error_message: str) -> None:
+    """Missing payloads and provider errors must reach source health instead
+    of looking like an empty-but-successful holder scan."""
+    chain = get_or_create_chain(session, "base", name="Base", vm_type="evm", native_symbol="ETH")
+    service = IngestionService()
+    service.ensure_reference_data(session)
+    service.settings.evm_holder_scan_limit = 1
+    service.settings.evm_holder_rpc_pause_seconds = 0.0
+    observed_at = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)
+
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x4444444444444444444444444444444444444444",
+        symbol="FAIL",
+        name="Failing Token",
+        first_seen_at=observed_at - timedelta(hours=2),
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="0x5555555555555555555555555555555555555555",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=observed_at - timedelta(days=365),
+    )
+    upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="uniswap-v2-base",
+        pair_address="0x6666666666666666666666666666666666666666",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=observed_at - timedelta(hours=2),
+    )
+    session.commit()
+
+    class FailingEVMHolderClient:
+        def __init__(self, chain_slug: str) -> None:
+            assert chain_slug == "base"
+
+        def close(self) -> None:
+            return None
+
+        def snapshot(self, address: str) -> EVMHolderSnapshot:
+            assert address == asset.address
+            raise GoPlusError(error_message)
+
+    monkeypatch.setattr(ingestion_service, "EVMHolderClient", FailingEVMHolderClient)
+
+    assert service._ingest_evm_holder_snapshots(session) == 0
+
+    health = session.scalar(
+        select(models.SystemHealth)
+        .where(models.SystemHealth.component == "source:evm_holders")
+        .order_by(models.SystemHealth.ts.desc())
+    )
+    assert health is not None
+    assert health.state == "yellow"
+    assert health.error_count == 1
+    assert "0 holder rows across 1 chains" in (health.message or "")
+    assert error_message in (health.message or "")
 
 
 def test_geckoterminal_new_pools_cooldown_is_yellow_not_red(session, monkeypatch) -> None:

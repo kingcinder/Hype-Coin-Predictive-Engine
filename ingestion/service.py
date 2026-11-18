@@ -19,7 +19,11 @@ from forecast.engine import run_forecast_if_due
 from ingestion.birdeye_client import BirdeyeClient
 from ingestion.contract_analyzer import ContractAnalysis, analyze_contract
 from ingestion.data_quality import check_market_snapshots
-from ingestion.holder_tracker import get_evm_holders, get_solana_holders  # noqa: F401
+from ingestion.holder_tracker import (  # noqa: F401
+    get_evm_holders,
+    get_solana_holders,
+    record_holder_metrics,
+)
 from ingestion.normalizers import (
     NormalizedPair,
     extract_profile_links,
@@ -1034,9 +1038,12 @@ class IngestionService:
             try:
                 for asset in assets:
                     try:
-                        supply = client.token_supply(asset.address)
-                        sleep(max(0.0, self.settings.evm_holder_rpc_pause_seconds))
-                        accounts = client.top_holders(asset.address)
+                        # One provider call carries supply, the exact count, and
+                        # the ranked list; pace between assets only.
+                        snapshot = client.snapshot(asset.address)
+                        supply = snapshot.supply
+                        accounts = snapshot.holders
+                        holder_count = snapshot.holder_count
                         raw = store_raw_evidence(
                             session,
                             source=source,
@@ -1045,10 +1052,12 @@ class IngestionService:
                                 "chain": chain_slug,
                                 "mint": asset.address,
                                 "supply": supply,
+                                "holder_count": holder_count,
                                 "largest_accounts": accounts,
                             },
                             observed_at=observed_at,
                         )
+                        pcts: list[float] = []
                         for account in accounts:
                             address = str(account.get("address") or "")
                             if not address:
@@ -1059,6 +1068,8 @@ class IngestionService:
                             if balance is None:
                                 continue
                             pct_supply = balance / supply if supply and supply > 0 else None
+                            if pct_supply is not None:
+                                pcts.append(pct_supply)
                             insert_holder_once(
                                 session,
                                 asset_id=asset.id,
@@ -1070,6 +1081,13 @@ class IngestionService:
                                 pct_supply=pct_supply,
                             )
                             count += 1
+                        record_holder_metrics(
+                            session,
+                            asset.id,
+                            top10_pct=(sum(sorted(pcts, reverse=True)[:10]) if pcts else None),
+                            holder_count=holder_count,
+                            observed_at=observed_at,
+                        )
                         raw.raw_path = (
                             raw.raw_path or f"evm_holder_snapshot:{asset.id}:{ts.isoformat()}"
                         )

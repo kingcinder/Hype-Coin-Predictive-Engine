@@ -227,6 +227,31 @@ def test_evaluated_outcomes_commit_in_batches(session, monkeypatch) -> None:
     assert len(commits) >= 2
 
 
+def test_censored_backlog_uses_one_update_per_batch(session, monkeypatch) -> None:
+    """Unlabelable due rows must be retired with set-based updates, not one
+    UPDATE per ORM object, so a 40k-row age-out cannot hold the writer lock."""
+    from sqlalchemy import event
+
+    from risk_engine import outcomes as outcomes_module
+
+    monkeypatch.setattr(outcomes_module, "OUTCOME_BATCH_SIZE", 3)
+    asset = seed_market_asset(session)
+    for index in range(6):
+        _seed_prediction(session, asset, model_version=f"test-censor-batch-{index}")
+
+    updates: list[str] = []
+
+    @event.listens_for(session.get_bind(), "before_cursor_execute")
+    def _record_update(_conn, _cursor, statement, _params, _context, _executemany):
+        if statement.lstrip().upper().startswith("UPDATE RISK_OUTCOMES"):
+            updates.append(statement)
+
+    report = evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert report.censored == 6
+    assert len(updates) == 2
+
+
 def test_report_censors_rows_without_a_label_in_their_window(session) -> None:
     asset = seed_market_asset(session)
     withheld = _seed_prediction(session, asset)

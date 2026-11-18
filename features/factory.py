@@ -641,6 +641,19 @@ class FeatureFactory:
     def _holder_features(
         self, session: Session, asset_id: int, decision_ts: datetime
     ) -> tuple[float | None, float | None, float | None]:
+        # Holder rows intentionally contain only the ranked top holders. The
+        # EVM/GoPlus path also records the exact total in holder_metrics, so use
+        # that count when present while still deriving concentration from the
+        # top-10 rows themselves.
+        metric = session.scalar(
+            select(models.HolderMetric)
+            .where(
+                models.HolderMetric.asset_id == asset_id,
+                models.HolderMetric.ts <= decision_ts,
+            )
+            .order_by(models.HolderMetric.ts.desc())
+            .limit(1)
+        )
         latest_ts = session.scalar(
             select(func.max(models.Holder.ts)).where(
                 models.Holder.asset_id == asset_id,
@@ -648,32 +661,76 @@ class FeatureFactory:
                 models.Holder.ts <= decision_ts,
             )
         )
-        if not latest_ts:
+        holders = (
+            session.scalars(
+                select(models.Holder).where(
+                    models.Holder.asset_id == asset_id, models.Holder.ts == latest_ts
+                )
+            ).all()
+            if latest_ts
+            else []
+        )
+        if metric is not None and metric.holder_count is not None:
+            holder_count = float(metric.holder_count)
+        elif holders:
+            holder_count = float(len(holders))
+        else:
             return None, None, None
-        holders = session.scalars(
-            select(models.Holder).where(
-                models.Holder.asset_id == asset_id, models.Holder.ts == latest_ts
-            )
-        ).all()
-        holder_count = float(len(holders))
-        top_concentration = sum(
-            sorted([_safe_float(row.pct_supply, 0.0) for row in holders], reverse=True)[:10]
-        )
-        prior_ts = session.scalar(
-            select(func.max(models.Holder.ts)).where(
-                models.Holder.asset_id == asset_id,
-                models.Holder.ts <= decision_ts - timedelta(hours=1),
-                models.Holder.observed_at <= decision_ts,
+        top_concentration = (
+            sum(sorted([_safe_float(row.pct_supply, 0.0) for row in holders], reverse=True)[:10])
+            if holders
+            else (
+                _safe_float(metric.top10_pct, 0.0)
+                if metric is not None and metric.top10_pct is not None
+                else None
             )
         )
-        growth = None
-        if prior_ts:
-            prior_count = session.scalar(
-                select(func.count())
-                .select_from(models.Holder)
-                .where(models.Holder.asset_id == asset_id, models.Holder.ts == prior_ts)
+        growth = (
+            _safe_float(metric.holder_growth_per_hour)
+            if metric is not None and metric.holder_growth_per_hour is not None
+            else None
+        )
+        if growth is None:
+            # Older/manual metric rows may not carry growth. Derive the hourly
+            # rate from exact metric counts when possible, then fall back to the
+            # legacy top-holder rows.
+            prior_metric = session.scalar(
+                select(models.HolderMetric)
+                .where(
+                    models.HolderMetric.asset_id == asset_id,
+                    models.HolderMetric.ts <= decision_ts - timedelta(hours=1),
+                )
+                .order_by(models.HolderMetric.ts.desc())
+                .limit(1)
             )
-            growth = holder_count - float(prior_count or 0)
+            if (
+                metric is not None
+                and metric.holder_count is not None
+                and prior_metric is not None
+                and prior_metric.holder_count is not None
+            ):
+                hours = (
+                    ensure_utc(metric.ts) - ensure_utc(prior_metric.ts)
+                ).total_seconds() / 3600.0
+                if hours > 0:
+                    growth = (holder_count - float(prior_metric.holder_count)) / hours
+            else:
+                prior_ts = session.scalar(
+                    select(func.max(models.Holder.ts)).where(
+                        models.Holder.asset_id == asset_id,
+                        models.Holder.ts <= decision_ts - timedelta(hours=1),
+                        models.Holder.observed_at <= decision_ts,
+                    )
+                )
+                if prior_ts is not None and latest_ts is not None:
+                    prior_count = session.scalar(
+                        select(func.count())
+                        .select_from(models.Holder)
+                        .where(models.Holder.asset_id == asset_id, models.Holder.ts == prior_ts)
+                    )
+                    hours = (ensure_utc(latest_ts) - ensure_utc(prior_ts)).total_seconds() / 3600.0
+                    if hours > 0:
+                        growth = (holder_count - float(prior_count or 0)) / hours
         return holder_count, growth, top_concentration
 
     def _contract_flag_count(

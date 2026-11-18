@@ -671,7 +671,7 @@ def main() -> None:
     # Staged shutdown tracing + one absolute deadline armed by the first signal.
     shutdown_step = "main_loop"
     step_started = time.monotonic()
-    shutdown_timer: threading.Timer | None = None
+    shutdown_complete = threading.Event()
 
     def _force_shutdown() -> None:
         log.error(
@@ -682,12 +682,15 @@ def main() -> None:
         _kill_ui_group(ui, ui_pgid)
         os._exit(130)
 
-    def _arm_shutdown_timer() -> None:
-        nonlocal shutdown_timer
-        if shutdown_timer is None:
-            shutdown_timer = threading.Timer(SHUTDOWN_HARD_TIMEOUT_SECONDS, _force_shutdown)
-            shutdown_timer.daemon = True
-            shutdown_timer.start()
+    def _shutdown_watchdog() -> None:
+        # Wait for the first stop signal, then give the graceful epilogue the
+        # same 30s cap the old per-signal Timer provided. Creating that Timer
+        # inside a signal handler allocated a new thread from signal context,
+        # which can deadlock the interpreter; this thread is created once here.
+        stop.wait()
+        if shutdown_complete.wait(SHUTDOWN_HARD_TIMEOUT_SECONDS):
+            return
+        _force_shutdown()
 
     def _handle_stop(signum: int, _frame: object) -> None:
         if stop.is_set():
@@ -698,12 +701,17 @@ def main() -> None:
             os._exit(130)
         log.info("engine_shutdown_signal", signal=signum)
         stop.set()
-        # The main loop may be stuck somewhere that never reaches the finally
-        # block; arm the hard deadline here so both ports are still freed.
-        _arm_shutdown_timer()
 
     signal.signal(signal.SIGINT, _handle_stop)
     signal.signal(signal.SIGTERM, _handle_stop)
+
+    # One watchdog for the process lifetime, not one Timer per signal. It exits
+    # as soon as the graceful epilogue sets shutdown_complete.
+    threading.Thread(
+        target=_shutdown_watchdog,
+        name="engine-shutdown-watchdog",
+        daemon=True,
+    ).start()
 
     # --- REST API in a daemon thread -----------------------------------------
     # Fail fast if the API port is already owned by another process: silently
@@ -837,7 +845,6 @@ def main() -> None:
             stop.wait(backoff_sleep_seconds(iteration, settings.scan_interval_seconds))
     finally:
         log.info("engine_shutting_down")
-        _arm_shutdown_timer()
         shutdown_step = "ui"
         step_started = time.monotonic()
 
@@ -889,9 +896,9 @@ def main() -> None:
         except Exception:  # noqa: BLE001 - never fail shutdown on queue drain.
             log.exception("engine_write_queue_stop_failed")
         _next_step("done")
-        if shutdown_timer is not None:
-            shutdown_timer.cancel()
         log.info("engine_stopped")
+        # Releases the startup watchdog instead of cancelling a per-signal Timer.
+        shutdown_complete.set()
 
 
 if __name__ == "__main__":
