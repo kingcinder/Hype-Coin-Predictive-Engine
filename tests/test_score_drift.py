@@ -633,6 +633,13 @@ class TestAutoApplyCli:
             "storage.database.SessionLocal",
             SessionLocal,  # __main__ binds this
         )
+        # Pin the CLI's ambient settings instead of inheriting a developer's
+        # .env: otherwise a disabled/tuned score-drift config can make the
+        # fresh probe non-red, skip rescue, and leave the ACKed alert open.
+        monkeypatch.setattr(
+            "ops.score_drift.get_settings",
+            lambda: _settings(score_drift_sample_size=300, score_drift_min_samples=10),
+        )
         # The probe would page ntfy under the real settings; silence the push
         # in the test (the push path itself is pinned elsewhere).
         monkeypatch.setattr("ops.score_drift._notify", lambda *a, **k: False)
