@@ -50,12 +50,7 @@ def _ensure_version_table_capacity(connectable) -> None:
                 "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
             )
         )
-        conn.execute(
-            text(
-                "ALTER TABLE alembic_version "
-                "ALTER COLUMN version_num TYPE VARCHAR(255)"
-            )
-        )
+        conn.execute(text("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"))
 
 
 def run_migrations_online() -> None:
