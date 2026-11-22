@@ -15,6 +15,17 @@ from common.time import ensure_utc
 STALE_STATE = "stale"
 DEFAULT_STALE_AFTER_SECONDS = 6 * 3600.0
 
+# One-shot markers that are not live health signals: the fixture seeder
+# writes its row once and nothing ever refreshes it, so it would read
+# ``stale`` forever. /health excludes them instead of reporting them.
+_NON_OPERATIONAL_COMPONENTS: frozenset[str] = frozenset({"fixture_seed"})
+
+
+def is_operational_component(component: str) -> bool:
+    """False for seed markers that are not live health signals."""
+    return component not in _NON_OPERATIONAL_COMPONENTS
+
+
 # Components that report every scan go stale quickly; components on an
 # hourly/daily/weekly cadence get a matching window.
 _EXACT_STALE_AFTER_SECONDS: dict[str, float] = {

@@ -46,12 +46,18 @@ does exist, and it is off by default:
 - **Live orders** require `LIVE_TRADING_ENABLED=1`, the explicit arm phrase, a
   bankroll cap, and a daily-loss cap. The kill switch cancels submitted orders
   and closes the gate. GMGN venue calls require `GMGN_API_KEY` and
-  `GMGN_SIGNER_SECRET` and have not been verified against the live venue.
+  `GMGN_SIGNER_SECRET`; the GMGN API is paywalled and retired as a setup step
+  (2026-11-20, owner decision) — no key will be created, and DexScreener is
+  the live price source for paper trading. The GMGN client code is kept intact
+  in case a key ever exists.
 - **Copy trading** is off by default and always logs a signal for human
   approval; it never auto-executes.
-- The engine's risk **scores are not validated** (the latest report ranks worse
-  than its baselines); the Trading view and trading API payloads report
-  `scores_validated: false`.
+- The engine's risk scores are **not fully validated**: headline v6 cells pass
+  (RiskBand 0.9355 vs 3.2920 baseline, BLACK 0.8655 vs 0.8230, calibration
+  error 0.0102), but `scores_validated` is `false` under the tightened
+  live-edge criterion — Ticket 1 (a proven edge on live tokens) is still open
+  (live BLACK 0.0268 vs 0.0217 base, indistinguishable). The Trading view and
+  trading API payloads report `scores_validated: false`.
 
 ## One-command startup
 

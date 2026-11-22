@@ -143,8 +143,10 @@ The engine ships a paper ledger plus a disabled live path:
   `LIVE_DAILY_LOSS_LIMIT_SOL` are set. `/trading/kill` closes the gate and
   cancels submitted orders; it reports any order it could not cancel.
 - GMGN venue calls are signed with `GMGN_API_KEY` + `GMGN_SIGNER_SECRET` and
-  refuse with `venue_auth_unimplemented` when either is missing. Venue
-  behavior has not been verified against the live GMGN API.
+  refuse with `venue_auth_unimplemented` when either is missing. RETIRED
+  2026-11-20 (owner decision): the GMGN API is paywalled, no key will be
+  created, and DexScreener (keyless) is the live price source for paper
+  trading. The GMGN client code is kept intact in case a key ever exists.
 - Copy trading is off by default and only logs signals for human approval.
 - `/trading/status` and the Trading view report `scores_validated: false`
   while the latest validation report is worse than its baselines. Do not treat

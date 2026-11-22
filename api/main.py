@@ -83,7 +83,7 @@ from engine.activity_stream import activity_stream_broker, compute_activity_sign
 from engine.price_stream import price_stream_broker
 from engine.state import engine_state, sse_broker
 from ingestion.rpc_pool import HEALTH_START, POOL_CHAINS, get_rpc_pool
-from ops.health_freshness import aged_state
+from ops.health_freshness import aged_state, is_operational_component
 from ops.parity import latest_parity
 from ops.score_drift import latest_score_drift
 from risk_engine.rules import assess_risk, mask_unreliable_forecast
@@ -228,6 +228,7 @@ def health(session: DbSession) -> HealthResponse:
             error_count=row.error_count,
         )
         for row in latest_health(session)
+        if is_operational_component(row.component)
     ]
     from risk_engine.calibrator import get_active_confidence_calibration
 
