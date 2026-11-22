@@ -483,6 +483,13 @@ class Score(Base):
     risk_band: Mapped[str] = mapped_column(String(16), nullable=False)
     confidence_source: Mapped[str] = mapped_column(String(16), nullable=False, default="fallback")
     model_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Ensemble weights in effect when this row was written ({"rule": ..,
+    # "ml": .., "heuristic": ..}), recorded by the engine score path and
+    # by scripts/rescore.py (migration 0042). The drift probe re-blends
+    # with these stored weights so an hourly weight recalibration cannot
+    # flip a healthy probe red. NULL for rows written before 0042 (the
+    # probe then falls back to the current weights, as before).
+    ensemble_weights: Mapped[dict[str, float] | None] = mapped_column(JSON, nullable=True)
 
 
 class ScoreExplanation(Base):
@@ -1146,6 +1153,12 @@ class LedgerOpenPosition(Base):
     source_signal: Mapped[str] = mapped_column(String(128), nullable=False)
     entry_quote_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
     entry_effective_price: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=False)
+    # Slippage-adjusted per-token price in the chain's native currency (SOL
+    # on Solana) at entry. None for positions opened before the native
+    # pricing fix -- their qty is the legacy scaled count
+    # (net_sol / usd_price), not a token count, and they close on the USD
+    # ratio. Its presence is the flag close_trade uses to pick the math.
+    entry_price_native: Mapped[Any] = mapped_column(Numeric(38, 18), nullable=True)
     qty: Mapped[Any] = mapped_column(Numeric(38, 12), nullable=False)
     size_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
     entry_fees_sol: Mapped[Any] = mapped_column(Numeric(30, 9), nullable=False)
