@@ -53,9 +53,7 @@ def _build_fixture_db(path: Path) -> None:
         )
         old = _ts(T0 - timedelta(days=10))
         for pair_id, asset_id in [(10, 1), (20, 2), (30, 3), (40, 4), (50, 5)]:
-            connection.execute(
-                "INSERT INTO pairs VALUES (?, ?, ?)", (pair_id, asset_id, old)
-            )
+            connection.execute("INSERT INTO pairs VALUES (?, ?, ?)", (pair_id, asset_id, old))
         lifecycle = [
             (1, "seeding", T0 - timedelta(hours=2)),
             (2, "ignition", T0 - timedelta(hours=3)),
@@ -141,8 +139,11 @@ def test_evaluate_prediction_pair_created_after_score_is_not_eligible() -> None:
         prediction,
         snapshots,
         {90: T0 + timedelta(hours=1)},  # pair did not exist at score time
-        [LifecycleMark(phase="seeding", ts=T0 - timedelta(hours=1),
-                       observed_at=T0 - timedelta(hours=1))],
+        [
+            LifecycleMark(
+                phase="seeding", ts=T0 - timedelta(hours=1), observed_at=T0 - timedelta(hours=1)
+            )
+        ],
         window_hours=48.0,
         drawdown=0.50,
     )

@@ -194,9 +194,7 @@ def evaluate_prediction(
         and pair_created_at[row.pair_id] <= scored_at
     ]
     latest = max(eligible, key=_market_sort_key) if eligible else None
-    age_hours = (
-        (scored_at - latest.ts).total_seconds() / 3600.0 if latest is not None else None
-    )
+    age_hours = (scored_at - latest.ts).total_seconds() / 3600.0 if latest is not None else None
     entry_price = latest.price_usd if latest is not None else None
 
     phase = phase_at_score(lifecycle, scored_at)
@@ -251,12 +249,8 @@ def summarize_audits(audits: Sequence[PredictionAudit]) -> dict[str, object]:
             [a for a in green_live if a.censor_reason == "no_forward_evidence"]
         ),
         "green_then_collapsed": len(collapsed),
-        "green_then_collapsed_rate": (
-            len(collapsed) / len(evaluable) if evaluable else None
-        ),
-        "predictions_without_snapshot": len(
-            [a for a in audits if a.snapshot_age_hours is None]
-        ),
+        "green_then_collapsed_rate": (len(collapsed) / len(evaluable) if evaluable else None),
+        "predictions_without_snapshot": len([a for a in audits if a.snapshot_age_hours is None]),
         "snapshot_age_hours": {
             "overall": _age_block(
                 [a.snapshot_age_hours for a in audits if a.snapshot_age_hours is not None]
@@ -307,8 +301,9 @@ def run_audit(
             "SELECT asset_id, scored_at, risk_band FROM prediction_records"
         ).fetchall()
         predictions = [
-            Prediction(asset_id=int(row[0]), scored_at=parse_timestamp(row[1]),
-                       risk_band=str(row[2]))
+            Prediction(
+                asset_id=int(row[0]), scored_at=parse_timestamp(row[1]), risk_band=str(row[2])
+            )
             for row in rows
         ]
         summary: dict[str, object] = {
@@ -369,8 +364,7 @@ def run_audit(
                     observed_at=parse_timestamp(row[2]),
                 )
                 for row in connection.execute(
-                    "SELECT phase, ts, observed_at FROM lifecycle_events"
-                    " WHERE asset_id = ?",
+                    "SELECT phase, ts, observed_at FROM lifecycle_events WHERE asset_id = ?",
                     (asset_id,),
                 )
             ]
@@ -411,8 +405,7 @@ def format_summary(summary: Mapping[str, object]) -> str:
         lines.append("window: (no prediction_records)")
     else:
         lines.append(
-            f"window: {summary['window_start']} .. {summary['window_end']}"
-            f" ({summary['days']}d)"
+            f"window: {summary['window_start']} .. {summary['window_end']} ({summary['days']}d)"
         )
     lines.append(
         f"params: forward_window={summary['window_hours']}h"
@@ -425,9 +418,7 @@ def format_summary(summary: Mapping[str, object]) -> str:
     lines.append(f"green_phase_unknown: {summary['green_phase_unknown']}")
     lines.append(f"green_live_evaluable: {summary['green_live_evaluable']}")
     lines.append(f"green_live_no_entry_price: {summary['green_live_no_entry_price']}")
-    lines.append(
-        f"green_live_no_forward_evidence: {summary['green_live_no_forward_evidence']}"
-    )
+    lines.append(f"green_live_no_forward_evidence: {summary['green_live_no_forward_evidence']}")
     lines.append(f"green_then_collapsed: {summary['green_then_collapsed']}")
     rate = summary["green_then_collapsed_rate"]
     if isinstance(rate, (int, float)):
