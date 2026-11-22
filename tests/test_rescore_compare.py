@@ -8,6 +8,7 @@ implies dry-run).
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
@@ -16,7 +17,6 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from scoring.formulas import compute_scores
 from scripts.rescore import rescore
 from storage import models
 from storage.database import Base
@@ -63,6 +63,26 @@ SCORE_WRITE_FIELDS = [
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _prime_ensemble(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the probe/rescore ensemble to deterministic weights.
+
+    ``engine_score`` blends through the module-level ``ensemble_engine``
+    singleton, whose first use would otherwise load weights from the
+    configured (live) database and recalibrate+save back to it. The primed
+    instance uses the default weights, never touches a database, and is
+    restored by monkeypatch on teardown.
+    """
+
+    from scoring.ensemble import EnsembleEngine
+
+    engine = EnsembleEngine()
+    engine._current_weights = {"rule": 0.5, "ml": 0.3, "heuristic": 0.2}
+    engine._persisted = True
+    engine._last_recalibrate = time.monotonic()
+    monkeypatch.setattr("ops.score_drift.ensemble_engine", engine)
 
 
 @pytest.fixture()
@@ -546,13 +566,17 @@ class TestRescoreReviewFilters:
         monkeypatch.setattr("scripts.rescore.session_scope", lambda: scope)
 
         # Baseline + oracle, pre-migration: the seeded field values, and the
-        # value the live formula would compute for them on this same DB.
+        # value the live pipeline would compute for them on this same DB.
         # (assess_risk consults the DB only for adaptive calibration rows,
-        # which this fresh file DB doesn't have, so the oracle is exact.)
+        # which this fresh file DB doesn't have, so the oracle is exact.
+        # The oracle is the blended engine score, not the rule result —
+        # the rescore persists what the engine persists.)
+        from ops.score_drift import engine_score, forecast_masked
+
         with Seeder() as pre:
             seeded_row = pre.scalars(select(models.Score)).one()
             seeded_values = {name: getattr(seeded_row, name) for name in SCORE_WRITE_FIELDS}
-            expected = compute_scores(BASE_FEATURES, [], session=pre)
+            expected = engine_score(pre, BASE_FEATURES, [], masked=forecast_masked(pre))
 
         # compare=False keeps dry_run False: the own-cycle path must commit.
         result = rescore(dry_run=False, compare=False, min_change=0.0)
@@ -574,7 +598,13 @@ class TestRescoreReviewFilters:
                 assert persisted != seeded_values[name], (
                     f"{name} unchanged after rescore commit (still {seeded_values[name]!r})"
                 )
-                if name == "risk_band":
-                    assert persisted == expected.risk_band.value
-                else:
+                if name in ("risk", "hype", "confidence", "research_priority"):
                     assert persisted == pytest.approx(getattr(expected, name))
+                elif name == "risk_band":
+                    assert persisted == expected.risk_band
+                else:
+                    assert persisted == pytest.approx(getattr(expected.rule_result, name))
+            # The rescore records the weights it blended with (migration
+            # 0042) — the next probe re-blends with exactly these, so a
+            # later recalibration cannot flip it red.
+            assert saved.ensemble_weights == expected.weights

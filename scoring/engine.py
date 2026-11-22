@@ -33,6 +33,32 @@ _SCORING_PROGRESS_EVERY = 100
 _SCORING_SLOW_ASSET_SECONDS = 2.0
 
 
+def _blend_weights(ensemble: object) -> dict[str, float] | None:
+    """The ensemble weights a blend actually used, or None if unknown.
+
+    The real ``EnsembleScore`` carries them in ``details["weights"]`` (and
+    as ``rule/ml/heuristic_weight`` fields); a test double may carry
+    neither, in which case there is nothing to record and the caller
+    persists NULL. Never raises: weight recording is bookkeeping, not
+    scoring.
+    """
+    try:
+        details = getattr(ensemble, "details", None)
+        if isinstance(details, dict):
+            weights = details.get("weights")
+            if isinstance(weights, dict) and weights:
+                return {str(k): float(v) for k, v in weights.items()}
+        fields = tuple(
+            getattr(ensemble, name, None)
+            for name in ("rule_weight", "ml_weight", "heuristic_weight")
+        )
+        if all(isinstance(v, (int, float)) for v in fields):
+            return {"rule": float(fields[0]), "ml": float(fields[1]), "heuristic": float(fields[2])}
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 def _heuristic_band_from_score(h_score: float | None) -> str | None:
     """Map the heuristic layer's ignition signal to a risk-band prediction.
 
@@ -108,7 +134,17 @@ class ScoringEngine:
                     elapsed_sec=round(asset_started - loop_started, 3),
                     decision_ts=ts_iso,
                 )
-            raw = {name: feature.value for name, feature in features.items()}
+            # Scoring-path consistency (reports/scoring-path-consistency-fix-20261120.md):
+            # build `raw` from non-missing features ONLY -- the same
+            # convention scripts/rescore.py `_build_features` uses. A missing
+            # feature placeholder value (0.0) must never reach
+            # compute_scores: a missing spread_estimate stored as 0.0 scored
+            # as a perfect spread (c_spread 0) instead of worst-case 100,
+            # shifting exit_risk by exactly 15/1.90 = 7.8947 on 2,266 eval
+            # rows, and a missing catalyst_proximity_hours stored as 0.0
+            # scored as "catalyst right now" (+12.0 catalyst on every eval
+            # row). The rescore convention treats both as unknown.
+            raw = {name: feature.value for name, feature in features.items() if not feature.missing}
             missing = [name for name, feature in features.items() if feature.missing]
             raw, masked_forecast = mask_unreliable_forecast(session, raw)
             result = compute_scores(
@@ -118,6 +154,10 @@ class ScoringEngine:
                 session=session,
             )
             # Ensemble: blend rule-based with ML/heuristic when available
+            # write_weights records the weights this blend actually used, so
+            # the drift probe can re-blend with them later (migration 0042).
+            # It stays None when the blend fails and the row is rule-only.
+            write_weights: dict[str, float] | None = None
             try:
                 ml_score = raw.get("collapse_probability_24h")
                 h_score = raw.get("ignition_signal")
@@ -148,6 +188,7 @@ class ScoringEngine:
                     ml_risk=clamp(ml_score * 100) if ml_score is not None else None,
                     heuristic_score=h_score if h_score is not None else None,
                 )
+                write_weights = _blend_weights(ensemble)
                 result = _replace(
                     result,
                     hype=ensemble.hype,
@@ -159,7 +200,11 @@ class ScoringEngine:
                 pass  # ensemble is additive, never breaks scoring
 
             score = self._upsert_score(
-                session, asset_id=asset_id, decision_ts=decision_ts, result=result
+                session,
+                asset_id=asset_id,
+                decision_ts=decision_ts,
+                result=result,
+                ensemble_weights=write_weights,
             )
             self._upsert_explanation(
                 session,
@@ -457,7 +502,13 @@ class ScoringEngine:
         return updates
 
     def _upsert_score(
-        self, session: Session, *, asset_id: int, decision_ts: datetime, result
+        self,
+        session: Session,
+        *,
+        asset_id: int,
+        decision_ts: datetime,
+        result,
+        ensemble_weights: dict[str, float] | None = None,
     ) -> models.Score:
         row = session.scalar(
             select(models.Score).where(
@@ -480,6 +531,11 @@ class ScoringEngine:
             "risk_band": result.risk_band.value,
             "confidence_source": result.confidence_source,
             "observed_at": utc_now(),
+            # Write-time ensemble weights (migration 0042). None when the
+            # blend failed and the row is rule-only, or when a rewrite
+            # overwrites a previously blended row with a rule-only one:
+            # stale weights must never outlive the values they produced.
+            "ensemble_weights": ensemble_weights,
         }
         if row:
             for key, value in values.items():

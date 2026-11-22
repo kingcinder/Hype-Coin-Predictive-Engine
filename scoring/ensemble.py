@@ -15,6 +15,7 @@ the ML layer is propagated into the final confidence estimate."""
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,6 +27,36 @@ log = get_logger(__name__)
 
 # Default ensemble weights (rule, ml, heuristic)
 _DEFAULT_WEIGHTS = {"rule": 0.50, "ml": 0.30, "heuristic": 0.20}
+
+# The keys every ensemble weight dict carries (blend, Score.ensemble_weights,
+# EnsembleState.current_weights). A stored dict missing one is not usable.
+_WEIGHT_KEYS = ("rule", "ml", "heuristic")
+
+
+def coerce_weights(raw: object) -> dict[str, float] | None:
+    """Validate a candidate weight dict, or return None when unusable.
+
+    Accepts only a mapping with all three of rule / ml / heuristic
+    present, each a finite number >= 0, with a positive sum. Returns a
+    plain {key: float} dict. The values are used verbatim, never
+    renormalized, so a recomputation with write-time weights reproduces
+    the blended score exactly (renormalizing would shift each weight by
+    the rounding the recalibrator already applied, and the drift probe
+    grades at a precision where even that shows). Callers fall back to
+    get_weights() when this returns None.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        weights = {key: float(raw[key]) for key in _WEIGHT_KEYS}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(not math.isfinite(v) or v < 0 for v in weights.values()):
+        return None
+    if sum(weights.values()) <= 0:
+        return None
+    return weights
+
 
 # Dirty-flag periodic flush thresholds: record_outcome() is on the hot
 # scoring path and must not write per outcome, but waiting for the hourly
@@ -383,13 +414,29 @@ class EnsembleEngine:
         ml_risk: float | None = None,
         ml_confidence: float | None = None,
         heuristic_score: float | None = None,
+        weights: dict[str, float] | None = None,
     ) -> EnsembleScore:
         """Blend rule-based, ML, and heuristic scores into a single result.
 
         Missing ML/heuristic scores are replaced with the rule-based value
         so the ensemble degrades gracefully when a layer is unavailable.
+
+        weights pins the blend to an explicit weight dict (the write-time
+        weights a score row was persisted with, read back by the drift
+        probe). When omitted, the current adaptive weights are used
+        (get_weights(), which recalibrates on the hourly cadence). An
+        invalid explicit dict falls back to the current weights with a
+        warning, so a bad stored value never breaks scoring.
         """
-        weights = self.get_weights()
+        if weights is not None:
+            coerced = coerce_weights(weights)
+            if coerced is None:
+                log.warning("ensemble_weights_invalid", weights=weights)
+                weights = self.get_weights()
+            else:
+                weights = coerced
+        else:
+            weights = self.get_weights()
         w_rule = weights["rule"]
         w_ml = weights["ml"]
         w_heuristic = weights["heuristic"]

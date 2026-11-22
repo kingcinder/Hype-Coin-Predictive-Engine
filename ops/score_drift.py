@@ -7,10 +7,31 @@ which can be quantized to a handful of bands while the live ``compute_scores``
 yields hundreds of distinct values. Until a rescore lands, the GUI silently
 serves stale scores.
 
+The "live" side must reproduce the engine's full write pipeline, not just
+``compute_scores``: the engine blends the rule result with the ML forecast
+and heuristic layers (``scoring.ensemble``), so a rule-only recomputation
+systematically disagrees with persisted scores by ~20 points (2026-11-20:
+KS D 0.58, mean |delta| ~23 on 300 tokens) even when nothing is stale. There
+is no stored drift baseline to re-establish — the check compares two live
+computations — so the fix is to reproduce the pipeline, not to reset a
+threshold. ``scripts/rescore.py`` uses the same helper, so a rescue writes
+the same blended values the probe grades.
+
 This module closes that gap: each scan it samples the most recent decision
-window (exactly the rows the GUI serves), re-runs the *current*
-``compute_scores`` over the same (asset, decision_ts) feature vectors, and
-grades the divergence of the persisted vs live risk distributions using:
+window (exactly the rows the GUI serves), re-runs the *current engine write
+pipeline* — forecast mask + ``compute_scores`` + ensemble blend — over the
+same (asset, decision_ts) feature vectors, and grades the divergence of the
+persisted vs live risk distributions using:
+
+The blend re-uses each row's *write-time* ensemble weights
+(``scores.ensemble_weights``, migration 0042) when present. The ensemble
+recalibrates hourly from accruing scorer accuracies, so re-blending with
+the current weights measures weight drift, not score corruption: a
+~0.5-point shift amplifies into KS D ~ 0.5 on heavily-tied values
+(2026-11-20: pinned-weight recomputation gives EXACT 300/300, mean
+0.0000 with write-time weights, vs 0.5307 with DB-loaded weights). Rows
+written before 0042 have NULL weights and fall back to the current
+weights, exactly as the probe behaved before.
 
 - **two-sample Kolmogorov–Smirnov D** (pure numpy — scipy is not a project
   dependency; the p-value is the standard asymptotic approximation),
@@ -49,6 +70,7 @@ import argparse
 import json
 import math
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TypedDict
 
@@ -60,7 +82,9 @@ from common.config import Settings, get_settings
 from common.enums import AlertState
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
-from scoring.formulas import compute_scores
+from risk_engine.rules import mask_unreliable_forecast
+from scoring.ensemble import ensemble_engine
+from scoring.formulas import ScoreResult, clamp, compute_scores
 from storage import models
 from storage.repository import record_health
 
@@ -227,6 +251,125 @@ def _grade_drift(
     return "ok", []
 
 
+# ---------------------------------------------------------------------------
+# The engine's write pipeline, reproduced for the probe (and the rescore).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EngineScore:
+    """What the engine would persist for one (asset, decision_ts).
+
+    ``risk`` / ``hype`` / ``confidence`` / ``research_priority`` are the
+    ENSEMBLE-blended values the engine's ``score_assets`` writes; ``risk_band``
+    is the RULE band (the engine's ``_upsert_score`` writes
+    ``result.risk_band`` from ``compute_scores`` — the ``_replace`` that
+    applies the blend does not touch the band). ``rule_result`` is the
+    underlying ``compute_scores`` output, for the fields the engine does not
+    blend (exit_risk, ethos, liquidity_access, ...).
+
+    The blend's risk does not depend on the cross-source fusion boost
+    (fusion feeds only the confidence input), so the probe — which grades
+    risk only — reproduces it exactly with ``fusion_boost=0``. The rescore
+    uses the same helper; its confidence/research_priority therefore omit
+    the fusion boost the engine adds at score time (the decision-time fusion
+    is not recoverable from stored data).
+    """
+
+    risk: float
+    hype: float
+    confidence: float
+    research_priority: float
+    risk_band: str
+    rule_result: ScoreResult
+    # The ensemble weights the blend used for this recomputation (None
+    # when the blend fell back to the rule result). The rescore records
+    # these on the row it rewrites.
+    weights: dict[str, float] | None = None
+
+
+def forecast_masked(session: Session) -> bool:
+    """Whether the collapse forecast is currently masked.
+
+    Asks the real mask function once (it reads the ``forecast_calibration``
+    health row); the per-asset application is just the key pop, so the probe
+    calls this once per run instead of once per token — otherwise a red
+    calibration would append one ``risk_forecast_fallback`` health row per
+    sampled token.
+    """
+    _, masked = mask_unreliable_forecast(session, {"collapse_probability_24h": 0.0})
+    return masked
+
+
+def engine_score(
+    session: Session,
+    features: dict[str, float],
+    missing: list[str],
+    *,
+    masked: bool,
+    weights: dict[str, float] | None = None,
+) -> EngineScore:
+    """Reproduce the engine's persisted score for one feature vector.
+
+    Mask (if active) → ``compute_scores`` → ensemble blend, with the same
+    arguments ``scoring.engine.score_assets`` passes. ``data_layer_uncertainty``
+    is left at its default: it feeds only ``uncertainty``, never the blended
+    fields, and the live per-asset RPC-pool value is not stored. If the blend
+    raises, fall back to the rule result — mirroring the engine, whose blend
+    is additive and never breaks scoring.
+
+    ``weights`` pins the blend to an explicit weight dict — the probe
+    passes the row's stored write-time weights
+    (``scores.ensemble_weights``) so a recalibration since the write
+    cannot masquerade as drift. When ``None`` (pre-0042 rows, or a
+    caller that wants the current pipeline such as the rescore), the
+    blend uses the current adaptive weights. An invalid stored dict
+    falls back to the current weights inside ``blend``.
+    """
+    feat = features
+    if masked:
+        feat = {k: v for k, v in features.items() if k != "collapse_probability_24h"}
+    rule = compute_scores(feat, missing, session=session)
+    ml_score = feat.get("collapse_probability_24h")
+    h_score = feat.get("ignition_signal")
+    try:
+        blended = ensemble_engine.blend(
+            rule_hype=rule.hype,
+            rule_risk=rule.risk,
+            rule_confidence=min(100.0, rule.confidence),
+            rule_research_priority=rule.research_priority,
+            rule_risk_band=rule.risk_band.value,
+            ml_hype=clamp(100.0 - ml_score * 100) if ml_score is not None else None,
+            ml_risk=clamp(ml_score * 100) if ml_score is not None else None,
+            heuristic_score=h_score if h_score is not None else None,
+            weights=weights,
+        )
+    except Exception as exc:  # noqa: BLE001 - mirror the engine's additive blend.
+        log.warning("score_drift_ensemble_failed", error=str(exc))
+        return EngineScore(
+            risk=rule.risk,
+            hype=rule.hype,
+            confidence=rule.confidence,
+            research_priority=rule.research_priority,
+            risk_band=rule.risk_band.value,
+            rule_result=rule,
+            weights=None,
+        )
+    return EngineScore(
+        risk=blended.risk,
+        hype=blended.hype,
+        confidence=blended.confidence,
+        research_priority=blended.research_priority,
+        risk_band=rule.risk_band.value,
+        rule_result=rule,
+        weights={
+            "rule": blended.rule_weight,
+            "ml": blended.ml_weight,
+            "heuristic": blended.heuristic_weight,
+        },
+    )
+
+
 def run_score_drift(
     session: Session,
     *,
@@ -249,6 +392,7 @@ def run_score_drift(
         if len(scores) < settings.score_drift_min_samples:
             return {"skipped": True}
         features, missing = _build_sample_features(session, scores)
+        masked = forecast_masked(session)
 
         persisted: list[float] = []
         live: list[float] = []
@@ -261,13 +405,19 @@ def run_score_drift(
                 no_features += 1
                 continue
             try:
-                result = compute_scores(feat, missing.get(key, []), session=session)
+                live_risk = engine_score(
+                    session,
+                    feat,
+                    missing.get(key, []),
+                    masked=masked,
+                    weights=score.ensemble_weights,
+                ).risk
             except Exception as exc:  # noqa: BLE001 - one token must not kill the probe.
                 errors += 1
                 log.warning("score_drift_token_failed", asset_id=score.asset_id, error=str(exc))
                 continue
             persisted.append(score.risk)
-            live.append(result.risk)
+            live.append(live_risk)
         compared = len(persisted)
         if compared < 2:
             if errors:

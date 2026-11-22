@@ -1,9 +1,25 @@
 """Rescore all historical tokens using the current scoring formula.
 
 Reads the features table, reconstructs feature dicts per (asset, decision_ts),
-re-runs compute_scores() with the live code (including the proportional risk
-fix), and updates the scores table in-place.  This is a one-time migration
+re-runs the engine's full write pipeline — forecast mask + compute_scores()
++ ensemble blend, with the live code (including the proportional risk fix) —
+and updates the scores table in-place.  This is a one-time migration
 tool — not part of the regular scoring pipeline.
+
+The blend reproduces what the engine's ``score_assets`` persists, so a
+rescue through ``ops.score_drift.rescue_drift`` clears the drift probe
+(which grades the same blended risk). Two deliberate gaps versus the
+engine: the cross-source fusion boost is 0 here (the decision-time fusion
+is not recoverable from stored data — the engine fuses live signals at
+score time), so confidence/research_priority omit it; and
+``data_layer_uncertainty`` is left at its default (it feeds only
+``uncertainty``, never the blended fields).
+
+The rescore deliberately does NOT reuse the rows' stored write-time
+weights: it rewrites history with the current pipeline, so it blends
+with the current weights and records those as the row's new
+``ensemble_weights`` (migration 0042) — the next probe then re-blends
+with exactly the weights that wrote the row.
 
 Usage:
     python scripts/rescore.py [--dry-run] [--compare] [--min-change THRESHOLD]
@@ -57,7 +73,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.logging import get_logger
-from scoring.formulas import compute_scores
+from ops.score_drift import engine_score, forecast_masked
 from storage import models
 from storage.database import session_scope
 
@@ -202,6 +218,7 @@ def _rescore_in_session(
     """
     features_map = _build_features(session)
     missing_map = _build_missing(session)
+    masked = forecast_masked(session)
 
     # Load existing scores
     scores = session.scalars(select(models.Score).order_by(models.Score.id)).all()
@@ -233,19 +250,16 @@ def _rescore_in_session(
 
         missing = missing_map.get(key, [])
         try:
-            result = compute_scores(
-                feat,
-                missing,
-                session=session,
-            )
+            scored = engine_score(session, feat, missing, masked=masked)
+            result = scored.rule_result
         except Exception as exc:  # noqa: BLE001
             log.warning("rescore_error", score_id=score.id, error=str(exc))
             errors += 1
             continue
 
-        risk_after.append(result.risk)
+        risk_after.append(scored.risk)
 
-        if compare and abs(result.risk - score.risk) >= min_change:
+        if compare and abs(scored.risk - score.risk) >= min_change:
             sym = asset_map.get(score.asset_id, f"id={score.asset_id}")
             if symbol_filters and not _symbol_matches(sym, symbol_filters):
                 # Review filter: this continue can never prune a write because
@@ -258,25 +272,33 @@ def _rescore_in_session(
                 (
                     sym,
                     score.risk,
-                    result.risk,
-                    result.risk - score.risk,
+                    scored.risk,
+                    scored.risk - score.risk,
                     score.asset_id,
                     ts,
                 )
             )
 
         if not dry_run:
-            score.risk = result.risk
+            # Blended fields (what the engine persists); the rest come from
+            # the rule result. risk_band is the RULE band — the engine's
+            # _upsert_score writes result.risk_band, which the blend's
+            # _replace does not touch.
+            score.risk = scored.risk
             score.exit_risk = result.exit_risk
-            score.hype = result.hype
+            score.hype = scored.hype
             score.ethos = result.ethos
             score.liquidity_access = result.liquidity_access
             score.manipulation = result.manipulation
-            score.confidence = result.confidence
+            score.confidence = scored.confidence
             score.uncertainty = result.uncertainty
             score.catalyst = result.catalyst
-            score.research_priority = result.research_priority
-            score.risk_band = result.risk_band.value
+            score.research_priority = scored.research_priority
+            score.risk_band = scored.risk_band
+            # The weights this rescore blended with (current weights, not
+            # the row's old stored weights): the next probe re-blends
+            # with exactly these (migration 0042).
+            score.ensemble_weights = scored.weights
         updated += 1
 
     if not dry_run:

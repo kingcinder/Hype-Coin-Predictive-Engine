@@ -8,6 +8,10 @@ distinct-value quantization ratio and mean per-token delta. These tests pin:
 - the no-drift path (persisted == live formula output → ``ok`` health),
 - the stale/quantized path (persisted collapsed to a handful of values while
   live is rich → ``red`` + deduped Alert + ntfy push, then push cooldown),
+- the write-time weights path (migration 0042: the probe re-blends with each
+  row's stored ``ensemble_weights`` so an hourly recalibration cannot flip
+  a healthy probe red; NULL / malformed stored weights fall back to the
+  current weights, as before),
 - the disabled / insufficient-sample skips,
 - the ``latest_score_drift`` health-row parser the API reads,
 - the pure-statistics building blocks (KS exactness on identical/disjoint
@@ -35,7 +39,6 @@ from ops.score_drift import (
     rescue_drift,
     run_score_drift,
 )
-from scoring.formulas import compute_scores
 from storage import models
 from storage.database import Base
 
@@ -67,8 +70,30 @@ def _settings(**overrides) -> Settings:
 
 
 def _oracle(session: Session, features: dict[str, float]) -> float:
-    """What the live formula yields for a feature set (returns .risk)."""
-    return compute_scores(features, [], session=session).risk
+    """What the live pipeline yields for a feature set (returns .risk)."""
+    from ops.score_drift import engine_score, forecast_masked
+
+    return engine_score(session, features, [], masked=forecast_masked(session)).risk
+
+
+# Two weight states far enough apart that blending with the wrong one is
+# unmistakable: with no collapse forecast in these feature sets the ML layer
+# falls back to the rule value and the heuristic boost is 0, so blended
+# risk == (1 - w_heuristic / 2) * rule risk — A scales by 0.975, B by 0.6,
+# a ~26-32 point gap on these tokens (far past the mean-delta red line).
+WEIGHTS_A = {"rule": 0.9, "ml": 0.05, "heuristic": 0.05}
+WEIGHTS_B = {"rule": 0.1, "ml": 0.1, "heuristic": 0.8}
+
+
+def _primed(weights: dict[str, float], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swap the probe's ensemble singleton to the given (pinned) weights."""
+    from scoring.ensemble import EnsembleEngine
+
+    engine = EnsembleEngine()
+    engine._current_weights = dict(weights)
+    engine._persisted = True
+    engine._last_recalibrate = time.monotonic()
+    monkeypatch.setattr("ops.score_drift.ensemble_engine", engine)
 
 
 def _seed_fleet(
@@ -76,6 +101,7 @@ def _seed_fleet(
     *,
     feature_sets: list[dict[str, float]],
     persisted_risk: list[float],
+    ensemble_weights: list[dict[str, float] | None] | None = None,
 ) -> None:
     """Seed N assets with the given feature sets + persisted risk values.
 
@@ -86,7 +112,10 @@ def _seed_fleet(
     chain = models.Chain(slug="solana", name="Solana", vm_type="solana", native_symbol="SOL")
     session.add(chain)
     session.flush()
-    for i, (features, risk) in enumerate(zip(feature_sets, persisted_risk, strict=True)):
+    weights_rows = ensemble_weights if ensemble_weights is not None else [None] * len(feature_sets)
+    for i, (features, risk, weights) in enumerate(
+        zip(feature_sets, persisted_risk, weights_rows, strict=True)
+    ):
         asset = models.Asset(
             chain_id=chain.id,
             symbol=f"T{i:02d}",
@@ -112,6 +141,7 @@ def _seed_fleet(
                 catalyst=0.0,
                 research_priority=0.0,
                 risk_band="YELLOW",
+                ensemble_weights=weights,
             )
         )
         for name, value in features.items():
@@ -152,6 +182,27 @@ def session() -> Session:
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     with SessionLocal() as db:
         yield db
+
+
+@pytest.fixture(autouse=True)
+def _prime_ensemble(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the probe/rescore ensemble to deterministic weights.
+
+    ``engine_score`` blends through the module-level ``ensemble_engine``
+    singleton, whose first use would otherwise load weights from the
+    configured (live) database and recalibrate+save back to it. The primed
+    instance uses the default weights, never touches a database, and is
+    restored by monkeypatch on teardown.
+    """
+    import time
+
+    from scoring.ensemble import EnsembleEngine
+
+    engine = EnsembleEngine()
+    engine._current_weights = {"rule": 0.5, "ml": 0.3, "heuristic": 0.2}
+    engine._persisted = True
+    engine._last_recalibrate = time.monotonic()
+    monkeypatch.setattr("ops.score_drift.ensemble_engine", engine)
 
 
 # ---------------------------------------------------------------------------
@@ -799,3 +850,125 @@ class TestHistoryCli:
         lines = [ln for ln in out.splitlines() if ln.strip() and not ln.strip().startswith("{")]
         assert len(lines) == 3  # header + 2 capped rows
         assert "--limit 2" not in out  # sanity: limit honored, not echoed
+
+
+# ---------------------------------------------------------------------------
+# Write-time ensemble weights (migration 0042)
+# ---------------------------------------------------------------------------
+
+
+class TestStoredWeights:
+    def test_probe_uses_stored_weights_when_ensemble_drifted(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows written under weights A stay ok after the ensemble moves to B.
+
+        The regression this pins: the probe used to re-blend with whatever
+        weights the current process loaded, so a ~0.5-point recalibration
+        shift read as KS D ~ 0.5 on heavily-tied values even though the
+        persisted scores were exactly what the writer wrote.
+        """
+        from ops.score_drift import engine_score, forecast_masked
+
+        feature_sets = _varying_feature_sets(6)
+        masked = forecast_masked(session)
+        persisted = [
+            engine_score(session, features, [], masked=masked, weights=WEIGHTS_A).risk
+            for features in feature_sets
+        ]
+        _seed_fleet(
+            session,
+            feature_sets=feature_sets,
+            persisted_risk=persisted,
+            ensemble_weights=[dict(WEIGHTS_A)] * len(feature_sets),
+        )
+        _primed(WEIGHTS_B, monkeypatch)
+
+        result = run_score_drift(session, settings=_settings())
+
+        assert result["status"] == "ok"
+        assert result["compared"] == 6
+        assert result["ks_d"] == 0.0
+        assert result["mean_abs_delta"] == 0.0
+
+    def test_probe_falls_back_to_current_weights_when_null(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pre-0042 rows (NULL weights) behave exactly as before: the probe
+        re-blends with the current weights, so a drifted ensemble reads red
+        instead of silently passing on stale weights."""
+        from ops.score_drift import engine_score, forecast_masked
+
+        feature_sets = _varying_feature_sets(6)
+        masked = forecast_masked(session)
+        persisted = [
+            engine_score(session, features, [], masked=masked, weights=WEIGHTS_A).risk
+            for features in feature_sets
+        ]
+        _seed_fleet(session, feature_sets=feature_sets, persisted_risk=persisted)
+        _primed(WEIGHTS_B, monkeypatch)
+
+        result = run_score_drift(session, settings=_settings())
+
+        assert result["status"] == "red"
+        assert result["mean_abs_delta"] > 15.0
+
+    def test_probe_ignores_malformed_stored_weights(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stored dict missing keys (or any other junk) must not break the
+        probe: it falls back to the current weights and the probe stays ok
+        when the persisted rows match those weights."""
+        feature_sets = _varying_feature_sets(6)
+        persisted = [_oracle(session, features) for features in feature_sets]
+        _seed_fleet(
+            session,
+            feature_sets=feature_sets,
+            persisted_risk=persisted,
+            ensemble_weights=[{"rule": 0.5}] * len(feature_sets),
+        )
+
+        result = run_score_drift(session, settings=_settings())
+
+        assert result["status"] == "ok"
+        assert result["compared"] == 6
+        assert result["ks_d"] == 0.0
+
+
+class TestEngineScoreWeights:
+    def test_engine_score_reports_weights_used(self, session: Session) -> None:
+        """engine_score returns the weights its blend used, so writers
+        (engine, rescore) can record exactly them on the row."""
+        from ops.score_drift import engine_score, forecast_masked
+
+        masked = forecast_masked(session)
+        features = _varying_feature_sets(1)[0]
+        pinned = engine_score(session, features, [], masked=masked, weights=WEIGHTS_A)
+        assert pinned.weights == WEIGHTS_A
+        current = engine_score(session, features, [], masked=masked)
+        assert current.weights == {"rule": 0.5, "ml": 0.3, "heuristic": 0.2}
+
+
+class TestCoerceWeights:
+    def test_valid_dict_passes_through_verbatim(self) -> None:
+        from scoring.ensemble import coerce_weights
+
+        weights = {"rule": 0.4515, "ml": 0.156, "heuristic": 0.3925}
+        assert coerce_weights(weights) == weights
+        # Not renormalized: the stored values are used exactly as written.
+        assert coerce_weights({"rule": 0.3333, "ml": 0.3333, "heuristic": 0.3333}) == {
+            "rule": 0.3333,
+            "ml": 0.3333,
+            "heuristic": 0.3333,
+        }
+
+    def test_invalid_shapes_return_none(self) -> None:
+        from scoring.ensemble import coerce_weights
+
+        assert coerce_weights(None) is None
+        assert coerce_weights("0.5/0.3/0.2") is None
+        assert coerce_weights({"rule": 0.5, "ml": 0.3}) is None  # missing key
+        assert coerce_weights({"rule": 0.5, "ml": "x", "heuristic": 0.2}) is None
+        assert coerce_weights({"rule": -0.1, "ml": 0.6, "heuristic": 0.5}) is None
+        assert coerce_weights({"rule": 0.0, "ml": 0.0, "heuristic": 0.0}) is None
+        assert coerce_weights({"rule": float("nan"), "ml": 0.5, "heuristic": 0.5}) is None
