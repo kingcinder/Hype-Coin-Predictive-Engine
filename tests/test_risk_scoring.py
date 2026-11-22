@@ -44,9 +44,13 @@ def test_low_liquidity_black_hard_reject_overrides_hype() -> None:
 
 
 def test_rpc_data_layer_degradation_widens_uncertainty() -> None:
+    # v4 (2026-11-20): data-layer degradation no longer erodes confidence —
+    # confidence is the calibrated survival probability, and degradation is
+    # reported as uncertainty instead. Confidence is unchanged; uncertainty
+    # widens.
     healthy = compute_scores({}, [])
     degraded = compute_scores({}, [], data_layer_uncertainty=35.0)
-    assert degraded.confidence < healthy.confidence
+    assert degraded.confidence == healthy.confidence
     assert degraded.uncertainty > healthy.uncertainty
     assert degraded.drivers["rpc_pool_uncertainty"] == 35.0
 

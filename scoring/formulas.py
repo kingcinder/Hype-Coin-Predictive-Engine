@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from common.enums import RiskBand
-from features.definitions import FEATURE_NAMES
 from risk_engine.rules import assess_risk
 
 if TYPE_CHECKING:
@@ -39,12 +38,6 @@ def inverse_score(value: float, *, max_bad: float) -> float:
 # *validated* when every band has enough samples and survival is monotone. The
 # hardcoded table it replaced was an assertion nothing checked; the fallback
 # below is used (and reported unvalidated) until the outcomes earn it.
-
-# E1 feature-completeness: maximum confidence penalty (points) when every
-# feature is missing/defaulted. Scales linearly with the missing-feature
-# ratio so a token scored on mostly-defaulted inputs cannot report the same
-# confidence as a fully evidenced one.
-_COVERAGE_PENALTY_MAX = 30.0
 
 
 @dataclass(frozen=True)
@@ -159,31 +152,47 @@ def compute_scores(
         + 0.05 * clamp(max(0.0, 100.0 - channel_diversity * 25.0))
     )
 
-    missing_ratio = len(all_missing) / len(FEATURE_NAMES)
-    available_ratio = 1.0 - missing_ratio
-    # E1 feature-coverage-weighted confidence penalty: confidence decreases
-    # as the missing-feature count rises. A fully defaulted feature vector
-    # previously reported band-calibrated confidence with no data behind it;
-    # now the missing ratio linearly erodes confidence up to
-    # _COVERAGE_PENALTY_MAX points.
-    coverage_penalty = missing_ratio * _COVERAGE_PENALTY_MAX
+    # NOTE (v4b, 2026-11-20): the E1 coverage penalty is retired — it no
+    # longer feeds confidence (v4: confidence is the calibrated survival
+    # probability) or uncertainty (v4b: uncertainty is the predictive
+    # entropy). Missing-feature evidence is still visible via
+    # ScoreResult.missing_features and the drivers, not via a penalty.
     data_layer_uncertainty = clamp(data_layer_uncertainty)
     # Confidence derives from the risk band to calibrate against survival:
     # GREEN tokens have high survival probability, BLACK tokens have near-zero.
     # This replaces the old feature-availability formula which was uncalibrated.
-    from scoring.band_calibration import band_confidence_map, band_confidence_source
+    from scoring.band_calibration import (
+        band_confidence_map,
+        band_confidence_source,
+        phase_confidence_map,
+    )
 
     confidence_source = band_confidence_source()
-    raw_confidence = band_confidence_map().get(risk_assessment.band, 50.0)
-    # Light 15% blend with feature availability adds intra-band nuance
-    # without collapsing the distribution into a single bin.
-    confidence = clamp(
-        0.85 * raw_confidence
-        + 0.15 * (100.0 * available_ratio)
-        - coverage_penalty
-        - flag_penalty * 0.10
-        - data_layer_uncertainty
-    )
+    # Phase-conditioned calibration (v4, 2026-11-20): when a phase map is
+    # installed, confidence is the calibrated survival probability for the
+    # (risk band, lifecycle phase at score time) cell, fit out-of-sample on
+    # the v2_bounded reference set. Evidence completeness (availability,
+    # coverage, flags, data-layer uncertainty) is not a survival signal and
+    # no longer erodes confidence — it is reported as uncertainty instead.
+    # Without a phase map (or a missing lifecycle_phase feature), the
+    # band-level map applies exactly as before.
+    phase_map = phase_confidence_map()
+    phase_rank: int | None = None
+    if phase_map is not None:
+        try:
+            phase_rank = int(float(features.get("lifecycle_phase")))
+        except (TypeError, ValueError):
+            phase_rank = None
+    phase_calibrated = phase_map is not None and phase_rank is not None
+    if phase_calibrated:
+        raw_confidence = phase_map.get(
+            (risk_assessment.band, phase_rank),
+            band_confidence_map().get(risk_assessment.band, 50.0),
+        )
+        confidence_source = "phase-calibrated"
+    else:
+        raw_confidence = band_confidence_map().get(risk_assessment.band, 50.0)
+    confidence = clamp(raw_confidence)
     if session is not None:
         from common.config import get_settings
         from risk_engine.calibrator import get_active_confidence_calibration
@@ -196,11 +205,37 @@ def compute_scores(
         ):
             confidence = apply_isotonic_map(confidence, calibration.x_points, calibration.y_points)
             confidence_source = "calibrated"
-    # Uncertainty keeps the original factory-missing semantics: the union
-    # above already erodes confidence via the coverage penalty, and adding
-    # the union count here as well would double-count and clamp degenerate
-    # inputs to 100 (see test_rpc_data_layer_degradation_widens_uncertainty).
-    uncertainty = clamp(100.0 - confidence + len(missing_features) * 2.0 + data_layer_uncertainty)
+    # Risk calibration (v6, 2026-11-20): when the phase map drives
+    # confidence, the risk score is the calibrated collapse probability —
+    # the complement of the calibrated survival probability — fit
+    # out-of-sample on the v2_bounded reference set. The raw rule-engine
+    # score is badly calibrated as a collapse probability (mean
+    # |risk/100 - collapsed| = 0.5026 on the v5 eval set; within-phase it
+    # is inverted — lower risk, higher collapse in phase 1), and its
+    # isotonic recalibration generalises worse than the raw score
+    # (mean error 0.7085 out-of-sample on the same partition), so the
+    # phase-conditioned rate is the calibration. Without a phase map the
+    # raw rule score is kept (no invented numbers).
+    # risk_assessment.score still feeds exit_risk / research_priority:
+    # those are composites that use the raw rule score as one component,
+    # not collapse probabilities.
+    if phase_calibrated:
+        risk_value = clamp(100.0 - confidence)
+    else:
+        risk_value = risk_assessment.score
+    # Uncertainty is the predictive entropy of the calibrated survival
+    # probability (v4b, 2026-11-20): a binary prediction is most uncertain
+    # near p=0.5 and most certain near p=0 or p=1. The v4 evidence-based
+    # uncertainty was wrong for this data — missingness is anti-correlated
+    # with error here (dead tokens have the sparsest data and the most
+    # predictable outcomes), and it drove the harness uncertainty
+    # error-correlation to -0.48, worse than the -0.37 it replaced.
+    # Data-layer degradation still widens uncertainty: unreliable features
+    # genuinely increase the chance the prediction is wrong (see
+    # test_rpc_data_layer_degradation_widens_uncertainty).
+    _p = min(0.99, max(0.01, confidence / 100.0))
+    _entropy = -(_p * math.log(_p) + (1.0 - _p) * math.log(1.0 - _p)) / math.log(2.0)
+    uncertainty = clamp(100.0 * _entropy + data_layer_uncertainty)
     # Weighted average of the catalyst components (weights sum to 1.25, so the
     # sum is divided by 1.25) — keeps catalyst on the 0-100 scale instead of
     # inflating it ~25% before the clamp.
@@ -273,7 +308,7 @@ def compute_scores(
     return ScoreResult(
         hype=round(hype, 4),
         ethos=round(ethos, 4),
-        risk=round(risk_assessment.score, 4),
+        risk=round(risk_value, 4),
         liquidity_access=round(liquidity_access, 4),
         manipulation=round(manipulation, 4),
         confidence=round(confidence, 4),

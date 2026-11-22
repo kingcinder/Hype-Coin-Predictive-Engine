@@ -1,10 +1,12 @@
 """Trading-facing summary of whether the risk scores are validated.
 
-The engine's scores are research outputs, not validated predictors: the latest
-report's risk-band ranking and confidence calibration are worse than their
-baselines. Anything that offers a trading decision must say so explicitly, so
-this module derives one flag + reason from the newest ``validation-*.json``
-report and the API surfaces it verbatim.
+The engine's scores are research outputs, not validated predictors. Anything
+that offers a trading decision must say so explicitly, so this module derives
+one flag + reason from the newest ``validation-*.json`` report and the API
+surfaces it verbatim. The headline cells can be beaten by dead-token
+structure alone, so the flag additionally requires a live-token edge: BLACK
+collapse precision on tokens that were live at score time must beat the live
+base rate outright.
 """
 
 from __future__ import annotations
@@ -20,7 +22,15 @@ _REQUIRED_CELLS: tuple[tuple[str, str, str], ...] = (
     ("risk_band", "ordinal_distance", "RiskBand ranking"),
     ("confidence", "calibration_error", "confidence calibration"),
     ("risk_band:BLACK", "collapse_precision", "BLACK collapse precision"),
+    ("risk_band:live:BLACK", "collapse_precision", "BLACK collapse precision (live tokens)"),
 )
+
+# Outputs whose cell must *beat* its baseline outright: merely
+# "indistinguishable" is not enough. The headline BLACK beat is driven by
+# dead-token structure (dead tokens stay dead), so the live-token read is the
+# honest edge check -- a live precision that does not clear the live base rate
+# with its whole bootstrap CI above it must not validate the scores.
+_STRICT_BEAT_OUTPUTS: frozenset[str] = frozenset({"risk_band:live:BLACK"})
 
 
 def _find_cell(cells: list[dict[str, Any]], output: str, metric: str) -> dict[str, Any] | None:
@@ -41,9 +51,10 @@ def scores_validation_status(reports_dir: Path | None = None) -> dict[str, Any]:
     """Return ``scores_validated`` plus a reason taken from the newest report.
 
     The flag is ``True`` only when every required metric has enough samples and
-    is at least indistinguishable from / better than its baseline. Today's
-    report fails, so trading payloads must show the warning rather than a
-    clean bill of health.
+    is at least indistinguishable from / better than its baseline -- except the
+    live-token BLACK cell, which must beat the live base rate outright. A
+    report that passes the headline cells on dead-token structure alone does
+    not validate the scores.
     """
     directory = REPORTS_DIR if reports_dir is None else Path(reports_dir)
     reports = sorted(directory.glob("validation-*.json"))
@@ -89,6 +100,14 @@ def scores_validation_status(reports_dir: Path | None = None) -> dict[str, Any]:
             continue
         verdict = str(cell.get("verdict") or "unknown")
         if verdict in {"worse_than_baseline", "insufficient_data", "unknown"}:
+            problems.append(
+                f"{label} {_fmt(cell.get('value'))} "
+                f"vs {_fmt(cell.get('baseline_value'))} ({verdict})"
+            )
+        elif output in _STRICT_BEAT_OUTPUTS and verdict not in {
+            "beats_baseline",
+            "better_than_baseline",
+        }:
             problems.append(
                 f"{label} {_fmt(cell.get('value'))} "
                 f"vs {_fmt(cell.get('baseline_value'))} ({verdict})"

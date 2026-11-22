@@ -56,6 +56,14 @@ MIN_EVAL_WINDOW_DAYS = 7
 # must beat to be worth trusting, not a perfect-calibration strawman.
 CALIBRATION_CEILING = 0.10
 
+# Live-token stratification: a token is "live" at score time when its
+# lifecycle phase is pre-collapse (rank < 4); "dead" once it has reached
+# collapse or a terminal exit.  "unknown" belongs to neither stratum.
+# The headline cells are dominated by dead-token structure (dead tokens
+# stay dead), so the edge is also measured on live tokens alone.
+LIVE_PHASES = frozenset({"seeding", "ignition", "parabolic", "saturation"})
+DEAD_PHASES = frozenset({"collapse", "dead", "rugged", "survivor"})
+
 
 @dataclass
 class OutcomeRow:
@@ -73,6 +81,8 @@ class OutcomeRow:
     rugged: bool
     survived: bool
     label_version: str = "v2_bounded"
+    # Lifecycle phase at score time (RiskOutcome.lifecycle_phase_at_score).
+    phase_at_score: str | None = None
 
 
 @dataclass
@@ -275,9 +285,26 @@ def evaluate_band_outcomes(
     regime: str,
     min_samples: int = 30,
     seed: int = 7,
+    stratum: str | None = None,
 ) -> list[MetricCell]:
-    """Ordinal band evaluation + per-band collapse precision (methodology §2.1)."""
+    """Ordinal band evaluation + per-band collapse precision (methodology §2.1).
+
+    With ``stratum`` set, the same cells are computed on a phase-at-score
+    subset only (``"live"`` = pre-collapse phases, ``"dead"`` = collapse
+    or terminal), with outputs prefixed ``risk_band:<stratum>``.  The
+    baseline for a stratified cell is that stratum's own base rate,
+    never the global one.
+    """
     cells: list[MetricCell] = []
+    output_prefix = f"risk_band:{stratum}" if stratum else "risk_band"
+    if stratum == "live":
+        stratum_note = (
+            " live-token stratum: phase at score in {ignition, parabolic, saturation, seeding}"
+        )
+    elif stratum == "dead":
+        stratum_note = " dead-token stratum: phase at score in {collapse, dead, rugged, survivor}"
+    else:
+        stratum_note = ""
     # Actual band: collapsed/rugged -> BLACK(4); survived -> GREEN(0);
     # ambiguous (unknown lifecycle) -> excluded from ordinal distance.
     pred_ranks = np.array([BAND_RANKS.get(o.predicted_band, np.nan) for o in outcomes], dtype=float)
@@ -327,7 +354,7 @@ def evaluate_band_outcomes(
         n_assets = len(groups)
         cells.append(
             MetricCell(
-                output="risk_band",
+                output=output_prefix,
                 metric="ordinal_distance",
                 regime=regime,
                 n=int(valid.sum()),
@@ -348,7 +375,7 @@ def evaluate_band_outcomes(
                     True,
                     min_assets=min_samples,
                 ),
-                note=f"{unknown} ambiguous outcomes excluded from ordinal distance",
+                note=f"{unknown} ambiguous outcomes excluded from ordinal distance" + stratum_note,
                 n_assets=n_assets,
             )
         )
@@ -381,7 +408,7 @@ def evaluate_band_outcomes(
         )
         cells.append(
             MetricCell(
-                output=f"risk_band:{band}",
+                output=f"{output_prefix}:{band}",
                 metric="collapse_precision",
                 regime=regime,
                 n=len(idx),
@@ -402,7 +429,8 @@ def evaluate_band_outcomes(
                     False,
                     min_assets=min_samples,
                 ),
-                note=f"{unknown_band} ambiguous outcomes treated as non-collapse (reported)",
+                note=f"{unknown_band} ambiguous outcomes treated as non-collapse (reported)"
+                + stratum_note,
                 n_assets=len(band_groups),
             )
         )
@@ -708,6 +736,7 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
                 rugged=bool(outcome.rugged),
                 survived=bool(outcome.survived),
                 label_version=outcome.label_version or "v2_bounded",
+                phase_at_score=outcome.lifecycle_phase_at_score or None,
             )
         )
     return out
@@ -1234,6 +1263,21 @@ def run_harness(
         )
 
     report.cells.extend(evaluate_band_outcomes(eval_rows, regime=regime, min_samples=min_samples))
+
+    # Live-token stratification: the headline cells are dominated by
+    # dead-token structure (tokens already dead/collapsed at score time
+    # stay dead), so the edge is also measured on live tokens alone — a
+    # future verdict cannot be driven by dead tokens alone.  The dead
+    # stratum is reported alongside so the contrast is explicit.  Each
+    # stratified cell is baselined against its own stratum base rate.
+    live_rows = [o for o in eval_rows if (o.phase_at_score or "") in LIVE_PHASES]
+    dead_rows = [o for o in eval_rows if (o.phase_at_score or "") in DEAD_PHASES]
+    report.cells.extend(
+        evaluate_band_outcomes(live_rows, regime=regime, min_samples=min_samples, stratum="live")
+    )
+    report.cells.extend(
+        evaluate_band_outcomes(dead_rows, regime=regime, min_samples=min_samples, stratum="dead")
+    )
 
     # Risk score / exit_risk as collapse discriminators (concordance vs base).
     # Methodology §3.2: ambiguous outcomes (neither collapsed nor survived)

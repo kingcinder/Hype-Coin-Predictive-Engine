@@ -67,7 +67,7 @@ def test_scoring_loop_logs_bounded_progress_and_slow_asset(monkeypatch) -> None:
         ),
     )
 
-    def _score(self, session, *, asset_id, decision_ts, result):
+    def _score(self, session, *, asset_id, decision_ts, result, ensemble_weights=None):
         return SimpleNamespace(id=asset_id, asset_id=asset_id)
 
     monkeypatch.setattr(ScoringEngine, "_rpc_pool_uncertainty", lambda self, session, asset_id: 0.0)

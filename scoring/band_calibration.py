@@ -24,6 +24,7 @@ the scoring hot path.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Integer, func, select
@@ -192,4 +193,188 @@ def refresh_band_calibration(
         message=(f"validated={validated} min_samples={minimum} samples={samples} survival={rates}"),
     )
     log.info("band_confidence_refreshed", **{k: summary[k] for k in ("validated", "samples")})
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Phase-conditioned confidence calibration (added 2026-11-20, v4 improvement)
+#
+# Diagnosis (validation-2026-11-20-v3): confidence ECE was 0.1331 against a
+# 0.10 ceiling. The dominant term was lifecycle_phase at score time — 77.5%
+# of evaluated rows were already in the dead/collapse phase, and survival
+# within a (risk band, lifecycle phase) cell is nearly deterministic
+# (dead/collapse -> 0% survival; ignition/saturation -> 94-100%). The old
+# confidence eroded a band-level fallback table with coverage/flag/data-layer
+# penalties (up to ~40 points), which measure evidence completeness, not
+# survival probability — so the most predictable rows (dead tokens) got
+# mid-range confidence and dominated the calibration error.
+#
+# Fix: confidence becomes the calibrated survival probability conditioned on
+# (risk band, lifecycle phase at score time), fit ONLY on v2_bounded
+# evaluated outcomes at or before an explicit cutoff (the harness reference
+# set — out-of-sample by construction; the harness measures the result on
+# the post-cutoff eval set). Evidence completeness moves out of confidence
+# and into uncertainty, where it belongs (see scoring/formulas.py).
+#
+# Phase ranks are the numeric values from pump_physics phase_rank
+# (SEEDING 0, IGNITION 1, PARABOLIC 2, SATURATION 3, COLLAPSE 4,
+# DEAD/RUGGED/SURVIVOR 5) — the same values stored in Feature rows as
+# feature_name="lifecycle_phase".
+# ---------------------------------------------------------------------------
+
+_PHASE_CONFIDENCE_MIN_SAMPLES = 10
+_PHASE_CONFIDENCE_EMBARGO_HOURS = 48
+_phase_confidence_cache: dict[tuple[RiskBand, int], float] | None = None
+_phase_confidence_lock = threading.Lock()
+
+
+def phase_confidence_map() -> dict[tuple[RiskBand, int], float] | None:
+    """Return the installed (band, phase-rank) -> survival-% map, or None."""
+    with _phase_confidence_lock:
+        return dict(_phase_confidence_cache) if _phase_confidence_cache is not None else None
+
+
+def set_phase_confidence(mapping: dict[tuple[RiskBand, int], float] | None) -> None:
+    """Install (or clear, with None) the phase-conditioned confidence map."""
+    global _phase_confidence_cache
+    with _phase_confidence_lock:
+        _phase_confidence_cache = dict(mapping) if mapping is not None else None
+
+
+def _calibrated_survival(survived: int, total: int) -> float:
+    """Survival rate as a 0-100 confidence value, clamped to [1, 99].
+
+    No Laplace smoothing: the clamp alone keeps a 0/n cell at 1% (not 0%,
+    acknowledging the finite sample) and an n/n cell at 99%. A +1/+2 prior
+    would put a 0/10 cell at 8.3% — a large error on the dead-phase cells,
+    which are the majority of the eval set.
+    """
+    if total <= 0:
+        return 50.0
+    return float(min(99.0, max(1.0, 100.0 * survived / total)))
+
+
+def refresh_phase_confidence(
+    session: Session,
+    *,
+    cutoff: datetime | None = None,
+    label_version: str = "v2_bounded",
+    min_samples: int = _PHASE_CONFIDENCE_MIN_SAMPLES,
+) -> dict[str, Any]:
+    """Fit the (risk band, lifecycle phase) -> survival map on the reference set.
+
+    The reference set is ``label_version`` *resolved* evaluated outcomes
+    (``survived`` or ``collapsed`` — ambiguous rows, neither flag set, are
+    excluded, matching the harness confidence cell) with ``scored_at`` at or
+    before ``cutoff`` minus a 48h embargo (mirroring the harness partition
+    in ``calibration_cutoff``). Only evaluated rows count
+    (``evaluated_at`` set); censored/unevaluated rows are excluded.
+
+    Fallback chain per (band, phase) cell, first level with >= min_samples:
+    the cell itself -> the phase marginal (all bands) -> the band marginal
+    (all phases) -> the static FALLBACK_BAND_CONFIDENCE table. The map is
+    built for all 30 (band, phase) pairs so a lookup never misses.
+
+    The fitted map is installed in-process (``set_phase_confidence``) and a
+    summary is recorded in SystemHealth under
+    ``phase_confidence_calibration``. Returns the summary dict.
+    """
+    from datetime import timedelta
+
+    if cutoff is None:
+        cutoff = calibration_cutoff(session)
+    reference_end = cutoff - timedelta(hours=_PHASE_CONFIDENCE_EMBARGO_HOURS)
+
+    rows = (
+        session.query(
+            models.RiskOutcome.risk_band,
+            models.Feature.feature_value,
+            models.RiskOutcome.survived,
+            models.RiskOutcome.collapsed,
+        )
+        .join(
+            models.Feature,
+            (models.Feature.asset_id == models.RiskOutcome.asset_id)
+            & (models.Feature.decision_ts == models.RiskOutcome.scored_at)
+            & (models.Feature.feature_name == "lifecycle_phase")
+            & (models.Feature.missing_flag.is_(False)),
+        )
+        .filter(
+            models.RiskOutcome.evaluated_at.isnot(None),
+            models.RiskOutcome.scored_at <= reference_end,
+            models.RiskOutcome.label_version == label_version,
+            (models.RiskOutcome.survived.is_(True) | models.RiskOutcome.collapsed.is_(True)),
+        )
+        .all()
+    )
+
+    cells: dict[tuple[RiskBand, int], list[int]] = {}
+    phase_totals: dict[int, list[int]] = {}
+    band_totals: dict[RiskBand, list[int]] = {}
+    skipped = 0
+    for band_raw, phase_raw, survived_flag, _collapsed_flag in rows:
+        try:
+            band = RiskBand(band_raw)
+            phase = int(float(phase_raw))
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        survived = 1 if survived_flag else 0
+        for table, key in (
+            (cells, (band, phase)),
+            (phase_totals, phase),
+            (band_totals, band),
+        ):
+            bucket = table.setdefault(key, [0, 0])
+            bucket[0] += survived
+            bucket[1] += 1
+
+    def _level_value(band: RiskBand, phase: int) -> tuple[float, str]:
+        cell = cells.get((band, phase))
+        if cell is not None and cell[1] >= min_samples:
+            return _calibrated_survival(cell[0], cell[1]), "cell"
+        phase_bucket = phase_totals.get(phase)
+        if phase_bucket is not None and phase_bucket[1] >= min_samples:
+            return _calibrated_survival(phase_bucket[0], phase_bucket[1]), "phase"
+        band_bucket = band_totals.get(band)
+        if band_bucket is not None and band_bucket[1] >= min_samples:
+            return _calibrated_survival(band_bucket[0], band_bucket[1]), "band"
+        return float(FALLBACK_BAND_CONFIDENCE[band]), "fallback"
+
+    mapping: dict[tuple[RiskBand, int], float] = {}
+    provenance: dict[str, dict[str, Any]] = {}
+    for band in RiskBand:
+        for phase in range(6):
+            value, level = _level_value(band, phase)
+            mapping[(band, phase)] = value
+            cell = cells.get((band, phase))
+            provenance[f"{band.value}:{phase}"] = {
+                "confidence": value,
+                "level": level,
+                "cell_n": cell[1] if cell else 0,
+                "cell_survived": cell[0] if cell else 0,
+            }
+
+    set_phase_confidence(mapping)
+    total_rows = sum(bucket[1] for bucket in band_totals.values())
+    summary: dict[str, Any] = {
+        "version": "phase-v1-20261120",
+        "cutoff": cutoff.isoformat(),
+        "reference_end": reference_end.isoformat(),
+        "label_version": label_version,
+        "min_samples": min_samples,
+        "reference_rows": total_rows,
+        "skipped_rows": skipped,
+        "cells": provenance,
+    }
+    record_health(
+        session,
+        component="phase_confidence_calibration",
+        state="ok",
+        message=(
+            f"version={summary['version']} label_version={label_version} "
+            f"reference_rows={total_rows} cutoff={cutoff.isoformat()} "
+            f"reference_end={reference_end.isoformat()}"
+        ),
+    )
     return summary
