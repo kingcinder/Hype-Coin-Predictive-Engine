@@ -77,7 +77,7 @@ def upgrade() -> None:
             "UPDATE features\n"
             f"SET observed_at = ({_DETERMINING_EVENT})\n"
             "WHERE feature_name = 'lifecycle_phase'\n"
-            "  AND missing_flag = 0\n"
+            "  AND missing_flag = false\n"
             f"  AND ({_DETERMINING_RANK}) = feature_value"
         )
     )

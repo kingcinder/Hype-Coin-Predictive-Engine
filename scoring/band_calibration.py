@@ -320,12 +320,11 @@ def refresh_phase_confidence(
             skipped += 1
             continue
         survived = 1 if survived_flag else 0
-        for table, key in (
-            (cells, (band, phase)),
-            (phase_totals, phase),
-            (band_totals, band),
+        for bucket in (
+            cells.setdefault((band, phase), [0, 0]),
+            phase_totals.setdefault(phase, [0, 0]),
+            band_totals.setdefault(band, [0, 0]),
         ):
-            bucket = table.setdefault(key, [0, 0])
             bucket[0] += survived
             bucket[1] += 1
 

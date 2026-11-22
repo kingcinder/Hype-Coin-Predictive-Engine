@@ -156,7 +156,7 @@ def _interleave_by_chain(
 class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self._first_buy_stats: dict[str, int] = {}
+        self._first_buy_stats: dict[str, Any] = {}
         self._reset_first_buy_stats()
 
     def _reset_first_buy_stats(self) -> None:

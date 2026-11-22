@@ -48,12 +48,19 @@ def _blend_weights(ensemble: object) -> dict[str, float] | None:
             weights = details.get("weights")
             if isinstance(weights, dict) and weights:
                 return {str(k): float(v) for k, v in weights.items()}
-        fields = tuple(
-            getattr(ensemble, name, None)
-            for name in ("rule_weight", "ml_weight", "heuristic_weight")
-        )
-        if all(isinstance(v, (int, float)) for v in fields):
-            return {"rule": float(fields[0]), "ml": float(fields[1]), "heuristic": float(fields[2])}
+        rule_weight = getattr(ensemble, "rule_weight", None)
+        ml_weight = getattr(ensemble, "ml_weight", None)
+        heuristic_weight = getattr(ensemble, "heuristic_weight", None)
+        if (
+            isinstance(rule_weight, (int, float))
+            and isinstance(ml_weight, (int, float))
+            and isinstance(heuristic_weight, (int, float))
+        ):
+            return {
+                "rule": float(rule_weight),
+                "ml": float(ml_weight),
+                "heuristic": float(heuristic_weight),
+            }
     except (TypeError, ValueError):
         pass
     return None

@@ -936,12 +936,12 @@ class LakeFeatureFactory:
             observed_at = ensure_utc(record["observed_at"])
             ts = ensure_utc(record["ts"])
             source_id = int(record["source_id"]) if record["source_id"] is not None else 0
-            pair_created_at = _parse_iso(record["pool_created_at"])
+            row_pair_created_at = _parse_iso(record["pool_created_at"])
             market_rows, liquidity_rows, pair_created = out[address]
-            if pair_created_at is not None and (
-                pair_created is None or pair_created_at < pair_created
+            if row_pair_created_at is not None and (
+                pair_created is None or row_pair_created_at < pair_created
             ):
-                pair_created = pair_created_at
+                pair_created = row_pair_created_at
             pair_address = str(record["pair_address"])
             market_rows.append(
                 SimpleNamespace(

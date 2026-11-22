@@ -44,7 +44,9 @@ def _rss_published(entry: Any) -> datetime | None:
     parsed = getattr(entry, "published_parsed", None)
     if parsed is not None:
         try:
-            return datetime(*parsed[:6], tzinfo=UTC)
+            return datetime(
+                parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5], tzinfo=UTC
+            )
         except (TypeError, ValueError):
             pass
     raw = getattr(entry, "published", None)

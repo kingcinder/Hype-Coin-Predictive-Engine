@@ -230,7 +230,9 @@ def _decode_swap_log(
         amounts = [_parse_u256("0x" + word) for word in words]
         if any(amount is None for amount in amounts):
             return None
-        amount0_in, amount1_in, amount0_out, amount1_out = amounts  # type: ignore[misc]
+        amount0_in, amount1_in, amount0_out, amount1_out = [
+            amount for amount in amounts if amount is not None
+        ]
         if base_is_token0:
             if amount0_out > 0 and amount1_in > 0:
                 return "buy", amount0_out, wallet_to

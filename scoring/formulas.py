@@ -180,11 +180,12 @@ def compute_scores(
     phase_rank: int | None = None
     if phase_map is not None:
         try:
-            phase_rank = int(float(features.get("lifecycle_phase")))
+            phase_value = features.get("lifecycle_phase")
+            phase_rank = int(float(phase_value)) if phase_value is not None else None
         except (TypeError, ValueError):
             phase_rank = None
     phase_calibrated = phase_map is not None and phase_rank is not None
-    if phase_calibrated:
+    if phase_map is not None and phase_rank is not None:
         raw_confidence = phase_map.get(
             (risk_assessment.band, phase_rank),
             band_confidence_map().get(risk_assessment.band, 50.0),
