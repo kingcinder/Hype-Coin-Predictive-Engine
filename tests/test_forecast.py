@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
+from sklearn.isotonic import IsotonicRegression
 from sqlalchemy import func, select
 
 from common.config import Settings
@@ -639,6 +641,157 @@ def test_training_split_keeps_purged_test_rows() -> None:
     assert len(train) + len(test) < 100
 
 
+def _multi_asset_samples(spec: dict[int, list[int]]) -> list[Sample]:
+    """Samples for several assets: ``{asset_id: [hour offsets from T0]}``."""
+    samples: list[Sample] = []
+    for asset_id, hours in spec.items():
+        for hour in hours:
+            samples.append(
+                Sample(
+                    asset_id=asset_id,
+                    ts=T0 + timedelta(hours=hour),
+                    features={},
+                    y_ignition=asset_id % 2,
+                    y_collapse=1 if asset_id % 5 == 0 else 0,
+                )
+            )
+    return samples
+
+
+def _label_windows_overlap(first: datetime, second: datetime) -> bool:
+    """Independent overlap check for ``[ts, ts + 24h)`` label windows."""
+    return first < second + timedelta(hours=FORWARD_HOURS) and second < first + timedelta(
+        hours=FORWARD_HOURS
+    )
+
+
+def _clustered_live_shape_samples() -> list[Sample]:
+    """The live failure shape: 101 samples clustered on 5 days, newest
+    sample 14h past the 70% cut — the old global purge empties the test set.
+    Assets 1-5 span hours 0/24/48, assets 6-30 sit at hour 72, assets 31-60
+    at hour 96, assets 61-90 at hour 110; asset 31 also has an hour-110
+    sample, which its own hour-96 train window must embargo."""
+    spec: dict[int, list[int]] = {asset: [0, 24, 48] for asset in range(1, 6)}
+    spec.update({asset: [72] for asset in range(6, 31)})
+    spec.update({asset: [96] for asset in range(31, 61)})
+    spec.update({asset: [110] for asset in range(61, 91)})
+    spec[31] = [96, 110]
+    return _multi_asset_samples(spec)
+
+
+def test_training_split_per_asset_embargo_trains_clustered_shape() -> None:
+    """Live shape (2026-11-20): samples on 5 days, newest < 24h past the
+    70% cut. The old global purge returns None; the per-asset embargo
+    trains on 70 rows and keeps a 30-row test set."""
+    engine = ForecastEngine()
+    samples = _clustered_live_shape_samples()
+    assert len(samples) == 101
+
+    ordered = sorted(samples, key=lambda sample: sample.ts)
+    train_raw, test_raw = ordered[:70], ordered[70:]
+    assert train_raw[-1].ts == T0 + timedelta(hours=96)
+    assert test_raw[-1].ts == T0 + timedelta(hours=110)
+    # The fixture really is the failing shape: the old global cutoff
+    # (train[-1].ts + 24h = hour 120) purges every test row.
+    assert not [
+        sample
+        for sample in test_raw
+        if sample.ts >= train_raw[-1].ts + timedelta(hours=FORWARD_HOURS)
+    ]
+
+    split = engine._training_split(samples)
+    assert split is not None
+    train, test = split
+    assert len(train) == 70
+    assert len(test) == 30
+    # The embargoed row (asset 31, hour 110, 14h after its hour-96 train
+    # sample) is dropped; the 30 kept rows are assets unseen in train, so
+    # this test set is asset-held-out as well as embargoed.
+    assert {sample.asset_id for sample in test} == set(range(61, 91))
+    assert all(sample.ts == T0 + timedelta(hours=110) for sample in test)
+    assert sum(sample.y_collapse for sample in test) == 6  # both classes present
+    assert sum(sample.y_ignition for sample in test) == 15
+    # No-leakage property, checked brute-force against every train row.
+    for test_sample in test:
+        for train_sample in train:
+            if train_sample.asset_id == test_sample.asset_id:
+                assert not _label_windows_overlap(test_sample.ts, train_sample.ts)
+
+
+def test_training_split_per_asset_embargo_still_returns_none_when_all_overlap() -> None:
+    """H21 survives the fix: when every test row's label window overlaps a
+    same-asset train window, _training_split still returns None instead of
+    silently restoring embargoed rows."""
+    engine = ForecastEngine()
+    samples = _multi_asset_samples({asset: list(range(25)) for asset in range(1, 6)})
+    assert len(samples) == 125
+    assert engine._training_split(samples) is None
+
+
+def test_training_split_no_label_window_overlap() -> None:
+    """Property test: over seeded multi-asset corpora (uniform and
+    clustered hours), the kept test set is exactly the test rows whose label
+    window overlaps no same-asset train window — no leaks, no unjustified
+    drops. Single-asset input still matches the old global rule exactly."""
+    engine = ForecastEngine()
+    rng = random.Random(42)
+    corpora = [
+        _multi_asset_samples({asset: sorted(rng.sample(range(200), 15)) for asset in range(1, 21)}),
+        _multi_asset_samples(
+            {
+                asset: sorted(rng.choice([0, 24, 72, 96, 110]) for _ in range(12))
+                for asset in range(1, 31)
+            }
+        ),
+    ]
+    for samples in corpora:
+        ordered = sorted(samples, key=lambda sample: sample.ts)
+        cut = max(1, int(len(ordered) * 0.7))
+        train_raw, test_raw = ordered[:cut], ordered[cut:]
+        split = engine._training_split(samples)
+        train_by_asset: dict[int, list[Sample]] = {}
+        for sample in train_raw:
+            train_by_asset.setdefault(sample.asset_id, []).append(sample)
+        expected_kept = [
+            sample
+            for sample in test_raw
+            if not any(
+                _label_windows_overlap(sample.ts, train_sample.ts)
+                for train_sample in train_by_asset.get(sample.asset_id, [])
+            )
+        ]
+        if not expected_kept:
+            assert split is None
+            continue
+        assert split is not None
+        train, test = split
+        assert train == train_raw
+        assert test == expected_kept
+        # Brute-force no-overlap proof, independent of the implementation.
+        for test_sample in test:
+            for train_sample in train:
+                if train_sample.asset_id == test_sample.asset_id:
+                    assert not _label_windows_overlap(test_sample.ts, train_sample.ts)
+        # And every dropped raw test row genuinely overlapped a train window.
+        for dropped in (sample for sample in test_raw if sample not in test):
+            assert any(
+                _label_windows_overlap(dropped.ts, train_sample.ts)
+                for train_sample in train_by_asset.get(dropped.asset_id, [])
+            )
+
+    # Single-asset data: the per-asset rule IS the old global rule.
+    single = _split_samples(100)
+    split = engine._training_split(single)
+    assert split is not None
+    train, test = split
+    assert len(train) == 70 and len(test) == 7
+    assert test == [
+        sample
+        for sample in single[70:]
+        if sample.ts >= train[-1].ts + timedelta(hours=FORWARD_HOURS)
+    ]
+
+
 def test_calibration_fits_on_train_labels_only() -> None:
     """H20: the isotonic calibrator is fit on the training (probs, labels)
     pair and only *transforms* the untouched test probabilities — the test
@@ -656,6 +809,92 @@ def test_calibration_fits_on_train_labels_only() -> None:
     _, flipped = ForecastEngine._calibrate(fit_probs, 1 - fit_labels, transform_probs)
     assert flipped[0] > calibrated[0]
     assert flipped[1] < calibrated[1]
+
+
+def test_cross_fitted_probabilities_hold_out_each_fold() -> None:
+    """Each fold's out-of-fold probs come from a model that never saw that fold."""
+    rng = np.random.default_rng(7)
+    n = 40
+    x = rng.normal(size=(n, 4))
+    # A learnable-but-noisy signal: label follows the first feature.
+    y = (x[:, 0] + rng.normal(scale=0.5, size=n) > 0.5).astype(int)
+    assert len(np.unique(y)) == 2
+    oof = ForecastEngine._cross_fitted_probabilities(x, y, n_folds=4)
+    assert oof.shape == (n,)
+    assert np.all((oof >= 0.0) & (oof <= 1.0))
+    # Recompute each fold independently and compare exactly.
+    edges = np.linspace(0, n, 5).astype(int)
+    for fold in range(4):
+        lo, hi = int(edges[fold]), int(edges[fold + 1])
+        mask = np.ones(n, dtype=bool)
+        mask[lo:hi] = False
+        model = ForecastEngine._fit_classifier(x[mask], y[mask])
+        assert model is not None
+        expected = model.predict_proba(x[lo:hi])[:, 1]
+        assert np.allclose(oof[lo:hi], expected)
+    # And the OOF probs differ from the in-sample fit: the fold models did
+    # not memorize their own rows.
+    in_sample = ForecastEngine._fit_classifier(x, y).predict_proba(x)[:, 1]
+    assert not np.allclose(oof, in_sample)
+
+
+def test_calibrate_preserves_raw_ranking_within_isotonic_steps() -> None:
+    """Isotonic's flat steps must not scramble the classifier's own ranking:
+    the epsilon tie-break orders equal calibrated values by raw probability."""
+    # Every fit label is 0, so isotonic maps all transform inputs to 0.0.
+    fit_probs = np.array([0.0, 0.5])
+    fit_labels = np.array([0, 0])
+    transform_probs = np.array([0.1, 0.2, 0.3])
+    calibrator, calibrated = ForecastEngine._calibrate(fit_probs, fit_labels, transform_probs)
+    assert np.all(calibrator.predict(transform_probs) == 0.0)
+    assert np.all(np.diff(calibrated) > 0)  # strictly increasing in raw order
+    assert calibrated.max() < 1e-6  # calibration itself is untouched
+
+
+def test_train_calibrator_is_fit_on_cross_fitted_probs(session) -> None:
+    """_train must fit the isotonic calibrator on out-of-fold training
+    predictions, not the classifier's in-sample predictions."""
+    rng = np.random.default_rng(11)
+    samples: list[Sample] = []
+    for index in range(60):
+        collapse = 1 if index % 3 == 0 else 0
+        features = {name: float(rng.normal()) for name in FORECAST_FEATURE_NAMES}
+        features["volatility"] = 10.0 if collapse else 1.0
+        samples.append(
+            Sample(
+                asset_id=index + 1,
+                ts=T0 + timedelta(hours=index),
+                features=features,
+                y_ignition=1 if index % 2 == 0 else 0,
+                y_collapse=collapse,
+                label_source="",
+            )
+        )
+    engine = ForecastEngine()
+    decision = T0 + timedelta(hours=120)
+    model = engine._train(session, samples, decision)
+    assert model is not None
+    split = engine._training_split(samples)
+    assert split is not None
+    train, _test = split
+    train_x = engine._matrix(train)
+    train_y = np.array([s.y_collapse for s in train])
+    oof = engine._cross_fitted_probabilities(train_x, train_y)
+    # The stored calibrator is exactly the isotonic fit on the OOF
+    # probabilities: refit it independently and compare the PAV blocks.
+    # (X_thresholds_ are the pooled-block starts, not the raw unique fit
+    # values, so a direct unique(oof) comparison would be wrong.)
+    refit = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    refit.fit(oof, train_y)
+    assert np.allclose(model.collapse_calibrator.X_thresholds_, refit.X_thresholds_)
+    assert np.allclose(model.collapse_calibrator.y_thresholds_, refit.y_thresholds_)
+    # And it is NOT the fit on the classifier's in-sample probabilities.
+    in_sample = engine._fit_classifier(train_x, train_y).predict_proba(train_x)[:, 1]
+    refit_in_sample = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    refit_in_sample.fit(in_sample, train_y)
+    assert set(model.collapse_calibrator.X_thresholds_.tolist()) != set(
+        refit_in_sample.X_thresholds_.tolist()
+    )
 
 
 # ── calibration-gap guard ─────────────────────────────────────────────────

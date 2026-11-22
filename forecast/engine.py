@@ -522,13 +522,47 @@ class ForecastEngine:
     # ------------------------------------------------------------------- train
 
     def _training_split(self, samples: list[Sample]) -> tuple[list[Sample], list[Sample]] | None:
+        """Chronological 70/30 split with a per-asset label-window embargo.
+
+        A sample's label is the asset's outcome over the forward window
+        ``[ts, ts + forward)``, so a test label leaks iff its window overlaps
+        a train label window *for the same asset* — labels are computed from
+        each asset's own price history, and features are point-in-time at
+        ``ts``, so overlapping windows across *different* assets share no
+        price data and are not leakage. The old rule purged against the
+        single global cutoff ``train[-1].ts + forward``: with samples
+        clustered on a few days, the newest sample sits < 24h past the 70%
+        cut and the whole test set is purged even though most test assets
+        never appear in train at all.
+
+        The embargo is therefore evaluated per asset: a test sample survives
+        iff no train sample of the same asset has an overlapping label
+        window. Because the split is chronological (every train ``ts`` is
+        ``<=`` every test ``ts``), a test window ``[t, t + forward)``
+        overlaps a same-asset train window ``[s, s + forward)`` iff
+        ``t < s + forward``, so the check reduces exactly to ``t >=
+        max_train_ts[asset] + forward`` — no approximation, and for
+        single-asset data it is byte-for-byte the old rule. If the embargo
+        still empties the test set, the honest answer stays ``None``: there
+        is no fallback that restores embargoed rows.
+        """
         samples = sorted(samples, key=lambda sample: sample.ts)
         split = max(1, int(len(samples) * 0.7))
         train, test = samples[:split], samples[split:]
         if len(train) < 5 or not test:
             return None
         forward = timedelta(hours=self.settings.forecast_forward_hours)
-        purged = [sample for sample in test if sample.ts >= train[-1].ts + forward]
+        last_train_ts: dict[int, datetime] = {}
+        for sample in train:
+            last_train_ts[sample.asset_id] = max(
+                last_train_ts.get(sample.asset_id, sample.ts), sample.ts
+            )
+        purged = [
+            sample
+            for sample in test
+            if sample.asset_id not in last_train_ts
+            or sample.ts >= last_train_ts[sample.asset_id] + forward
+        ]
         if not purged:
             # No test samples survive the embargo: the honest answer is "no
             # test set", NOT silently restoring the unpurged (leaking) rows.
@@ -556,15 +590,19 @@ class ForecastEngine:
 
         ignition_probs = ignition_model.predict_proba(test_x)[:, 1]
         collapse_probs = collapse_model.predict_proba(test_x)[:, 1]
-        # Calibration is fit on TRAINING predictions/labels only; the untouched
-        # test predictions are transformed for metric evaluation (H20).
-        train_ignition_probs = ignition_model.predict_proba(train_x)[:, 1]
-        train_collapse_probs = collapse_model.predict_proba(train_x)[:, 1]
+        # Calibration is fit on CROSS-FITTED training predictions/labels only;
+        # the untouched test predictions are transformed for metric evaluation
+        # (H20). Fitting on the classifier's own in-sample training
+        # predictions is optimistic (it saw those labels) and the learned
+        # mapping does not transfer out-of-sample: on the Nov 20 run it made
+        # test calibration WORSE than the raw probabilities (0.343 vs 0.314).
+        train_ignition_oof = self._cross_fitted_probabilities(train_x, train_ignition)
+        train_collapse_oof = self._cross_fitted_probabilities(train_x, train_collapse)
         ignition_calibrator, calibrated_ignition = self._calibrate(
-            train_ignition_probs, train_ignition, ignition_probs
+            train_ignition_oof, train_ignition, ignition_probs
         )
         collapse_calibrator, calibrated_collapse = self._calibrate(
-            train_collapse_probs, train_collapse, collapse_probs
+            train_collapse_oof, train_collapse, collapse_probs
         )
 
         hazard = self._fit_hazard(session, samples)
@@ -661,9 +699,10 @@ class ForecastEngine:
         if ignition_classifier is None or classifier is None:
             return None
         probabilities = classifier.predict_proba(test_x)[:, 1]
-        # Same train-only calibration discipline as _train: fit on training
-        # predictions/labels, transform the untouched test predictions.
-        train_probabilities = classifier.predict_proba(train_x)[:, 1]
+        # Same train-only calibration discipline as _train: fit on
+        # cross-fitted training predictions/labels, transform the untouched
+        # test predictions.
+        train_probabilities = self._cross_fitted_probabilities(train_x, train_labels)
         _, calibrated = self._calibrate(train_probabilities, train_labels, probabilities)
         return {
             "precision_at_10": self._precision_at_k(
@@ -798,6 +837,37 @@ class ForecastEngine:
         return model
 
     @staticmethod
+    def _cross_fitted_probabilities(
+        x: np.ndarray, y: np.ndarray, *, n_folds: int = 5
+    ) -> np.ndarray:
+        """Out-of-fold predicted probabilities for TRAIN rows.
+
+        Contiguous chronological folds: the training matrix is already in
+        decision-time order, so each fold's model trains on the other folds
+        and predicts the held-out block. Five folds, selected on train-only
+        nested calibration error over 5 vs 10 (collapse tied, ignition
+        clearly 5; the test-set gap between the two is inside this metric's
+        noise at n=335, so the train-only signal governs).
+        """
+        n = len(y)
+        if n < n_folds:
+            model = ForecastEngine._fit_classifier(x, y)
+            return model.predict_proba(x)[:, 1] if model is not None else np.zeros(n)
+        edges = np.linspace(0, n, n_folds + 1).astype(int)
+        oof = np.zeros(n)
+        for fold in range(n_folds):
+            lo, hi = int(edges[fold]), int(edges[fold + 1])
+            mask = np.ones(n, dtype=bool)
+            mask[lo:hi] = False
+            model = ForecastEngine._fit_classifier(x[mask], y[mask])
+            if model is None:
+                # Single-class complement: fall back to its base rate.
+                oof[lo:hi] = float(y[mask].mean()) if mask.any() else 0.0
+            else:
+                oof[lo:hi] = model.predict_proba(x[lo:hi])[:, 1]
+        return oof
+
+    @staticmethod
     def _calibrate(
         fit_probs: np.ndarray, fit_labels: np.ndarray, transform_probs: np.ndarray
     ) -> tuple[IsotonicRegression, np.ndarray]:
@@ -806,12 +876,26 @@ class ForecastEngine:
         The calibrator must never be fit on test labels: fitting on the same
         (probs, labels) pair that the metrics are computed over is
         self-calibration and drives calibration_error toward zero by
-        construction. Train-in-sample fit is still optimistic (the classifier
-        saw the training labels), but it no longer touches the test set.
+        construction. Callers pass CROSS-FITTED training predictions (see
+        :meth:`_cross_fitted_probabilities`): in-sample training predictions
+        are optimistic (the classifier saw those labels) and the mapping they
+        produce does not transfer out-of-sample.
         """
         calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
         calibrator.fit(fit_probs, fit_labels)
-        return calibrator, calibrator.predict(transform_probs)
+        calibrated = calibrator.predict(transform_probs)
+        # Isotonic outputs a step function: many distinct raw probabilities
+        # collapse onto one calibrated level, and _precision_at_k then breaks
+        # those ties arbitrarily (np.argsort is not stable), so the top-10 can
+        # change even though isotonic is monotone. A negligible epsilon
+        # ordered by the raw probability restores the classifier's own
+        # ranking inside each step without moving any bin mean (<= 1e-9).
+        # NOTE: _model_probability applies the stored calibrator directly at
+        # predict time, so this only affects the in-training metric readout;
+        # stored probabilities are the plain isotonic values.
+        return calibrator, np.clip(
+            calibrated + 1e-9 * np.asarray(transform_probs, dtype=float), 0.0, 1.0
+        )
 
     def _matrix(
         self,
