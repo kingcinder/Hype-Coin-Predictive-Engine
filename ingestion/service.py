@@ -6,7 +6,7 @@ from functools import partial
 from time import sleep
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
@@ -250,6 +250,7 @@ class IngestionService:
         errors: list[str] = []
         result: dict[str, Any] = {
             "pairs": 0,
+            "dexscreener_refresh_pairs": 0,
             "profiles": 0,
             "scores": 0,
             "ignition_events": 0,
@@ -263,6 +264,9 @@ class IngestionService:
             self._commit_stage(session, stop)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
+            refresh_pairs = self._ingest_dexscreener_refresh(session)
+            result["pairs"] += refresh_pairs
+            result["dexscreener_refresh_pairs"] = refresh_pairs
             self._record_first_buy_health(session)
             self._commit_stage(session, stop)
             result["birdeye_tokens"] = self._ingest_birdeye_solana(session)
@@ -797,6 +801,98 @@ class IngestionService:
                 error_count=1,
             )
             log.warning("dexscreener_pairs_failed", error=redact_url(str(exc)))
+        finally:
+            client.close()
+        return count
+
+    def _ingest_dexscreener_refresh(self, session: Session) -> int:
+        """Re-fetch known DexScreener pairs so today's feature points price.
+
+        Discovery-only ingestion leaves every known pair to go stale: only
+        ~1.5% of feature points ever get a price, so the forecast trainer pool
+        is frozen at 2,288 samples. This stage revisits live pairs once a day
+        via the token-pairs endpoint (one call per asset, up to 30 pairs).
+
+        Selection is an hour-bucket rotation over assets whose latest
+        DexScreener snapshot is inside the alive window (default 72h).
+        Ordering purely by snapshot age would starve: a dead pair's snapshot
+        never refreshes, so it would sit at the top of the queue forever and
+        live pairs would never be reached. The bucket
+        (asset_id % 24 == current UTC hour) guarantees every live asset is
+        revisited within 24h no matter how many dead assets share the window,
+        and dead assets age out of the window after ``alive_hours`` having
+        cost at most one call per bucket day. Assets snapshotted within the
+        last hour are skipped: snapshots are hourly buckets, so a same-hour
+        refresh is a no-op.
+        """
+        settings = self.settings
+        limit = settings.dexscreener_refresh_assets_per_scan
+        if limit <= 0:
+            return 0
+        source = self._source(session, "dexscreener")
+        now = utc_now()
+        alive_since = now - timedelta(hours=settings.dexscreener_refresh_alive_hours)
+        fresh_since = now - timedelta(hours=1)
+        last_snap = (
+            select(func.max(models.MarketSnapshot.ts))
+            .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
+            .where(models.Pair.base_asset_id == models.Asset.id)
+            .where(models.MarketSnapshot.source_id == source.id)
+            .correlate(models.Asset)
+            .scalar_subquery()
+        )
+        rows = session.execute(
+            select(
+                models.Asset.id,
+                models.Chain.slug,
+                models.Asset.address,
+                last_snap.label("last_snap"),
+            )
+            .join(models.Chain, models.Chain.id == models.Asset.chain_id)
+            .join(models.Pair, models.Pair.base_asset_id == models.Asset.id)
+            .where(models.Chain.slug.in_(settings.target_chains))
+            .where(models.Asset.id % 24 == now.hour)
+            .where(last_snap != None)  # noqa: E711 - renders IS NOT NULL
+            .where(last_snap >= alive_since)
+            .where(last_snap < fresh_since)
+            .group_by(models.Asset.id)
+            .order_by(last_snap.asc())
+            .limit(limit)
+        ).all()
+        count = 0
+        client = DexScreenerClient()
+        try:
+            for _asset_id, chain_slug, token_address, _last_snap in rows:
+                try:
+                    pair_payloads = client.token_pairs(chain_slug, token_address)
+                except Exception as exc:  # noqa: BLE001 - one dead token must not stall the stage
+                    log.warning(
+                        "dexscreener_refresh_token_failed",
+                        error=redact_url(str(exc)),
+                    )
+                    continue
+                for pair_payload in pair_payloads:
+                    if self._store_dexscreener_pair(session, source, pair_payload):
+                        count += 1
+                # Per-asset commit: same reason as the boosts loop — the next
+                # token_pairs() call is network I/O and must not hold the
+                # write lock across it.
+                session.commit()
+            record_health(
+                session,
+                component="source:dexscreener_refresh",
+                state="ok",
+                message=f"{count} pairs from {len(rows)} assets",
+            )
+        except Exception as exc:  # noqa: BLE001
+            record_health(
+                session,
+                component="source:dexscreener_refresh",
+                state="red",
+                message=redact_url(str(exc)),
+                error_count=1,
+            )
+            log.warning("dexscreener_refresh_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count
