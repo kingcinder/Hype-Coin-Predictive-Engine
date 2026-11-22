@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
@@ -465,32 +465,44 @@ def label_generation_progress(session: Session) -> dict[str, Any]:
 
     min_samples = settings.forecast_min_samples
     now = ensure_utc(utc_now()).replace(tzinfo=None)
-    label_rows = session.execute(
-        select(models.Label.asset_id, models.Label.ts, models.Label.label_type).where(
+    # Usable samples are (asset, ts) keys carrying BOTH label types whose
+    # features exist (non-missing, observed in time). The old code pulled
+    # every distinct non-missing feature key into Python -- a full scan of
+    # the 6.6M-row features index plus a sort (~77s cold on the Data drive,
+    # >120s under scan load), executed on every /data/confidence request
+    # and on every scan's data-lake pass. The request's read transaction
+    # stayed open for the whole scan, pinning the WAL snapshot and stalling
+    # checkpoints, which fed the write-queue contention. Do the membership
+    # test in SQL instead: the label side is tiny (8,858 rows) and each key
+    # probes the (asset_id, decision_ts) index, so the result is identical
+    # and the whole computation is a few thousand index seeks.
+    both_types = (
+        select(models.Label.asset_id, models.Label.ts)
+        .where(
             models.Label.observed_at <= now,
             models.Label.ts <= now - timedelta(hours=settings.forecast_forward_hours),
             models.Label.label_type.in_((LABEL_IGNITION, LABEL_COLLAPSE)),
         )
-    ).all()
-    label_types_by_key: dict[tuple[int, datetime], set[str]] = {}
-    for asset_id, ts, label_type in label_rows:
-        label_types_by_key.setdefault((int(asset_id), ensure_utc(ts)), set()).add(label_type)
-    feature_keys = {
-        (int(asset_id), ensure_utc(ts))
-        for asset_id, ts in session.execute(
-            select(models.Feature.asset_id, models.Feature.decision_ts)
+        .group_by(models.Label.asset_id, models.Label.ts)
+        .having(func.count(func.distinct(models.Label.label_type)) == 2)
+        .subquery()
+    )
+    usable_samples = (
+        session.scalar(
+            select(func.count())
+            .select_from(both_types)
             .where(
-                models.Feature.missing_flag.is_(False),
-                models.Feature.observed_at <= now,
+                exists(
+                    select(1).where(
+                        models.Feature.asset_id == both_types.c.asset_id,
+                        models.Feature.decision_ts == both_types.c.ts,
+                        models.Feature.missing_flag.is_(False),
+                        models.Feature.observed_at <= now,
+                    )
+                )
             )
-            .distinct()
-        ).all()
-    }
-    required_types = {LABEL_IGNITION, LABEL_COLLAPSE}
-    usable_samples = sum(
-        1
-        for key, label_types in label_types_by_key.items()
-        if required_types.issubset(label_types) and key in feature_keys
+        )
+        or 0
     )
     progress_pct = min(100.0, (usable_samples / max(1, min_samples)) * 100.0)
 
