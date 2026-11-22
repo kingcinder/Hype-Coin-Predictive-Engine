@@ -6,7 +6,7 @@ from functools import partial
 from time import sleep
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from catalyst.extractor import alert_upcoming_catalysts, extract_catalysts
@@ -19,6 +19,7 @@ from forecast.engine import run_forecast_if_due
 from ingestion.birdeye_client import BirdeyeClient
 from ingestion.contract_analyzer import ContractAnalysis, analyze_contract
 from ingestion.data_quality import check_market_snapshots
+from ingestion.evm_swaps import fetch_evm_pool_swaps, is_evm_address
 from ingestion.holder_tracker import (  # noqa: F401
     get_evm_holders,
     get_solana_holders,
@@ -174,6 +175,11 @@ class IngestionService:
             "circuit_open_failures": 0,
             "rpc_fallback_hits": 0,
             "rpc_fallback_swaps": 0,
+            "evm_rpc_fallback_hits": 0,
+            "evm_rpc_fallback_swaps": 0,
+            "catchup_pools": 0,
+            "catchup_observed": 0,
+            "catchup_swaps": 0,
             "swaps": 0,
             "tracked_buys": 0,
             "pending_copy_logs": 0,
@@ -301,6 +307,7 @@ class IngestionService:
             self._commit_stage(session, stop)
             result["pairs"] += self._ingest_dexscreener_boosts(session)
             result["pairs"] += self._ingest_geckoterminal_new_pools(session)
+            result["evm_first_buy_catchup"] = self._catch_up_evm_first_buys(session)
             refresh_pairs = self._ingest_dexscreener_refresh(session)
             result["pairs"] += refresh_pairs
             result["dexscreener_refresh_pairs"] = refresh_pairs
@@ -1514,9 +1521,15 @@ class IngestionService:
             return [], False
         if normalized.chain_slug not in GeckoTerminalClient.NETWORKS:
             return [], False
-        if self._first_buy_provider_backoff:
-            # Back off for the rest of this scan after a rate limit or an open
-            # circuit: retrying every remaining pool only makes the flood worse.
+        is_evm = normalized.chain_slug in ("base", "ethereum")
+        # GeckoTerminal is backed off (rate-limited earlier this scan). Solana
+        # pools skip the rest of the scan (existing behaviour: the Solana RPC
+        # fallback only triggers on a fresh failure in this call). EVM pools
+        # can still use their own RPC -- a different provider, not rate-limited
+        # by GeckoTerminal -- so they skip the GeckoTerminal attempt and go
+        # straight to the EVM fallback instead of returning unknown.
+        gecko_backed_off = self._first_buy_provider_backoff
+        if gecko_backed_off and not is_evm:
             self._first_buy_stats["backoff_skipped"] += 1
             return [], False
         if self._first_buy_stats["pools_by_chain"].get(normalized.chain_slug, 0) >= (
@@ -1534,9 +1547,10 @@ class IngestionService:
         self._first_buy_stats["pools"] += 1
         client = GeckoTerminalClient()
         trades: list[dict[str, Any]] = []
-        gecko_failed = False
+        gecko_failed = gecko_backed_off
         try:
-            trades = client.pool_trades(normalized.chain_slug, normalized.pair_address)
+            if not gecko_backed_off:
+                trades = client.pool_trades(normalized.chain_slug, normalized.pair_address)
         except Exception as exc:  # noqa: BLE001 - fall back to chain data below.
             gecko_failed = True
             status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -1563,10 +1577,44 @@ class IngestionService:
         swaps = normalize_geckoterminal_trades(trades, chain_slug=normalized.chain_slug)
         if swaps:
             self._first_buy_stats["swaps"] += len(swaps)
-        # A successful empty feed is a real answer: no trades yet. Only a
-        # failed request justifies the more expensive on-chain fallback.
-        if not gecko_failed or normalized.chain_slug != "solana":
-            return swaps, not gecko_failed
+        # A successful feed (even empty) is a real answer: no trades yet.
+        # Only a failed request justifies the more expensive on-chain fallback.
+        if not gecko_failed:
+            return swaps, True
+        if is_evm and self.settings.first_buy_evm_rpc_fallback_enabled:
+            self._first_buy_stats["evm_rpc_fallback_hits"] += 1
+            try:
+                fallback = fetch_evm_pool_swaps(
+                    chain_slug=normalized.chain_slug,
+                    pool_address=normalized.pair_address,
+                    base_address=normalized.base_address,
+                    quote_address=normalized.quote_address,
+                    pair_created_at=created,
+                    window_minutes=self.settings.first_buy_window_minutes,
+                    limit=self.settings.first_buy_swap_tx_limit,
+                    price_usd=normalized.price_usd,
+                )
+            except Exception as exc:  # noqa: BLE001 - pair ingest must survive an RPC outage.
+                log.warning(
+                    "first_buy_evm_rpc_fallback_failed",
+                    pool=normalized.pair_address,
+                    chain=normalized.chain_slug,
+                    error=redact_url(str(exc)),
+                )
+                return [], False
+            self._first_buy_stats["evm_rpc_fallback_swaps"] += len(fallback)
+            if fallback:
+                log.info(
+                    "first_buy_evm_rpc_fallback",
+                    pool=normalized.pair_address,
+                    chain=normalized.chain_slug,
+                    swaps=len(fallback),
+                )
+            # An empty fallback cannot distinguish "no swaps" from a partial RPC
+            # failure, so it stays unknown rather than fabricating zeroes.
+            return fallback, bool(fallback)
+        if normalized.chain_slug != "solana":
+            return [], False
 
         # The public trades endpoint failed (often rate-limited); rebuild the
         # same wallet swaps from the pool's on-chain transactions.
@@ -1600,6 +1648,124 @@ class IngestionService:
         # An empty fallback cannot distinguish "no swaps" from a partial RPC
         # failure, so it stays unknown rather than fabricating zeroes.
         return fallback, bool(fallback)
+
+    def _catch_up_evm_first_buys(self, session: Session) -> int:
+        """Re-check EVM pairs whose first-buy window closed unobserved.
+
+        Pairs discovered during a GeckoTerminal cooldown (or fetched while the
+        provider was rate-limited) arrive after the 5-minute window has closed,
+        so the normal path can no longer observe their first buys. The chain
+        retains the full history, so the EVM RPC rebuilds the window from Swap
+        logs. Only pairs whose stats are still unknown (buys IS NULL) and whose
+        window closed within the retry horizon are retried, most-recent first.
+        Returns the number of pairs whose window was observed (swaps known).
+        """
+        settings = self.settings
+        if not settings.first_buy_catchup_enabled or not settings.first_buy_trade_fetch_enabled:
+            return 0
+        try:
+            now = utc_now()
+            window = timedelta(minutes=settings.first_buy_window_minutes)
+            lookback = timedelta(hours=settings.first_buy_catchup_lookback_hours)
+            retry = timedelta(hours=settings.first_buy_catchup_retry_hours)
+            pairs = session.scalars(
+                select(models.Pair)
+                .join(models.Chain, models.Pair.chain_id == models.Chain.id)
+                .outerjoin(
+                    models.PairFirstWindowStats,
+                    models.PairFirstWindowStats.asset_id == models.Pair.base_asset_id,
+                )
+                .where(models.Chain.slug.in_(("base", "ethereum")))
+                .where(models.Pair.created_at_source.is_not(None))
+                .where(models.Pair.created_at_source >= now - lookback)
+                .where(models.Pair.created_at_source < now - window)
+                .where(models.PairFirstWindowStats.buys.is_(None))
+                .where(
+                    or_(
+                        models.PairFirstWindowStats.computed_at.is_(None),
+                        models.PairFirstWindowStats.computed_at < now - retry,
+                    )
+                )
+                .order_by(models.Pair.created_at_source.desc())
+                .limit(settings.first_buy_catchup_max_pools_per_scan)
+            ).all()
+        except Exception as exc:  # noqa: BLE001 - catch-up must not stop the scan.
+            log.warning("evm_first_buy_catchup_query_failed", error=redact_url(str(exc)))
+            return 0
+        if not pairs:
+            return 0
+        from radar.first_buys import record_first_buys  # noqa: PLC0415 - local import.
+
+        observed = 0
+        for pair in pairs:
+            self._first_buy_stats["catchup_pools"] += 1
+            pool = session.get(models.Pool, pair.pool_id) if pair.pool_id else None
+            if pool is None or not is_evm_address(pool.address):
+                continue
+            base_asset = session.get(models.Asset, pair.base_asset_id)
+            quote_asset = (
+                session.get(models.Asset, pair.quote_asset_id) if pair.quote_asset_id else None
+            )
+            chain = session.get(models.Chain, pair.chain_id)
+            if base_asset is None or quote_asset is None or chain is None:
+                continue
+            if pair.created_at_source is None:
+                continue
+            tracked = self._tracked_wallets(chain.slug)
+            # Latest snapshot price for size_usd (best effort; None leaves it unset).
+            price_usd = None
+            snapshot = session.scalars(
+                select(models.MarketSnapshot)
+                .where(models.MarketSnapshot.pair_id == pair.id)
+                .order_by(models.MarketSnapshot.ts.desc())
+                .limit(1)
+            ).first()
+            if snapshot is not None:
+                price_usd = snapshot.price_usd
+            try:
+                swaps = fetch_evm_pool_swaps(
+                    chain_slug=chain.slug,
+                    pool_address=pool.address,
+                    base_address=base_asset.address,
+                    quote_address=quote_asset.address,
+                    pair_created_at=pair.created_at_source,
+                    window_minutes=settings.first_buy_window_minutes,
+                    limit=settings.first_buy_swap_tx_limit,
+                    price_usd=price_usd,
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad pair must not stop the pass.
+                log.warning(
+                    "evm_first_buy_catchup_failed",
+                    pair=pool.address,
+                    chain=chain.slug,
+                    error=redact_url(str(exc)),
+                )
+                continue
+            summary = record_first_buys(
+                session,
+                pair.base_asset_id,
+                pair.created_at_source,
+                swaps,
+                tracked,
+                swaps_known=bool(swaps),
+            )
+            for key, value in summary.items():
+                self._first_buy_stats[key] = self._first_buy_stats.get(key, 0) + value
+            self._first_buy_stats["catchup_swaps"] += len(swaps)
+            if swaps:
+                observed += 1
+                self._first_buy_stats["catchup_observed"] += 1
+            # Commit per pair: the RPC round-trip must not hold the write lock.
+            try:
+                session.commit()
+            except Exception as exc:  # noqa: BLE001 - retry the pair on a later scan.
+                session.rollback()
+                log.warning(
+                    "evm_first_buy_catchup_commit_failed",
+                    pair=pool.address,
+                    error=redact_url(str(exc)),
+                )
+        return observed
 
     def _record_first_buy_health(self, session: Session) -> None:
         stats = self._first_buy_stats

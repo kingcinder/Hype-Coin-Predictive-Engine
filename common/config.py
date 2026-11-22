@@ -809,6 +809,25 @@ class Settings(BaseSettings):
     dexscreener_refresh_alive_hours: int = 72
     first_buy_swap_tx_limit: int = 8
     first_buy_swap_cache_seconds: float = 300.0
+    # EVM first-buy RPC fallback: when GeckoTerminal rate-limits, rebuild an
+    # EVM pool's first buys from its Uniswap V2/V3 Swap logs on a public RPC.
+    # Without it, a GeckoTerminal 429 means every EVM first-buy in that scan is lost.
+    first_buy_evm_rpc_fallback_enabled: bool = True
+    # Max block range for one eth_getLogs call in the EVM fallback. The 5-minute
+    # first-buy window is ~150 blocks on Base (~25 on Ethereum), so this is a
+    # safety net, not a tuning knob.
+    first_buy_evm_rpc_max_blocks: int = 2000
+    # Catch-up: re-check EVM pairs whose first-buy window closed before they were
+    # observed (discovered during a GeckoTerminal cooldown, or fetched while the
+    # provider was rate-limited). The on-chain logs let the window be rebuilt
+    # after it closed, which the trades endpoint cannot do.
+    first_buy_catchup_enabled: bool = True
+    first_buy_catchup_max_pools_per_scan: int = 8
+    # Only pairs created within this window are catch-up candidates.
+    first_buy_catchup_lookback_hours: float = 24.0
+    # A closed-window pair is not re-attempted until this long after its last
+    # observation attempt, so one quiet pair is not re-fetched every scan.
+    first_buy_catchup_retry_hours: float = 6.0
     geckoterminal_min_interval_seconds: float = 2.1
     solana_swap_rpc_min_interval_seconds: float = 0.5
     provider_circuit_break_seconds: float = 60.0
