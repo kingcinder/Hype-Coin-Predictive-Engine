@@ -201,6 +201,56 @@ def _price_change_since(
     return (latest - entry) / entry
 
 
+def _has_forward_price_evidence(
+    session: Session,
+    asset_id: int,
+    scored_at: datetime,
+    window_end: datetime,
+    *,
+    as_of: datetime,
+    _cache: dict | None = None,
+) -> bool:
+    """True when the token was observed trading inside its forward window.
+
+    A survival label is only as good as the collapse detection behind it: a
+    collapse is only recorded when a lifecycle scan sees the price evidence
+    for it, so a token with no forward price data can never produce a
+    collapse event — and "no collapse event" then reads as survival.  A
+    survival label therefore requires at least one market snapshot for the
+    asset's pairs with ``ts`` inside ``(scored_at, window_end]`` and
+    ``observed_at`` at or before the evaluation time.  Without it the row is
+    censored (unevaluated), never survived.  Collapse labels need no such
+    guard: a collapse event is positive evidence, recorded only when the
+    scan actually saw it.
+    """
+    key = (asset_id, ensure_utc(scored_at), ensure_utc(window_end))
+    if _cache is not None and key in _cache:
+        return _cache[key]
+    pair_ids = session.scalars(
+        select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
+    ).all()
+    found = False
+    if pair_ids:
+        found = (
+            session.scalar(
+                select(models.MarketSnapshot.id)
+                .where(
+                    models.MarketSnapshot.pair_id.in_(pair_ids),
+                    models.MarketSnapshot.ts > ensure_utc(scored_at),
+                    models.MarketSnapshot.ts <= ensure_utc(window_end),
+                    models.MarketSnapshot.observed_at <= ensure_utc(as_of),
+                    models.MarketSnapshot.price_usd.is_not(None),
+                    models.MarketSnapshot.price_usd > 0,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+    if _cache is not None:
+        _cache[key] = found
+    return found
+
+
 def _expire_outcome_instances(session: Session, outcome_ids: Iterable[int]) -> None:
     """Expire ORM copies after a Core update so callers see the new values."""
     identity_map = session.identity_map
@@ -420,6 +470,10 @@ def evaluate_outcomes(
     evaluated = 0
     unresolved = 0
     censored = 0
+    # Per-run cache for the forward-price evidence check, keyed by
+    # (asset_id, scored_at, window_end): several due rows for one asset can
+    # share a window, and the check is one indexed query each.
+    evidence_cache: dict = {}
     censored_by_phase: dict[str, list[int]] = {}
     legacy_ids: list[int] = []
     evaluated_updates: list[dict[str, Any]] = []
@@ -458,17 +512,10 @@ def evaluate_outcomes(
             timeline_index = bisect_right(times, window_end) - 1
             if timeline_index >= 0:
                 phase = phases[timeline_index]
-        if phase not in _TERMINAL_PHASES:
-            # Unresolved: no terminal lifecycle state in the window.  Do NOT
-            # stamp evaluated_at — an outcome that cannot be established must
-            # not become a failure.  A row already censored stays retired; it
-            # was loaded only because a later terminal event exists, and that
-            # event is outside this observation window.
-            if outcome.censored_at is not None:
-                continue
-            censored_by_phase.setdefault(phase or "unknown", []).append(outcome.id)
-            censored += 1
-        else:
+        if phase in _COLLAPSE_PHASES:
+            # A collapse event is positive evidence (recorded only when the
+            # scan actually saw the price/trade data for it), so it labels
+            # the row regardless of forward snapshot coverage.
             evaluated_updates.append(
                 {
                     "outcome_id": outcome.id,
@@ -480,12 +527,59 @@ def evaluate_outcomes(
                     # A recovered row is no longer retired after evaluation.
                     "censored_at": None,
                     "label_version": LABEL_VERSION,
-                    "collapsed": phase in _COLLAPSE_PHASES,
+                    "collapsed": True,
                     "rugged": phase == "rugged",
-                    "survived": phase in _SURVIVAL_PHASES,
+                    "survived": False,
                 }
             )
             evaluated += 1
+        elif phase in _SURVIVAL_PHASES:
+            # Survival is inferred from the ABSENCE of a collapse event, so
+            # it is only established when the token was actually observed
+            # trading inside its forward window.  With no forward price data
+            # the collapse detector never had data to observe a collapse, and
+            # "no collapse event" is evidence of nothing — the row is
+            # censored (unevaluated), never survived.
+            if _has_forward_price_evidence(
+                session,
+                outcome.asset_id,
+                score_time,
+                window_end,
+                as_of=decision_ts,
+                _cache=evidence_cache,
+            ):
+                evaluated_updates.append(
+                    {
+                        "outcome_id": outcome.id,
+                        "lifecycle_phase_at_eval": phase,
+                        "price_change_pct": _price_change_since(
+                            session, outcome.asset_id, score_time, until=window_end
+                        ),
+                        "evaluated_at": decision_ts,
+                        # A recovered row is no longer retired after evaluation.
+                        "censored_at": None,
+                        "label_version": LABEL_VERSION,
+                        "collapsed": False,
+                        "rugged": False,
+                        "survived": True,
+                    }
+                )
+                evaluated += 1
+            else:
+                if outcome.censored_at is not None:
+                    continue
+                censored_by_phase.setdefault(phase, []).append(outcome.id)
+                censored += 1
+        else:
+            # Unresolved: no terminal lifecycle state in the window.  Do NOT
+            # stamp evaluated_at — an outcome that cannot be established must
+            # not become a failure.  A row already censored stays retired; it
+            # was loaded only because a later terminal event exists, and that
+            # event is outside this observation window.
+            if outcome.censored_at is not None:
+                continue
+            censored_by_phase.setdefault(phase or "unknown", []).append(outcome.id)
+            censored += 1
         if index % OUTCOME_BATCH_SIZE == 0:
             flush_batch()
 

@@ -29,6 +29,7 @@ from risk_engine.outcomes import (
     _COLLAPSE_PHASES,
     _SURVIVAL_PHASES,
     LABEL_VERSION,
+    _has_forward_price_evidence,
     _lifecycle_phase_as_of,
     _price_change_since,
 )
@@ -75,6 +76,14 @@ def _copy_rows(
             continue
         phase = _lifecycle_phase_as_of(session, old.asset_id, window_end)
         if phase not in _COLLAPSE_PHASES and phase not in _SURVIVAL_PHASES:
+            censored += 1
+            continue
+        if phase in _SURVIVAL_PHASES and not _has_forward_price_evidence(
+            session, old.asset_id, score_time, window_end, as_of=now
+        ):
+            # Survival without forward price data is not established (see
+            # risk_engine.outcomes._has_forward_price_evidence): the row
+            # stays v1, counted censored, never copied as survived.
             censored += 1
             continue
         session.add(

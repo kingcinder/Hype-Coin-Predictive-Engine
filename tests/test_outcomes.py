@@ -76,6 +76,29 @@ def _seed_lifecycle(
     return event
 
 
+def _seed_forward_snapshot(
+    session, asset: models.Asset, *, ts: datetime, price: float = 1.10
+) -> None:
+    """One in-window market snapshot: the forward price evidence a survival
+    label requires (a survival label without it is censored, not survived)."""
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    assert pair is not None and source is not None
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=ts,
+        observed_at=ts,
+        price_usd=price,
+        volume_usd=50_000,
+        buys=30,
+        sells=5,
+        trades=35,
+    )
+    session.flush()
+
+
 def _seed_prediction(
     session,
     asset: models.Asset,
@@ -213,9 +236,11 @@ def test_rug_inside_window_labels_rugged_and_collapsed(session) -> None:
 
 
 def test_survival_phase_at_window_end_labels_survived(session) -> None:
+    """A survival phase labels survived only with forward price evidence."""
     asset = seed_market_asset(session)
     outcome = _seed_prediction(session, asset)
     _seed_lifecycle(session, asset, "survivor", SCORED_AT + timedelta(hours=30))
+    _seed_forward_snapshot(session, asset, ts=SCORED_AT + timedelta(hours=24))
 
     evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
 
@@ -224,6 +249,71 @@ def test_survival_phase_at_window_end_labels_survived(session) -> None:
     assert outcome.rugged is False
     assert ensure_utc(outcome.evaluated_at) == EVAL_TS
     assert outcome.lifecycle_phase_at_eval == "survivor"
+
+
+def test_survival_phase_without_forward_price_is_censored(session) -> None:
+    """Nov 18 mechanism: a survival phase with no forward price data must be
+    censored (unevaluated), never survived.  The collapse detector never had
+    data to observe a collapse, so "no collapse event" is evidence of nothing.
+    """
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "survivor", SCORED_AT + timedelta(hours=30))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is False
+    assert outcome.survived is False
+    assert outcome.evaluated_at is None
+    assert outcome.censored_at is not None
+    assert outcome.lifecycle_phase_at_eval == "survivor"
+
+
+def test_saturation_phase_without_forward_price_is_censored(session) -> None:
+    """The Nov 18 live rows ended at saturation with no forward snapshots;
+    they must be censored, not survived."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "saturation", SCORED_AT + timedelta(hours=30))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is False
+    assert outcome.survived is False
+    assert outcome.evaluated_at is None
+    assert outcome.censored_at is not None
+    assert outcome.lifecycle_phase_at_eval == "saturation"
+
+
+def test_saturation_phase_with_forward_price_labels_survived(session) -> None:
+    """The same saturation phase WITH a forward snapshot is a real survival."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "saturation", SCORED_AT + timedelta(hours=30))
+    _seed_forward_snapshot(session, asset, ts=SCORED_AT + timedelta(hours=24))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.survived is True
+    assert outcome.collapsed is False
+    assert outcome.rugged is False
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+    assert outcome.lifecycle_phase_at_eval == "saturation"
+
+
+def test_collapse_without_forward_price_still_labels_collapsed(session) -> None:
+    """A collapse event is positive evidence: it labels collapsed even with
+    no forward snapshots (the scan saw the data when it emitted the event)."""
+    asset = seed_market_asset(session)
+    outcome = _seed_prediction(session, asset)
+    _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
+
+    evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
+
+    assert outcome.collapsed is True
+    assert outcome.survived is False
+    assert ensure_utc(outcome.evaluated_at) == EVAL_TS
+    assert outcome.lifecycle_phase_at_eval == "collapse"
 
 
 def test_no_lifecycle_events_in_window_stays_unresolved(session) -> None:
@@ -289,6 +379,7 @@ def test_evaluated_outcomes_commit_in_batches(session, monkeypatch) -> None:
     )
     second_outcome = _seed_prediction(session, second, model_version="test-batch-second")
     _seed_lifecycle(session, second, "survivor", SCORED_AT + timedelta(hours=24))
+    _seed_forward_snapshot(session, second, ts=SCORED_AT + timedelta(hours=24))
 
     commits: list[int] = []
     event.listen(session, "after_commit", lambda _session: commits.append(1))
