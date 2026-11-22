@@ -207,6 +207,7 @@ def test_liquidity_withdrawal_signal_raises_risk() -> None:
             "pair_age_minutes": 120.0,
             "suspicious_contract_flags": 0.0,
             "liquidity_withdrawal_signal": 1.0,
+            "drawdown_from_24h_peak": 0.0,
         }
     )
     assert assessment.band.value == "YELLOW"
@@ -410,6 +411,7 @@ def _collapse_features(prob: float) -> dict[str, float]:
         "lp_removal_signal": 0.0,
         "recidivism_score": 0.0,
         "lifecycle_phase": 1.0,
+        "drawdown_from_24h_peak": 0.0,
     }
 
 

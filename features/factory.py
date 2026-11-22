@@ -354,6 +354,25 @@ def compute_market_block(
 
     five_min_return = _pct_return(current_price, _safe_float(m5.price_usd, None) if m5 else None)
     one_hour_return = _pct_return(current_price, _safe_float(h1.price_usd, None) if h1 else None)
+
+    # Ticket 1 step 3 (M4): drawdown from the trailing-24h peak, computed
+    # from rows already loaded. The risk rules previously had no price-
+    # trajectory input at all, so a pure price crater with intact reported
+    # liquidity accrued zero risk points.
+    window_start = decision_ts - timedelta(hours=24)
+    window_prices = [
+        price
+        for row in market_rows
+        if ensure_utc(row.ts) >= window_start
+        for price in [_safe_float(row.price_usd, None)]
+        if price is not None and price > 0
+    ]
+    drawdown_from_24h_peak: float | None = None
+    if window_prices and current_price is not None and current_price > 0:
+        peak = max(window_prices)
+        if peak > 0:
+            drawdown_from_24h_peak = max(0.0, (peak - current_price) / peak)
+
     if market_stale:
         # Every market-derived measurement describes the stale snapshot,
         # not the token at decision time. Pair age is exempt: it is a fact
@@ -365,6 +384,7 @@ def compute_market_block(
         buys = None
         volatility = None
         venue_agreement = None
+        drawdown_from_24h_peak = None
     if liquidity_stale:
         latest_liq = None
         liquidity_change = None
@@ -382,6 +402,7 @@ def compute_market_block(
         _feature("spread_estimate", spread_estimate, source_count, liquidity_freshness),
         _feature("volatility", volatility, source_count, market_freshness),
         _feature("venue_agreement", venue_agreement, source_count, market_freshness),
+        _feature("drawdown_from_24h_peak", drawdown_from_24h_peak, source_count, market_freshness),
     ]
     return {value.name: value for value in values}
 

@@ -30,6 +30,7 @@ MARKET_FEATURES = (
     "unique_buyers_estimate",
     "volatility",
     "venue_agreement",
+    "drawdown_from_24h_peak",
 )
 LIQUIDITY_FEATURES = ("liquidity_depth", "liquidity_change", "spread_estimate")
 

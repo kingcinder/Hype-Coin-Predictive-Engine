@@ -37,6 +37,7 @@ def _full_features() -> dict[str, float]:
         "spread_estimate": 2.0,
         "volatility": 12.0,
         "venue_agreement": 95.0,
+        "drawdown_from_24h_peak": 0.05,
         "mention_velocity": 20.0,
         "website_presence": 1.0,
         "github_presence_public": 1.0,
@@ -137,6 +138,7 @@ def test_assess_risk_empty_dict_reports_all_rule_inputs() -> None:
         "recidivism_score",
         "collapse_probability_24h",
         "lifecycle_phase",
+        "drawdown_from_24h_peak",
     }
 
 
@@ -204,9 +206,9 @@ def test_full_features_beat_empty_dict_on_confidence() -> None:
     full = compute_scores(_full_features(), [])
     empty = compute_scores({}, [])
     assert full.confidence > empty.confidence
-    # Empty dict: the 13 shared rule inputs defaulted; chain-specific safety
+    # Empty dict: the 14 shared rule inputs defaulted; chain-specific safety
     # applicability and coverage come from FeatureFactory.
-    assert len(empty.missing_features) == 13
+    assert len(empty.missing_features) == 14
     assert full.missing_features == []
 
 

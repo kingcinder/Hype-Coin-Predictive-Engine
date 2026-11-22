@@ -213,6 +213,7 @@ def assess_risk(
     recidivism = _feature(features, "recidivism_score", defaulted=defaulted)
     collapse_probability = _feature(features, "collapse_probability_24h", defaulted=defaulted)
     lifecycle_phase = _feature(features, "lifecycle_phase", 1.0, defaulted=defaulted)
+    drawdown = _feature(features, "drawdown_from_24h_peak", defaulted=defaulted)
 
     for feature_name, points, reason in _SOLANA_SAFETY_RULES:
         # FeatureFactory owns applicability and missing tracking for these
@@ -316,6 +317,19 @@ def assess_risk(
             "Forecast model assigns elevated "
             f"{collapse_probability:.0%} collapse probability within 24h"
         )
+
+    # Ticket 1 step 3 (M4): price action itself is a risk input. A token
+    # down hard from its 24h peak is collapsing by any trading definition
+    # even when reported liquidity is intact and no lifecycle or
+    # withdrawal event has fired yet.
+    if drawdown >= 0.50:
+        pts = _apply_reason_weights(25.0, "Price drawdown from 24h peak", reason_weights)
+        risk_points += pts
+        reasons.append(f"Price down {drawdown:.0%} from its 24h peak")
+    elif drawdown >= 0.25:
+        pts = _apply_reason_weights(10.0, "Price drawdown from 24h peak", reason_weights)
+        risk_points += pts
+        reasons.append(f"Price down {drawdown:.0%} from its 24h peak")
 
     if concentration >= 0.90:
         hard_reject = True
