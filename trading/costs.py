@@ -23,6 +23,10 @@ class Fill:
     fee_sol: Decimal
     priority_sol: Decimal
     slippage_pct: Decimal
+    # Slippage-adjusted per-token price in the chain's native currency
+    # (SOL on Solana), parallel to effective_price (USD/token). Set only
+    # when the quote carried a native price; None otherwise.
+    effective_price_native: Decimal | None = None
 
 
 def slippage_pct(is_new_token: bool, normal: Decimal, new: Decimal) -> Decimal:
@@ -36,11 +40,25 @@ def simulate_buy(
     slip_pct: Decimal,
     fee_pct: Decimal,
     priority_sol: Decimal,
+    price_native: Decimal | None = None,
 ) -> Fill:
-    """Buy: pay fee+priority out of size, buy at a WORSE price (price*(1+slip))."""
+    """Buy: pay fee+priority out of size, buy at a WORSE price (price*(1+slip)).
+
+    ``quote_price`` is USD/token; ``price_native`` (when given) is the same
+    price in the chain's native currency (SOL/token on Solana). ``qty`` is a
+    real token count only when ``price_native`` is given: qty =
+    net_sol / effective_native_price. Without it, qty falls back to
+    net_sol / effective_usd_price -- a scaled count, NOT tokens (it is
+    SOL/USD too small: BANDANA CAT recorded 286,576,168 vs ~19.67e9 real
+    tokens at SOL $68.64). Callers must pass the matching price to
+    simulate_sell: native qty with a native price, scaled qty with USD.
+    """
     fee = q_sol(size_sol * fee_pct / HUNDRED)
     net = size_sol - fee - priority_sol
     eff = quote_price * (Decimal(1) + slip_pct / HUNDRED)
+    if price_native is not None and price_native > 0:
+        eff_native = price_native * (Decimal(1) + slip_pct / HUNDRED)
+        return Fill(eff, q_qty(net / eff_native), fee, priority_sol, slip_pct, eff_native)
     return Fill(eff, q_qty(net / eff), fee, priority_sol, slip_pct)
 
 
@@ -51,11 +69,19 @@ def simulate_sell(
     slip_pct: Decimal,
     fee_pct: Decimal,
     priority_sol: Decimal,
+    price_native: Decimal | None = None,
 ) -> tuple[Decimal, Fill]:
     """Sell: receive at a WORSE price (price*(1-slip)); fee+priority come off proceeds.
     Returns (net_proceeds_sol, Fill).
+
+    When ``price_native`` is given, ``qty`` must be a real token count and
+    proceeds are true SOL (qty x native price). Otherwise ``quote_price``
+    (USD/token) is used and ``qty`` must be the scaled count from the
+    matching simulate_buy call -- the exit/entry ratio still yields SOL,
+    but the qty itself is not a token count.
     """
-    eff = quote_price * (Decimal(1) - slip_pct / HUNDRED)
+    price = price_native if price_native is not None and price_native > 0 else quote_price
+    eff = price * (Decimal(1) - slip_pct / HUNDRED)
     gross = q_sol(qty * eff)
     fee = q_sol(gross * fee_pct / HUNDRED)
     proceeds = gross - fee - priority_sol

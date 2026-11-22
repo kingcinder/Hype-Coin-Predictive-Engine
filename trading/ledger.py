@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
+from common.time import ensure_utc
 from storage import models
 from storage.repository import queued_write
 from trading.costs import (
@@ -161,12 +162,18 @@ class TradeEngine:
             if size > self.settings.live_max_bankroll_sol:
                 raise TradeRefused("size_over_live_cap")
 
+        # Native-price sizing (Solana only): qty must be a real token count,
+        # qty = size_sol / price_native. Without it qty is size_sol /
+        # price_usd -- SOL/USD too small. The live branch below re-simulates
+        # from the venue fill price (units venue-defined), so it leaves the
+        # native price unset and the position closes on the USD ratio.
         fill = simulate_buy(
             size_sol=size,
             quote_price=quote.price,
             slip_pct=slip,
             fee_pct=self.settings.gmgn_fee_pct_per_tx,
             priority_sol=self.settings.priority_fee_sol,
+            price_native=quote.price_native if chain == "solana" else None,
         )
         if mode == "live":
             from trading.gmgn_exec import GmgnExecutor  # noqa: PLC0415 - Phase D module.
@@ -209,6 +216,7 @@ class TradeEngine:
                 source_signal=candidate.get("signal_id") or "candidate",
                 entry_quote_price=quote.price,
                 entry_effective_price=fill.effective_price,
+                entry_price_native=fill.effective_price_native,
                 qty=fill.qty,
                 size_sol=size,
                 entry_fees_sol=fill.fee_sol,
@@ -269,12 +277,31 @@ class TradeEngine:
         if (now - quote.ts).total_seconds() > STALE_PRICE_SECONDS:
             raise TradeRefused("stale_price")
 
+        # How this position's qty is denominated: positions opened with a
+        # native price hold real token counts and close on the native price;
+        # older positions (BANDANA CAT, opened before the fix) hold the
+        # scaled count net_sol / usd_price and must close on the USD ratio,
+        # never on the native price -- mixing them books phantom P&L.
+        if position.entry_price_native is not None and position.chain == "solana":
+            exit_native = quote.price_native
+            if exit_native is None or exit_native <= 0:
+                # No native price on this quote (snapshot fallback): convert
+                # the USD exit price at the SOL/USD rate implied at entry.
+                # The only error is the SOL/USD drift since entry.
+                sol_usd = position.entry_effective_price / position.entry_price_native
+                exit_native = quote.price / sol_usd
+            exit_price_for_math = exit_native
+            native = exit_native
+        else:
+            exit_price_for_math = quote.price
+            native = None
         proceeds, sfill = simulate_sell(
             qty=position.qty,
             quote_price=quote.price,
             slip_pct=position.entry_slip_pct,
             fee_pct=self.settings.gmgn_fee_pct_per_tx,
             priority_sol=self.settings.priority_fee_sol,
+            price_native=native,
         )
         if position.mode == "live":
             from trading.gmgn_exec import GmgnExecutor  # noqa: PLC0415 - Phase D module.
@@ -294,7 +321,8 @@ class TradeEngine:
         fees = q_sol(position.entry_fees_sol + sfill.fee_sol + 2 * self.settings.priority_fee_sol)
         slip = position.entry_slip_pct
         slippage_sol = q_sol(
-            position.size_sol * slip / HUNDRED + (position.qty * quote.price) * slip / HUNDRED
+            position.size_sol * slip / HUNDRED
+            + (position.qty * exit_price_for_math) * slip / HUNDRED
         )
 
         def _persist(write_session: Session) -> int:
@@ -368,7 +396,7 @@ class TradeEngine:
                 reason = "stop"
             elif position.target_price is not None and quote.price >= position.target_price:
                 reason = "target"
-            elif position.time_stop_at is not None and now >= position.time_stop_at:
+            elif position.time_stop_at is not None and now >= ensure_utc(position.time_stop_at):
                 reason = "time_stop"
             if reason is not None:
                 out.append(

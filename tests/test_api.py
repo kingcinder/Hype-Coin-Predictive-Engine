@@ -338,6 +338,36 @@ def test_health_labels_old_components_stale(session) -> None:
         app.dependency_overrides.clear()
 
 
+def test_health_excludes_fixture_seed_marker(session) -> None:
+    """The fixture_seed row is a one-shot seed marker, not a live signal:
+    it must not appear in /health (it would read stale forever)."""
+    from datetime import timedelta
+
+    from common.time import utc_now
+    from storage.repository import record_health
+
+    def override_session():
+        yield session
+
+    app.dependency_overrides[get_session] = override_session
+    try:
+        client = TestClient(app, headers=_AUTH_HEADERS)
+        record_health(
+            session,
+            component="fixture_seed",
+            state="ok",
+            message="fixture scores created",
+            ts=utc_now() - timedelta(days=30),
+        )
+        session.commit()
+
+        body = client.get("/health").json()
+        names = {c["component"] for c in body["components"]}
+        assert "fixture_seed" not in names
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_stale_components_alone_do_not_degrade_health(session) -> None:
     from datetime import timedelta
 

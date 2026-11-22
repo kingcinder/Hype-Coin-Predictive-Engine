@@ -14,7 +14,11 @@ from storage.repository import queued_write
 from trading.candidates import build_candidates, get_candidate
 from trading.errors import DrawdownReview, LiveDisabled, RulesIncomplete, TradeRefused
 from trading.ledger import TradeEngine
-from trading.price_sources import MarketSnapshotPriceSource
+from trading.price_sources import (
+    DexScreenerLivePriceSource,
+    LiveFirstPriceSource,
+    MarketSnapshotPriceSource,
+)
 from trading.scorecard import build_scorecard
 from validation.status import scores_validation_status
 
@@ -69,9 +73,20 @@ def _raise_mapped(exc: Exception) -> None:
     raise exc
 
 
+def _trade_price_source(session: DbSession):
+    """Live DexScreener quote first, persisted snapshot as fallback.
+
+    Snapshot-only pricing made paper trades unreachable: snapshots are
+    hourly-bucketed while the trade gate requires a quote <60 s old, so
+    every open was refused ``stale_price``. Live-first keeps the gate
+    meaningful; the snapshot fallback still applies when live is down.
+    """
+    return LiveFirstPriceSource(DexScreenerLivePriceSource(), MarketSnapshotPriceSource(session))
+
+
 @router.post("/paper/trades")
 async def create_paper_trade(body: TradeBody, session: DbSession) -> dict:
-    price_source = MarketSnapshotPriceSource(session)
+    price_source = _trade_price_source(session)
     candidate = get_candidate(session, body.mint, now=utc_now(), price_source=price_source)
     if candidate is None:
         raise HTTPException(422, {"error": "candidate_not_found"})
@@ -90,7 +105,7 @@ async def create_paper_trade(body: TradeBody, session: DbSession) -> dict:
 @router.post("/paper/trades/{position_id}/exit")
 async def exit_paper_trade(position_id: int, body: ExitBody, session: DbSession) -> dict:
     try:
-        trade_id = TradeEngine(MarketSnapshotPriceSource(session), now=utc_now).close_trade(
+        trade_id = TradeEngine(_trade_price_source(session), now=utc_now).close_trade(
             session,
             position_id,
             why_exited=body.why_exited,
@@ -107,9 +122,7 @@ async def paper_ledger(session: DbSession) -> dict:
     closed = session.scalars(
         select(models.LedgerTrade).order_by(models.LedgerTrade.closed_at.desc()).limit(200)
     ).all()
-    suggestions = TradeEngine(MarketSnapshotPriceSource(session), now=utc_now).suggest_exits(
-        session
-    )
+    suggestions = TradeEngine(_trade_price_source(session), now=utc_now).suggest_exits(session)
     return {
         "closed": [
             {
@@ -179,7 +192,7 @@ async def paper_candidates(session: DbSession, limit: int = 10) -> dict:
 
 @router.post("/paper/candidates/{mint}/trade")
 async def trade_candidate(mint: str, body: CandidateTradeBody, session: DbSession) -> dict:
-    price_source = MarketSnapshotPriceSource(session)
+    price_source = _trade_price_source(session)
     candidate = get_candidate(session, mint, now=utc_now(), price_source=price_source)
     if candidate is None:
         raise HTTPException(422, {"error": "candidate_not_found"})
@@ -378,7 +391,7 @@ async def trading_execute(body: ExecuteBody, session: DbSession) -> dict:
     except LiveDisabled as exc:
         _raise_mapped(exc)
 
-    price_source = MarketSnapshotPriceSource(session)
+    price_source = _trade_price_source(session)
     engine = TradeEngine(price_source, now=utc_now)
     if body.side == "buy":
         candidate = get_candidate(session, body.mint, now=utc_now(), price_source=price_source)

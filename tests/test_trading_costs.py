@@ -37,3 +37,66 @@ def test_bad_stop_rejected():
     for bad in (D("0"), D("100"), D("-5")):
         with pytest.raises(ValueError):
             position_size_sol(bankroll=D("10"), risk_pct=D("1"), stop_pct=bad)
+
+
+def test_buy_with_native_price_returns_real_token_qty():
+    # BANDANA CAT entry: 0.5 SOL, 30% slip (new-token tier), 1% fee,
+    # 0.001 priority, entry 1.326e-09 USD/token, SOL $68.64.
+    b = simulate_buy(
+        size_sol=D("0.5"),
+        quote_price=D("1.326e-09"),
+        slip_pct=D("30"),
+        fee_pct=D("1"),
+        priority_sol=D("0.001"),
+        price_native=D("1.326e-09") / D("68.64"),
+    )
+    assert b.qty == D("19670588235.294117647059")
+    assert b.effective_price_native == D("1.326e-09") / D("68.64") * D("1.3")
+
+
+def test_buy_without_native_price_keeps_ratio_qty():
+    b = simulate_buy(
+        size_sol=D("0.5"),
+        quote_price=D("1.326e-09"),
+        slip_pct=D("30"),
+        fee_pct=D("1"),
+        priority_sol=D("0.001"),
+    )
+    assert b.qty == D("286576168.929110105581")
+    assert b.effective_price_native is None
+
+
+def test_native_round_trip_matches_usd_ratio_when_sol_price_fixed():
+    # Same prices in both conventions (SOL $100): proceeds must agree.
+    buy_native = simulate_buy(
+        size_sol=D("1"),
+        quote_price=D("2"),
+        slip_pct=D("0"),
+        fee_pct=D("0"),
+        priority_sol=D("0"),
+        price_native=D("0.02"),
+    )
+    assert buy_native.qty == D("50.000000000000")
+    proceeds_native, _ = simulate_sell(
+        qty=buy_native.qty,
+        quote_price=D("2"),
+        slip_pct=D("0"),
+        fee_pct=D("0"),
+        priority_sol=D("0"),
+        price_native=D("0.02"),
+    )
+    buy_ratio = simulate_buy(
+        size_sol=D("1"),
+        quote_price=D("2"),
+        slip_pct=D("0"),
+        fee_pct=D("0"),
+        priority_sol=D("0"),
+    )
+    proceeds_ratio, _ = simulate_sell(
+        qty=buy_ratio.qty,
+        quote_price=D("2"),
+        slip_pct=D("0"),
+        fee_pct=D("0"),
+        priority_sol=D("0"),
+    )
+    assert proceeds_native == proceeds_ratio == D("1.000000000")
