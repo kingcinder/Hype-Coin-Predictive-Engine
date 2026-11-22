@@ -30,27 +30,20 @@ TABLE = "features"
 INDEX = "ix_features_confidence_cover"
 
 
+def _index_names(bind) -> set[str]:
+    # Portable index lookup (same inspector pattern as 0042): the old
+    # sqlite_master query only worked on SQLite and died on PostgreSQL
+    # with relation "sqlite_master" does not exist.
+    return {idx["name"] for idx in sa.inspect(bind).get_indexes(TABLE)}
+
+
 def upgrade() -> None:
     bind = op.get_bind()
-    names = {
-        row[0]
-        for row in bind.execute(
-            sa.text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t"),
-            {"t": TABLE},
-        )
-    }
-    if INDEX not in names:
+    if INDEX not in _index_names(bind):
         op.create_index(INDEX, TABLE, ["asset_id", "decision_ts", "missing_flag", "observed_at"])
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    names = {
-        row[0]
-        for row in bind.execute(
-            sa.text("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=:t"),
-            {"t": TABLE},
-        )
-    }
-    if INDEX in names:
+    if INDEX in _index_names(bind):
         op.drop_index(INDEX, table_name=TABLE)
