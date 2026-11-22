@@ -3,6 +3,8 @@ dexscreener_trends, google_trends)."""
 
 from __future__ import annotations
 
+import json
+
 import respx
 from httpx import Response
 
@@ -12,40 +14,62 @@ from crawlers.sources.pump_portal import PumpPortalCrawler
 
 
 @respx.mock
-def test_pump_portal_parses_http_recent() -> None:
-    respx.get("https://api.pumpportal.io/pumps/recent").mock(
-        return_value=Response(
-            200,
-            json=[
-                {
-                    "signature": "sig1",
-                    "mint": "MINTADDRESS11111111111111111111111111111111",
-                    "traderPublicKey": "DEPLOYER111111111111111111111111111111111111",
-                    "txType": "create",
-                    "initialBuy": 1.5,
-                    "bondingCurveKey": "curve1",
-                    "marketCapSol": 250.0,
-                    "name": "Hype Dog",
-                    "symbol": "HDOG",
-                    "uri": "https://ipfs.io/hdog",
-                },
-                {
-                    "signature": "sig2",
-                    "mint": "SECONDMINT222222222222222222222222222222222222",
-                    "traderPublicKey": "DEPLOYER222222222222222222222222222222222222",
-                    "txType": "create",
-                    "initialBuy": 0.0,
-                    "name": "Boring Coin",
-                    "symbol": "BOR",
-                },
-            ],
-        )
+class _FakePumpWS:
+    """Minimal stand-in for a websockets.sync.client connection."""
+
+    def __init__(self, messages: list[str]) -> None:
+        self._messages = list(messages)
+
+    def __enter__(self) -> _FakePumpWS:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def send(self, _msg: str) -> None:
+        return None
+
+    def recv(self, timeout: float | None = None) -> str:
+        if self._messages:
+            return self._messages.pop(0)
+        raise TimeoutError("no more messages")
+
+
+def _pump_create_event(*, mint: str, symbol: str, name: str) -> str:
+    return json.dumps(
+        {
+            "txType": "create",
+            "mint": mint,
+            "traderPublicKey": "DEPLOYER111111111111111111111111111111111111",
+            "signature": "sig1",
+            "initialBuy": 1.5,
+            "bondingCurveKey": "curve1",
+            "marketCapSol": 250.0,
+            "name": name,
+            "symbol": symbol,
+        }
     )
-    crawler = PumpPortalCrawler(enable_ws_fallback=False)
-    try:
-        items = crawler.fetch()
-    finally:
-        crawler.close()
+
+
+def test_pump_portal_parses_ws_tap_events(monkeypatch) -> None:
+    from unittest.mock import patch
+
+    messages = [
+        json.dumps({"message": "Successfully subscribed to token creation events."}),
+        _pump_create_event(
+            mint="MINTADDRESS11111111111111111111111111111111", symbol="HDOG", name="Hype Dog"
+        ),
+        _pump_create_event(
+            mint="SECONDMINT222222222222222222222222222222222222", symbol="BOR", name="Boring Coin"
+        ),
+    ]
+    monkeypatch.setattr("crawlers.sources.pump_portal.WS_TAP_SECONDS", 0.5)
+    with patch("websockets.sync.client.connect", return_value=_FakePumpWS(messages)):
+        crawler = PumpPortalCrawler()
+        try:
+            items = crawler.fetch()
+        finally:
+            crawler.close()
     assert len(items) == 2
     first = items[0]
     assert first["source_domain"] == "pump.fun"
@@ -55,45 +79,37 @@ def test_pump_portal_parses_http_recent() -> None:
     assert "pump.fun/coin" in first["url"]
 
 
-@respx.mock
-def test_pump_portal_http_empty_falls_back_to_ws() -> None:
-    # HTTP endpoint returns 500 -> the crawler should fall back to the WS tap.
-    # The WS connect is patched to fail so the test never touches the network.
+def test_pump_portal_ws_failure_returns_empty() -> None:
     from unittest.mock import patch
 
-    respx.get("https://api.pumpportal.io/pumps/recent").mock(
-        return_value=Response(500, text="boom")
-    )
-    crawler = PumpPortalCrawler()  # fallback stays enabled: this tests it
-    try:
-        with patch("websockets.sync.client.connect", side_effect=ConnectionError("no net")):
+    with patch("websockets.sync.client.connect", side_effect=ConnectionError("no net")):
+        crawler = PumpPortalCrawler()
+        try:
             items = crawler.fetch()
-    finally:
-        crawler.close()
+        finally:
+            crawler.close()
     assert items == []
 
 
-@respx.mock
-def test_pump_portal_skips_invalid_rows() -> None:
-    respx.get("https://api.pumpportal.io/pumps/recent").mock(
-        return_value=Response(
-            200,
-            json=[
-                {"mint": "MINTADDRESS11111111111111111111111111111111"},  # no symbol
-                {"symbol": "NOSYM"},  # no mint
-                {
-                    "mint": "OKMINT33333333333333333333333333333333333333",
-                    "symbol": "OK",
-                    "name": "OK Coin",
-                },
-            ],
-        )
-    )
-    crawler = PumpPortalCrawler(enable_ws_fallback=False)
-    try:
-        items = crawler.fetch()
-    finally:
-        crawler.close()
+def test_pump_portal_skips_invalid_rows(monkeypatch) -> None:
+    from unittest.mock import patch
+
+    messages = [
+        json.dumps(
+            {"txType": "create", "mint": "MINTADDRESS11111111111111111111111111111111"}
+        ),  # no symbol
+        json.dumps({"txType": "create", "symbol": "NOSYM"}),  # no mint
+        _pump_create_event(
+            mint="OKMINT33333333333333333333333333333333333333", symbol="OK", name="OK Coin"
+        ),
+    ]
+    monkeypatch.setattr("crawlers.sources.pump_portal.WS_TAP_SECONDS", 0.5)
+    with patch("websockets.sync.client.connect", return_value=_FakePumpWS(messages)):
+        crawler = PumpPortalCrawler()
+        try:
+            items = crawler.fetch()
+        finally:
+            crawler.close()
     assert len(items) == 1
     assert items[0]["metrics"]["symbol"] == "OK"
 

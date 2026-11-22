@@ -84,7 +84,8 @@ class NightCrawlerOrchestrator:
             self._crawlers["coinmarketcap"] = CMCCrawler(
                 api_key=secret_value(self.settings.cmc_api_key)
             )
-        self._crawlers["pump_fun"] = PumpFunCrawler()
+        if self.settings.nightcrawler_pumpfun_enabled:
+            self._crawlers["pump_fun"] = PumpFunCrawler()
         self._crawlers["defillama"] = DeFiLlamaCrawler()
         self._crawlers["whale_tracker"] = WhaleTrackerCrawler()
         self._crawlers["explorer"] = ExplorerCrawler(
@@ -93,7 +94,8 @@ class NightCrawlerOrchestrator:
         if self.settings.nightcrawler_nitter_enabled:
             _warn_policy_override_once("nitter", "NIGHTCRAWLER_ENABLE_NITTER")
             self._crawlers["nitter"] = NitterCrawler()
-        self._crawlers["presale"] = PresaleCrawler()
+        if self.settings.nightcrawler_presale_enabled:
+            self._crawlers["presale"] = PresaleCrawler()
         if self.settings.nightcrawler_gas_tracker_enabled:
             self._crawlers["gas_tracker"] = GasTrackerCrawler(
                 etherscan_api_key=secret_value(self.settings.etherscan_api_key),

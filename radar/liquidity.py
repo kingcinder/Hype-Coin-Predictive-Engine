@@ -24,6 +24,18 @@ ZERO_TOPIC = "0x" + "0" * 64
 EVM_CHAINS = ("base", "ethereum")
 
 
+def _is_evm_address(value: str | None) -> bool:
+    """Whether a pool address is shaped like a 20-byte EVM address.
+
+    DexScreener stores Uniswap V4 poolIds (32-byte hashes, 66 chars) in
+    ``Pool.address`` and Solana pools carry base58 addresses; neither is
+    queryable via eth_getLogs and every endpoint rejects them with
+    "invalid params". Length + 0x prefix is the bar (not strict hex: the
+    test suite seeds placeholder addresses with non-hex characters).
+    """
+    return isinstance(value, str) and len(value) == 42 and value.startswith("0x")
+
+
 class LiquidityRemovalWatcher:
     """Watch known EVM pools for LP burns and pair liquidity withdrawals.
 
@@ -58,9 +70,32 @@ class LiquidityRemovalWatcher:
             ).all()
             if not pools:
                 continue
+            # One bad address poisons the whole batch: eth_getLogs takes the
+            # full address list in one call, and a single V4 poolId (66 chars)
+            # makes every endpoint answer "invalid params" while
+            # _logs_from_endpoint swallows it as []. Query real contracts only.
+            valid_pools = [pool for pool in pools if _is_evm_address(pool.address)]
+            skipped = len(pools) - len(valid_pools)
+            if skipped:
+                log.info(
+                    "lp_removal_skipped_pools",
+                    chain=chain.slug,
+                    skipped=skipped,
+                    reason="non-address pool id (e.g. Uniswap V4 poolId)",
+                )
+            if not valid_pools:
+                record_health(
+                    session,
+                    component=f"source:lp_removal:{chain.slug}",
+                    state="yellow",
+                    message=(f"scanned 0 pools; {skipped} skipped (non-address pool ids)"),
+                    freshness_sec=0.0,
+                )
+                session.commit()
+                continue
             try:
-                logs = self._logs_for_pools(chain.slug, [pool.address for pool in pools])
-                pools_by_address = {pool.address.lower(): pool for pool in pools}
+                logs = self._logs_for_pools(chain.slug, [pool.address for pool in valid_pools])
+                pools_by_address = {pool.address.lower(): pool for pool in valid_pools}
                 for log_item in logs:
                     parsed = self._parse_log(log_item, pools_by_address)
                     if parsed is None:
@@ -84,7 +119,10 @@ class LiquidityRemovalWatcher:
                     session,
                     component=f"source:lp_removal:{chain.slug}",
                     state="ok",
-                    message=(f"scanned {len(pools)} pools; {len(logs)} candidate logs"),
+                    message=(
+                        f"scanned {len(valid_pools)} pools; {len(logs)} candidate logs"
+                        + (f" ({skipped} skipped)" if skipped else "")
+                    ),
                     freshness_sec=0.0,
                 )
             except Exception as exc:  # noqa: BLE001 - watcher must not stop ingestion.

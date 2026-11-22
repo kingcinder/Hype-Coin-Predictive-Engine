@@ -94,7 +94,11 @@ class WhaleTrackerCrawler(BaseCrawler):
 
     def _fetch_eth_address(self, address: str, *, dex: str | None) -> list[dict[str, Any]]:
         """Return whale-sized transfers for one address, optionally labelled as DEX flow."""
-        limit = 20 if dex else 5
+        # The old 5-tx window per whale address almost never contained a
+        # >=50 ETH move (max seen in a batch: 2.0 ETH). Widen so the
+        # threshold has a real chance to hit: 50 per wallet, 100 for the
+        # high-traffic Uniswap router.
+        limit = 100 if dex else 50
         data = self.client.get(
             _ETHERSCAN_V2_URL,
             params=_etherscan_params(
@@ -124,26 +128,34 @@ class WhaleTrackerCrawler(BaseCrawler):
         transaction details for large transfers.
         """
         items: list[dict[str, Any]] = []
-        # Use public Solana RPC for recent signatures on major accounts
+        # Helius when the key is set (fast, authenticated); the public RPC is
+        # slow (~19s for a 5-signature probe) and rate-limited. Widen the
+        # window too: 25 signatures in, 10 tx details each (was 10/5).
+        helius_key = secret_value(get_settings().helius_api_key)
+        sol_rpc_url = (
+            f"https://mainnet.helius-rpc.com/?api-key={helius_key}"
+            if helius_key
+            else "https://api.mainnet-beta.solana.com"
+        )
         for account in SOL_WHALE_ACCOUNTS:  # Limit to avoid rate limits
             try:
                 sig_data = self.client.post(
-                    "https://api.mainnet-beta.solana.com",
+                    sol_rpc_url,
                     json={
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "getSignaturesForAddress",
-                        "params": [account, {"limit": 10}],
+                        "params": [account, {"limit": 25}],
                     },
                 ).json()
                 signatures = sig_data.get("result") or []
-                for sig_info in signatures[:5]:
+                for sig_info in signatures[:10]:
                     sig = sig_info.get("signature")
                     if not sig:
                         continue
                     # Fetch transaction details
                     tx_data = self.client.post(
-                        "https://api.mainnet-beta.solana.com",
+                        sol_rpc_url,
                         json={
                             "jsonrpc": "2.0",
                             "id": 2,

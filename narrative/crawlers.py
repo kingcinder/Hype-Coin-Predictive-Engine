@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +32,33 @@ def _iso(value: Any) -> datetime | None:
         return None
 
 
+def _rss_published(entry: Any) -> datetime | None:
+    """Parse an RSS entry's publish time.
+
+    feedparser exposes ``published_parsed`` (struct_time) and ``published``
+    (an RFC-822 string like "Fri, 20 Nov 2026 22:51:14 +0000"). ``_iso``
+    only handles ISO-8601, so every feed date came back None and all
+    news_items had a NULL published_at. Prefer the parsed struct, then
+    RFC-822, then ISO.
+    """
+    parsed = getattr(entry, "published_parsed", None)
+    if parsed is not None:
+        try:
+            return datetime(*parsed[:6], tzinfo=UTC)
+        except (TypeError, ValueError):
+            pass
+    raw = getattr(entry, "published", None)
+    if raw:
+        try:
+            from email.utils import parsedate_to_datetime
+
+            dt = parsedate_to_datetime(str(raw))
+            return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            pass
+    return _iso(raw)
+
+
 def _dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -54,7 +82,17 @@ def _epoch(value: Any) -> datetime | None:
 
 
 class RedditCrawler:
-    """Public Reddit JSON endpoints (no key, requires a User-Agent)."""
+    """Reddit posts via app-only OAuth, falling back to public JSON.
+
+    Reddit blocks logged-out access to its public ``.json`` endpoints
+    (403), so when ``REDDIT_CLIENT_ID`` / ``REDDIT_CLIENT_SECRET`` are set
+    the crawler exchanges them for an app-only bearer token and reads
+    ``https://oauth.reddit.com``. Without keys it keeps the old public
+    path as a best-effort fallback.
+    """
+
+    _OAUTH_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+    _OAUTH_BASE_URL = "https://oauth.reddit.com"
 
     def __init__(
         self,
@@ -62,19 +100,84 @@ class RedditCrawler:
         limit: int = 25,
         *,
         base_url: str = "https://www.reddit.com",
+        client_id: str | None = None,
+        client_secret: str | None = None,
     ) -> None:
         self.subreddits = subreddits
         self.limit = limit
         self.base_url = base_url.rstrip("/")
         self.http = HttpClient(base_url=self.base_url)
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._oauth_http: HttpClient | None = None
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
 
     def close(self) -> None:
         self.http.close()
+        if self._oauth_http is not None:
+            self._oauth_http.close()
+
+    def _oauth_token(self) -> str | None:
+        """App-only OAuth token, cached until shortly before expiry."""
+        if not self.client_id or not self.client_secret:
+            return None
+        if self._token and time.monotonic() < self._token_expires_at:
+            return self._token
+        try:
+            import httpx
+
+            resp = httpx.post(
+                self._OAUTH_TOKEN_URL,
+                auth=(self.client_id, self.client_secret),
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": "serpent-hype-coin-engine/0.1"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001 - no token, fall back to public
+            log.debug("reddit_oauth_token_failed", error=str(exc))
+            return None
+        token = payload.get("access_token")
+        if not token:
+            return None
+        expires_in = payload.get("expires_in") or 3600
+        self._token = token
+        self._token_expires_at = time.monotonic() + max(60, int(expires_in) - 60)
+        return token
+
+    def _http_and_headers(self) -> tuple[HttpClient, dict[str, str] | None, str | None]:
+        token = self._oauth_token()
+        if token:
+            if self._oauth_http is None:
+                self._oauth_http = HttpClient(base_url=self._OAUTH_BASE_URL)
+            return self._oauth_http, {"Authorization": f"Bearer {token}"}, token
+        return self.http, None, None
+
+    def _fetch_subreddit(
+        self, http: HttpClient, subreddit: str, headers: dict[str, str] | None
+    ) -> Any:
+        return http.get_json(
+            f"/r/{subreddit}/new.json", params={"limit": self.limit}, headers=headers
+        )
 
     def fetch(self) -> list[dict[str, Any]]:
         output: list[dict[str, Any]] = []
+        http, headers, token = self._http_and_headers()
         for subreddit in self.subreddits:
-            data = self.http.get_json(f"/r/{subreddit}/new.json", params={"limit": self.limit})
+            try:
+                data = self._fetch_subreddit(http, subreddit, headers)
+            except Exception as exc:  # noqa: BLE001 - 401 gets one token refresh
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if token and status == 401:
+                    # Token went stale mid-cycle; refresh once and retry.
+                    self._token = None
+                    self._token_expires_at = 0.0
+                    http, headers, token = self._http_and_headers()
+                    data = self._fetch_subreddit(http, subreddit, headers)
+                else:
+                    raise
             for child in (data.get("data") or {}).get("children") or []:
                 post = child.get("data") or {}
                 title = str(post.get("title") or "").strip()
@@ -128,7 +231,7 @@ class YouTubeCrawler:
                         "title": title,
                         "text": title,
                         "url": str(getattr(entry, "link", "") or ""),
-                        "published": _iso(getattr(entry, "published", None)),
+                        "published": _rss_published(entry),
                         "author": str(getattr(entry, "author", "") or ""),
                         "source_domain": "youtube.com",
                         "metrics": {"channel_id": channel_id},
@@ -352,7 +455,7 @@ class RSSNewsCrawler:
                         "title": title,
                         "text": title,
                         "url": link,
-                        "published": _iso(getattr(entry, "published", None)),
+                        "published": _rss_published(entry),
                         "author": "",
                         "source_domain": url.split("/")[2] if "//" in url else url,
                         "metrics": {"feed": url},

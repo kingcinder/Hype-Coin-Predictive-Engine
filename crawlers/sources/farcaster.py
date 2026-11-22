@@ -39,9 +39,11 @@ _FARCASTER_SEARCH_QUERIES = [
 class FarcasterCrawler(BaseCrawler):
     """Crawls Farcaster for early crypto project mentions and developer activity.
 
-    Uses the Neynar public search API. Without an API key, rate-limited to
-    ~5 req/min on the free tier. With a valid ``farcaster_api_key``, requests
-    are sent with an ``Authorization: Bearer`` header for higher limits.
+    Uses the Neynar search API, which requires an API key (free tier exists
+    at neynar.com). Without a key every request 401s, so the crawler skips
+    with a reason instead of burning calls. With a valid
+    ``farcaster_api_key``, requests are sent with an ``Authorization: Bearer``
+    header for higher limits.
     """
 
     # Neynar public API base
@@ -65,6 +67,12 @@ class FarcasterCrawler(BaseCrawler):
         self._api_key = api_key
         self._tracked_fids: list[str] = tracked_fids or []
         self._tracked_channels: list[str] = tracked_channels or []
+
+    def skip_reason(self) -> str | None:
+        """Neynar requires an API key; without one every request 401s."""
+        if not self._api_key:
+            return "FARCASTER_API_KEY is not set (Neynar requires a key; free tier at neynar.com)"
+        return None
 
     def _build_headers(self) -> dict[str, str]:
         """Build request headers, including Authorization if an API key is set."""

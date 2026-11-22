@@ -110,26 +110,39 @@ def test_cmc_with_key_is_not_reported_as_skipped() -> None:
     assert "reason" not in status
 
 
-def test_explorer_without_etherscan_key_is_skipped_with_clear_reason(session) -> None:
-    """A missing Etherscan key is a configuration skip, not an empty feed."""
+def test_explorer_without_etherscan_key_runs_rpc_scan(monkeypatch) -> None:
+    """Contract discovery no longer needs Etherscan: it scans the latest
+    blocks over the RPC pool, so a missing key is not a skip reason. The
+    old Etherscan getcontractcreation call errored on an empty address list
+    and could never enumerate deployments; the RPC scan finds creations
+    (``to`` is None) directly."""
     crawler = ExplorerCrawler(etherscan_api_key=None)
-    orch = _orchestrator_with(crawler)
+    assert crawler.skip_reason() is None
 
-    results = orch.run_all(session, force=True)
+    def fake_rpc_post(chain_slug: str, method: str, params: list) -> object:
+        if method == "eth_blockNumber":
+            return "0x64"  # block 100
+        if method == "eth_getBlockByNumber":
+            block_number = int(str(params[0]), 16)
+            if block_number == 100 and chain_slug == "ethereum":
+                return {
+                    "transactions": [
+                        {"hash": "0xabc", "from": "0xcreator", "to": None},
+                        {"hash": "0xdef", "from": "0xcreator", "to": "0x1234"},
+                    ]
+                }
+            return {"transactions": []}
+        if method == "eth_getTransactionReceipt":
+            return {"contractAddress": "0xcontract00000000000000000000000000000001"}
+        raise AssertionError(method)
 
-    detail = results["details"]["explorer"]
-    assert detail == {"status": "skipped", "reason": "ETHERSCAN_API_KEY is not set", "items": 0}
-    assert crawler.health.total_runs == 0
-    assert crawler.health.consecutive_empty_runs == 0
-    health = session.scalar(
-        select(models.SystemHealth)
-        .where(models.SystemHealth.component == "nightcrawler:explorer")
-        .order_by(models.SystemHealth.id.desc())
-    )
-    assert health is not None
-    assert health.state == "yellow"
-    assert health.message == "skipped: ETHERSCAN_API_KEY is not set"
-    assert health.error_count == 0
+    monkeypatch.setattr(crawler, "_rpc_post", fake_rpc_post)
+    items = crawler.fetch_items()
+    assert len(items) == 1  # only the to=None creation tx, not the plain transfer
+    assert items[0]["metrics"]["address"] == "0xcontract00000000000000000000000000000001"
+    assert items[0]["metrics"]["creator"] == "0xcreator"
+    assert items[0]["metrics"]["tx_hash"] == "0xabc"
+    assert items[0]["metrics"]["chain"] == "ethereum"
 
 
 def test_repeated_empty_runs_degrade_health_without_tripping_gate(session) -> None:

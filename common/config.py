@@ -223,7 +223,13 @@ class Settings(BaseSettings):
     youtube_channels_csv: str = ""
     github_search_queries_csv: str = "solana token launch,base memecoin,erc20 launch"
     hf_trending_enabled: bool = True
-    rss_feed_urls_csv: str = ""
+    # Default crypto-news RSS feeds (all verified live 2026-11-20: each
+    # returns HTTP 200 with 25-37 items). Empty the value to disable.
+    rss_feed_urls_csv: str = (
+        "https://www.coindesk.com/arc/outboundfeeds/rss,"
+        "https://cointelegraph.com/rss,"
+        "https://decrypt.co/feed"
+    )
     narrative_endpoint_pool_enabled: bool = True
     narrative_background_probe_enabled: bool = True
     narrative_probe_interval_seconds: int = 300
@@ -387,7 +393,9 @@ class Settings(BaseSettings):
     nightcrawler_enabled: bool = True
     nightcrawler_interval_minutes: int = 30
     nightcrawler_coingecko_enabled: bool = True
-    nightcrawler_pumpfun_enabled: bool = True
+    # pump.fun HTTP is Cloudflare-blocked (challenge page on every call);
+    # the signal is covered by the PumpPortal WebSocket feed instead.
+    nightcrawler_pumpfun_enabled: bool = False
     nightcrawler_defillama_enabled: bool = True
     nightcrawler_whale_enabled: bool = True
     nightcrawler_explorer_enabled: bool = True
@@ -400,7 +408,9 @@ class Settings(BaseSettings):
             "nightcrawler_nitter_enabled",
         ),
     )
-    nightcrawler_presale_enabled: bool = True
+    # Presale sources (PinkSale, CryptoRank) are Cloudflare-blocked;
+    # the crawler returns [] on every run while burning HTTP calls.
+    nightcrawler_presale_enabled: bool = False
     nightcrawler_cmc_enabled: bool = True
     cmc_api_key: SecretStr | None = None
     nightcrawler_farcaster_enabled: bool = True
@@ -410,7 +420,9 @@ class Settings(BaseSettings):
     gas_tracker_pending_tx_enabled: bool = True
     nightcrawler_coinpaprika_enabled: bool = True
     nightcrawler_github_trending_enabled: bool = True
-    github_trending_search_query: str = "crypto token memecoin created:>30d"
+    # The old default ("crypto token memecoin created:>30d") matches zero
+    # repos on GitHub search; the bare keyword is what returns results.
+    github_trending_search_query: str = "memecoin"
     # Optional GitHub token raises the search API rate limit from 10 to 5000 req/h.
     github_token: SecretStr | None = None
     nightcrawler_x_trends_enabled: bool = Field(
@@ -428,7 +440,9 @@ class Settings(BaseSettings):
     # Google Trends narrative momentum
     nightcrawler_pump_portal_enabled: bool = True
     nightcrawler_dexscreener_trends_enabled: bool = True
-    nightcrawler_google_trends_enabled: bool = True
+    # Google Trends keyless endpoints (realtimetrends/dailytrends) return
+    # 404 as of 2026-11-20; keep the crawler off until a working route exists.
+    nightcrawler_google_trends_enabled: bool = False
     # M46: when the PumpPortal HTTP endpoint is empty/failing, fall back to a
     # short-lived live WebSocket tap. Disable for deterministic HTTP-only runs.
     pump_portal_ws_fallback_enabled: bool = True
@@ -782,6 +796,17 @@ class Settings(BaseSettings):
     # wallet buys can queue copy signals from real ingestion, not only the API.
     first_buy_trade_fetch_enabled: bool = True
     first_buy_trade_max_pools_per_scan: int = 8
+    # DexScreener refresh: re-fetch known pairs once a day so today's feature
+    # points get priced. Discovery-only ingestion leaves the forecast trainer
+    # pool frozen (2,288 samples, ~1.5% of points priced); this stage revisits
+    # live pairs via token-pairs (1 call per asset). 0 disables the stage.
+    dexscreener_refresh_assets_per_scan: int = 100
+    # Only assets whose latest DexScreener snapshot is inside this window are
+    # refresh candidates: older pairs are overwhelmingly dead (40-60% of pairs
+    # are gone from DexScreener within days) and refreshing them cannot price
+    # any feature point, since a label needs a snapshot inside the point's
+    # 24h forward window.
+    dexscreener_refresh_alive_hours: int = 72
     first_buy_swap_tx_limit: int = 8
     first_buy_swap_cache_seconds: float = 300.0
     geckoterminal_min_interval_seconds: float = 2.1

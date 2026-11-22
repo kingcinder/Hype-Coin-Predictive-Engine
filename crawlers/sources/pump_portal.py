@@ -4,10 +4,11 @@ Watches the pump.fun ecosystem for brand-new token launches in real time —
 the earliest possible signal for a hyped memecoin (t0, before liquidity
 even exists). Free path: the PumpPortal WebSocket data stream
 (``wss://pumpportal.fun/api/data``, ``subscribeNewToken``) requires no API
-key. An HTTP recent-pumps endpoint is attempted first; when it is
-unavailable or empty the crawler falls back to a short-lived WebSocket tap
-that collects new-token events for a few seconds. Every item is a fresh
-launch with mint address, deployer wallet, and bonding-curve data.
+key. PumpPortal exposes no HTTP recent-pumps endpoint — the
+``api.pumpportal.io`` host the old HTTP path used does not resolve — so the
+crawler taps the WebSocket directly and collects new-token events for a few
+seconds. Every item is a fresh launch with mint address, deployer wallet,
+and bonding-curve data.
 """
 
 from __future__ import annotations
@@ -22,9 +23,8 @@ from crawlers.base import BaseCrawler
 
 log = get_logger(__name__)
 
-PUMPS_HTTP_URL = "https://api.pumpportal.io/pumps/recent"
 PUMPS_WS_URL = "wss://pumpportal.fun/api/data"
-# How long the WebSocket fallback listens for new-token events.
+# How long the WebSocket tap listens for new-token events.
 WS_TAP_SECONDS = 8.0
 # A token is "brand new" (actionable window) if created within this many
 # minutes of being observed.
@@ -32,7 +32,7 @@ NEW_TOKEN_WINDOW_MINUTES = 30
 
 
 class PumpPortalCrawler(BaseCrawler):
-    """Crawls pump.fun launches via PumpPortal HTTP, falling back to WebSocket."""
+    """Crawls pump.fun launches via the PumpPortal WebSocket tap."""
 
     def __init__(self, *, enable_ws_fallback: bool = True) -> None:
         super().__init__(
@@ -42,32 +42,15 @@ class PumpPortalCrawler(BaseCrawler):
             rate_limit_pause=1.5,
             timeout_seconds=12.0,
         )
-        # M46: the WS tap opens a real live-network connection and listens for
-        # ~8s whenever the HTTP path is empty *or fails* (including transport
-        # failures). That conflates "endpoint returned nothing" with "transport
-        # is broken" and makes the HTTP path untestable in isolation, so the
-        # fallback is now opt-out (constructor arg / setting; off in tests).
+        # The WS tap is the only live path (no HTTP endpoint exists). The
+        # flag is kept as an opt-out for offline/test environments and is
+        # wired to the pump_portal_ws_fallback_enabled setting.
         self.enable_ws_fallback = enable_ws_fallback
 
     def fetch_items(self) -> list[dict[str, Any]]:
-        items = self._fetch_http()
-        if not items and self.enable_ws_fallback:
-            log.debug("pump_portal_http_empty", reason="falling back to ws tap")
-            items = self._fetch_ws_tap()
-        return items
-
-    def _fetch_http(self) -> list[dict[str, Any]]:
-        """Attempt the recent-pumps HTTP endpoint (best-effort)."""
-        try:
-            resp = self.client.get(PUMPS_HTTP_URL)
-            if resp.status_code != 200:
-                return []
-            data = resp.json()
-            pumps = data if isinstance(data, list) else (data.get("pumps") or [])
-            return [item for pump in pumps if (item := self._pump_item(pump))][:20]
-        except Exception as exc:  # noqa: BLE001
-            log.debug("pump_portal_http_failed", error=redact_url(str(exc)))
+        if not self.enable_ws_fallback:
             return []
+        return self._fetch_ws_tap()
 
     def _fetch_ws_tap(self) -> list[dict[str, Any]]:
         """Short-lived WebSocket tap: subscribeNewToken, collect for a few seconds."""

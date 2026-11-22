@@ -537,6 +537,10 @@ def upsert_news_item(
     url_hash = stable_hash(url)
     row = session.scalar(select(models.NewsItem).where(models.NewsItem.url_hash == url_hash))
     if row:
+        # The RSS parser used to return None for every feed date, so existing
+        # rows carry a NULL published_at; backfill it when we now know it.
+        if row.published_at is None and published_at is not None:
+            row.published_at = published_at
         return row
     row = models.NewsItem(
         source_id=source_id,

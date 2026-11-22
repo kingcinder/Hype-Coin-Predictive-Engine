@@ -244,8 +244,14 @@ class NarrativeEngine:
     def _social_crawler(self, name: str, *, endpoint_url: str | None = None):
         if name == "reddit":
             subreddits = self.settings.reddit_subreddits
+            secret = self.settings.reddit_client_secret
             return (
-                RedditCrawler(subreddits, base_url=endpoint_url or "https://www.reddit.com")
+                RedditCrawler(
+                    subreddits,
+                    base_url=endpoint_url or "https://www.reddit.com",
+                    client_id=self.settings.reddit_client_id,
+                    client_secret=secret.get_secret_value() if secret is not None else None,
+                )
                 if subreddits
                 else None
             )

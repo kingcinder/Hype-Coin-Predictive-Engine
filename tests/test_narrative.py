@@ -63,6 +63,65 @@ def test_reddit_crawler_parses_public_json() -> None:
     assert items[0]["source_domain"] == "reddit.com"
 
 
+def test_reddit_crawler_oauth_uses_bearer_token() -> None:
+    """With script-app keys, RedditCrawler exchanges them for a token and
+    reads oauth.reddit.com with a Bearer header."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from common.http import HttpClient
+
+    def _fake_token_post(url, *, auth=None, data=None, headers=None, timeout=None):
+        assert url == "https://www.reddit.com/api/v1/access_token"
+        assert auth == ("dummy-id", "dummy-secret")
+        assert data == {"grant_type": "client_credentials"}
+        # A real httpx response always carries its request; raise_for_status
+        # refuses a bare Response, so attach one like the real client does.
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            json={"access_token": "tok123", "token_type": "bearer", "expires_in": 3600},
+            request=request,
+        )
+
+    payload = {
+        "data": {
+            "children": [
+                {
+                    "data": {
+                        "title": "HYPE token presale",
+                        "permalink": "/r/CryptoMoonShots/comments/abc",
+                        "selftext": "gem",
+                        "author": "shillbot",
+                        "ups": 10,
+                        "num_comments": 2,
+                    }
+                }
+            ]
+        }
+    }
+
+    seen: dict[str, object] = {}
+
+    def _fake_get_json(self, path, *, params=None, headers=None):
+        seen["path"] = path
+        seen["headers"] = headers
+        return payload
+
+    crawler = RedditCrawler(["CryptoMoonShots"], client_id="dummy-id", client_secret="dummy-secret")
+    try:
+        with patch("httpx.post", side_effect=_fake_token_post):
+            with patch.object(HttpClient, "get_json", _fake_get_json):
+                items = crawler.fetch()
+    finally:
+        crawler.close()
+    assert len(items) == 1
+    assert items[0]["title"] == "HYPE token presale"
+    assert seen["path"] == "/r/CryptoMoonShots/new.json"
+    assert seen["headers"] == {"Authorization": "Bearer tok123"}
+
+
 def test_reddit_403_records_provider_block_not_missing_oauth(session) -> None:
     class _BlockedReddit:
         def fetch(self):

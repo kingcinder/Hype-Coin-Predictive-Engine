@@ -72,6 +72,17 @@ class EVMFactoryWatcher:
             raise RuntimeError(f"{self.chain_slug}: eth_blockNumber failed")
         if cursor_block is None:
             cursor_block = self._lookback_start(latest_block)
+        if cursor_block > latest_block:
+            # A poisoned/future cursor wedges the watcher: latest <= cursor
+            # returns 0 forever with no error. Rewind to the lookback window
+            # and continue instead of staying blind.
+            log.warning(
+                "evm_mempool_cursor_rewound",
+                chain=self.chain_slug,
+                cursor_block=cursor_block,
+                latest_block=latest_block,
+            )
+            cursor_block = self._lookback_start(latest_block)
         if latest_block <= cursor_block:
             return 0
         logs = self._pair_created_logs(cursor_block, latest_block)
@@ -112,6 +123,21 @@ class EVMFactoryWatcher:
             # endpoint: degrading it would blacklist a working provider.
             if self._pool is not None and not _is_client_rejection(exc):
                 self._pool.mark_failure(endpoint)
+            if http is None and url is None and self._pool is not None:
+                # The primary (e.g. meowrpc/mainnet.base.org) 429s or drops
+                # eth_getLogs often; failing the whole chain's watch on one
+                # endpoint is what stalled the Base cursor for hours. Try the
+                # other healthy pool endpoints in the same call instead.
+                for state in sorted(
+                    self._pool.snapshot(), key=lambda item: (item.down, -item.health)
+                ):
+                    if state.url == endpoint or state.down:
+                        continue
+                    try:
+                        with HttpClient(base_url=state.url) as alt:
+                            return self._rpc(method, params, http=alt, url=state.url)
+                    except Exception:
+                        continue
             raise
         if self._pool is not None:
             self._pool.mark_success(endpoint)
