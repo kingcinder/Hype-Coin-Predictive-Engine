@@ -65,7 +65,14 @@ def test_backtest_threads_feature_source_into_scoring(session, monkeypatch) -> N
 
     captured: dict[str, str] = {}
 
-    def _fake_build(session, *, decision_ts=None, asset_ids=None, feature_source="sql"):
+    def _fake_build(
+        session,
+        *,
+        decision_ts=None,
+        asset_ids=None,
+        feature_source="sql",
+        pair_created_at=None,
+    ):
         captured["feature_source"] = feature_source
         return {}
 

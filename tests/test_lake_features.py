@@ -6,9 +6,15 @@ import pytest
 from sqlalchemy import func, select
 
 from common.config import Settings, get_settings
+from common.time import ensure_utc
 from features.definitions import FEATURE_NAMES
 from features.factory import FeatureFactory, build_and_persist_features
-from features.lake import LAKE_FEATURE_NAMES, LakeFeatureFactory
+from features.lake import (
+    LAKE_FEATURE_NAMES,
+    PAIR_CREATION_BOUND_EPSILON,
+    LakeFeatureFactory,
+    load_pair_creation_bounds,
+)
 from ingestion.holder_tracker import record_holder_metrics
 from ops.archive import LocalArchiveStore, RawEvidenceCompactor
 from storage import models
@@ -204,6 +210,25 @@ def _seed_low_liquidity_scan(session, source, asset, pair, *, with_sql_rows: boo
             ],
         },
         observed_at=observed,
+    )
+    # Production-faithful companion: processing the feed item stores the
+    # individual pool payload as its own evidence row (the one SQL's
+    # ContractFlag references). The lake counts per-pool payloads, not the
+    # feed envelope, so the envelope alone would undercount by one. Stored a
+    # few ms later, so the envelope still wins the market first-wins dedup.
+    store_raw_evidence(
+        session,
+        source=source,
+        payload=_pool_payload(
+            pair_address=PAIR_ADDRESS,
+            price=0.5,
+            volume=100,
+            liquidity=900,
+            buys=1,
+            sells=1,
+            created_at=asset.first_seen_at,
+        ),
+        observed_at=observed + timedelta(milliseconds=20),
     )
     if with_sql_rows:
         ts = observed.replace(minute=0, second=0, microsecond=0)
@@ -1056,9 +1081,9 @@ def test_lake_reconstruction_cache_avoids_recompute(session, tmp_path, monkeypat
     calls = {"n": 0}
     original = factory._reconstruct_uncached
 
-    def counting_reconstruct(asset_address, decision_ts):
+    def counting_reconstruct(asset_address, decision_ts, pair_created_at=None):
         calls["n"] += 1
-        return original(asset_address, decision_ts)
+        return original(asset_address, decision_ts, pair_created_at)
 
     monkeypatch.setattr(factory, "_reconstruct_uncached", counting_reconstruct)
 
@@ -1243,7 +1268,7 @@ def test_lake_cache_consistent_under_concurrent_builds(session, tmp_path) -> Non
     LakeFeatureFactory.reset_cache_stats()
 
     baseline = factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION)
-    key = (factory._store_key(), asset.address, DECISION)
+    key = (factory._store_key(), asset.address, DECISION, None)
 
     def _run_concurrent(worker, n: int = 8) -> list[object]:
         barrier = threading.Barrier(n)
@@ -1282,8 +1307,405 @@ def test_lake_cache_consistent_under_concurrent_builds(session, tmp_path) -> Non
     with LakeFeatureFactory._cache_lock:
         cached_keys = set(LakeFeatureFactory._cache)
     assert key in cached_keys
-    assert (factory._store_key(), other, DECISION) in cached_keys
+    assert (factory._store_key(), other, DECISION, None) in cached_keys
     stats = LakeFeatureFactory.cache_stats()
     assert stats["hits"] + stats["misses"] == len(results) * len(addresses)
 
     LakeFeatureFactory.clear_cache()
+
+
+def test_lake_dedupe_excludes_observations_before_pair_creation(session, tmp_path) -> None:
+    """The lake's first-wins dedup must not select an observation that predates
+    the pair's creation in SQL: the pair is created mid-hour, an earlier
+    observation in the same hour bucket belongs to the pre-creation feed, and
+    SQL's snapshot is the first observation after creation (production case:
+    asset 1303, 2026-11-14 07:00/src2, lake 07:20:14 vs SQL 07:20:44)."""
+    chain = get_or_create_chain(
+        session, "solana", name="Solana", vm_type="solana", native_symbol="SOL"
+    )
+    source = get_or_create_source(
+        session,
+        name="geckoterminal",
+        source_type="market_data",
+        tier="venue",
+        base_url="https://api.geckoterminal.com",
+    )
+    created_at = DECISION - timedelta(hours=6)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address=BASE_ADDRESS,
+        symbol="LAKE",
+        name="Lake Token",
+        first_seen_at=created_at,
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="So11111111111111111111111111111111111111112",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=created_at - timedelta(days=365),
+    )
+    pool, pair = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address=PAIR_ADDRESS,
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=created_at,
+    )
+    pool.created_at = DECISION - timedelta(minutes=40)
+    pair.created_at = DECISION - timedelta(minutes=40)
+    # Pre-creation (11:10) and first post-creation (11:30) observations in the
+    # same 11:00 hour bucket; SQL's snapshot is the post-creation one.
+    pre_observed = DECISION - timedelta(minutes=50)
+    post_observed = DECISION - timedelta(minutes=30)
+    store_raw_evidence(
+        session,
+        source=source,
+        payload={
+            "chain": "solana",
+            "new_pools": [
+                _pool_payload(
+                    pair_address=PAIR_ADDRESS,
+                    price=9.99,
+                    volume=100,
+                    liquidity=50_000,
+                    buys=1,
+                    sells=1,
+                    created_at=created_at,
+                )
+            ],
+        },
+        observed_at=pre_observed,
+    )
+    raw_post = store_raw_evidence(
+        session,
+        source=source,
+        payload={
+            "chain": "solana",
+            "new_pools": [
+                _pool_payload(
+                    pair_address=PAIR_ADDRESS,
+                    price=1.50,
+                    volume=5000,
+                    liquidity=50_000,
+                    buys=10,
+                    sells=2,
+                    created_at=created_at,
+                )
+            ],
+        },
+        observed_at=post_observed,
+    )
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=post_observed.replace(minute=0, second=0, microsecond=0),
+        observed_at=post_observed,
+        price_usd=1.50,
+        volume_usd=5000,
+        buys=10,
+        sells=2,
+        raw_evidence_id=raw_post.id,
+    )
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    factory = LakeFeatureFactory(store=LocalArchiveStore(tmp_path), settings=settings)
+    # Unbounded: the pre-creation observation wins the bucket.
+    unbounded = factory._series_from_lake(asset.address, DECISION)
+    assert len(unbounded.market_rows) == 1
+    assert unbounded.market_rows[0].price_usd == pytest.approx(9.99)
+    # Bounded: the post-creation observation wins, matching SQL.
+    bounds = load_pair_creation_bounds(session, asset_ids=[asset.id])
+    assert bounds[PAIR_ADDRESS] == ensure_utc(pair.created_at) - PAIR_CREATION_BOUND_EPSILON
+    bounded = factory._series_from_lake(asset.address, DECISION, bounds)
+    assert len(bounded.market_rows) == 1
+    assert bounded.market_rows[0].price_usd == pytest.approx(1.50)
+    assert bounded.market_rows[0].observed_at == post_observed
+    # And the feature values match the SQL path with the bound applied.
+    sql_values = {
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+    }
+    lake_values = factory.build_for_asset(
+        asset_address=asset.address, decision_ts=DECISION, pair_created_at=bounds
+    )
+    assert lake_values["buy_sell_ratio"].value == pytest.approx(sql_values["buy_sell_ratio"].value)
+    assert lake_values["unique_buyers_estimate"].value == pytest.approx(
+        sql_values["unique_buyers_estimate"].value
+    )
+
+
+def test_lake_dexscreener_all_zero_volume_matches_sql(session, tmp_path) -> None:
+    """A DexScreener payload whose volume windows are all zero stores 0.0 in
+    SQL (the normalizer's ``h1 or h24 or m5`` chain), not NULL: the lake must
+    emit 0.0 too, so the volume features agree instead of going missing."""
+    chain = get_or_create_chain(
+        session, "solana", name="Solana", vm_type="solana", native_symbol="SOL"
+    )
+    source = get_or_create_source(
+        session,
+        name="dexscreener",
+        source_type="market_data",
+        tier="venue",
+        base_url="https://api.dexscreener.com",
+    )
+    created_at = DECISION - timedelta(hours=6)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address=BASE_ADDRESS,
+        symbol="LAKE",
+        name="Lake Token",
+        first_seen_at=created_at,
+    )
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="So11111111111111111111111111111111111111112",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=created_at - timedelta(days=365),
+    )
+    pool, pair = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address=PAIR_ADDRESS,
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=created_at,
+    )
+    pool.created_at = created_at
+    pair.created_at = created_at
+
+    def dex_payload(volume, price, buys, sells):
+        return {
+            "chainId": "solana",
+            "pairAddress": PAIR_ADDRESS,
+            "baseToken": {"address": BASE_ADDRESS, "symbol": "LAKE"},
+            "quoteToken": {"address": "So11111111111111111111111111111111111111112"},
+            "priceUsd": str(price),
+            "pairCreatedAt": int(created_at.timestamp() * 1000),
+            "volume": volume,
+            "txns": {
+                "h1": {"buys": buys, "sells": sells},
+                "h24": {"buys": buys * 6, "sells": sells * 6},
+                "m5": {"buys": max(1, buys // 2), "sells": max(1, sells // 2)},
+            },
+            "liquidity": {"usd": "50000.0"},
+        }
+
+    prior_observed = DECISION - timedelta(hours=2)
+    zero_observed = DECISION - timedelta(minutes=5)
+    raw_prior = store_raw_evidence(
+        session,
+        source=source,
+        payload=dex_payload({"h1": 10000, "h24": 60000, "m5": 5000}, 2.0, 7, 3),
+        observed_at=prior_observed,
+    )
+    raw_zero = store_raw_evidence(
+        session,
+        source=source,
+        payload=dex_payload({"h1": 0, "h24": 0, "m5": 0}, 2.5, 7, 3),
+        observed_at=zero_observed,
+    )
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=prior_observed.replace(minute=0, second=0, microsecond=0),
+        observed_at=prior_observed,
+        price_usd=2.0,
+        volume_usd=10000,
+        buys=7,
+        sells=3,
+        raw_evidence_id=raw_prior.id,
+    )
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=zero_observed.replace(minute=0, second=0, microsecond=0),
+        observed_at=zero_observed,
+        price_usd=2.5,
+        volume_usd=0.0,
+        buys=7,
+        sells=3,
+        raw_evidence_id=raw_zero.id,
+    )
+    settings = _settings(tmp_path)
+    RawEvidenceCompactor(store=LocalArchiveStore(tmp_path), settings=settings).compact(
+        session, DECISION + timedelta(minutes=30)
+    )
+    session.flush()
+
+    factory = LakeFeatureFactory(store=LocalArchiveStore(tmp_path), settings=settings)
+    series = factory._series_from_lake(BASE_ADDRESS, DECISION)
+    assert len(series.market_rows) == 2
+    assert series.market_rows[-1].volume_usd == 0.0
+    sql_values = {
+        value.name: value for value in FeatureFactory().build_for_asset(session, asset, DECISION)
+    }
+    lake_values = factory.build_for_asset(asset_address=BASE_ADDRESS, decision_ts=DECISION)
+    assert lake_values["volume_acceleration"].missing == sql_values["volume_acceleration"].missing
+    if not sql_values["volume_acceleration"].missing:
+        assert lake_values["volume_acceleration"].value == pytest.approx(
+            sql_values["volume_acceleration"].value, rel=1e-6
+        )
+
+
+def test_lake_cache_separates_bounded_and_unbounded(session, tmp_path, monkeypatch) -> None:
+    """The (asset, hour) cache key carries a fingerprint of the pair-creation
+    bounds: a bounded and an unbounded reconstruction of the same hour must
+    not share an entry, and repeating the same bounds must hit."""
+    asset = _seed_sql_and_lake(session, tmp_path)
+    session.commit()
+    store = LocalArchiveStore(tmp_path)
+    settings = _settings(tmp_path)
+    factory = LakeFeatureFactory(store=store, settings=settings)
+    LakeFeatureFactory.clear_cache()
+
+    calls = {"n": 0}
+    original = factory._reconstruct_uncached
+
+    def counting_reconstruct(asset_address, decision_ts, pair_created_at=None):
+        calls["n"] += 1
+        return original(asset_address, decision_ts, pair_created_at)
+
+    monkeypatch.setattr(factory, "_reconstruct_uncached", counting_reconstruct)
+    bounds = load_pair_creation_bounds(session, asset_ids=[asset.id])
+
+    factory.build_for_asset(
+        asset_address=asset.address, decision_ts=DECISION, pair_created_at=bounds
+    )
+    assert calls["n"] == 1
+    # Same bounds -> cache hit.
+    factory.build_for_asset(
+        asset_address=asset.address, decision_ts=DECISION, pair_created_at=bounds
+    )
+    assert calls["n"] == 1
+    # No bounds -> different fingerprint -> recompute.
+    factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION)
+    assert calls["n"] == 2
+    # No bounds again -> hit.
+    factory.build_for_asset(asset_address=asset.address, decision_ts=DECISION)
+    assert calls["n"] == 2
+    # Bounded again -> hit on the bounded entry.
+    factory.build_for_asset(
+        asset_address=asset.address, decision_ts=DECISION, pair_created_at=bounds
+    )
+    assert calls["n"] == 2
+
+    LakeFeatureFactory.clear_cache()
+
+
+def test_load_pair_creation_bounds_earliest_per_pool(session) -> None:
+    """load_pair_creation_bounds returns the earliest Pair.created_at per pool
+    address, less the same-pass lag epsilon, and honors the asset filter."""
+    chain = get_or_create_chain(
+        session, "solana", name="Solana", vm_type="solana", native_symbol="SOL"
+    )
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address=BASE_ADDRESS,
+        symbol="LAKE",
+        name="Lake Token",
+        first_seen_at=DECISION - timedelta(hours=6),
+    )
+    quote1 = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="So11111111111111111111111111111111111111112",
+        symbol="WETH",
+        name="Wrapped Ether",
+        first_seen_at=DECISION - timedelta(days=365),
+    )
+    quote2 = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="So22222222222222222222222222222222222222222",
+        symbol="WETH2",
+        name="Wrapped Ether 2",
+        first_seen_at=DECISION - timedelta(days=365),
+    )
+    other_asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="TokenOther11111111111111111111111111111111",
+        symbol="OTHER",
+        name="Other Token",
+        first_seen_at=DECISION - timedelta(hours=6),
+    )
+    # Two pairs share pool A (created 6h and 2h ago); pool B has one pair.
+    pool_a, pair_a1 = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address=PAIR_ADDRESS,
+        base_asset_id=asset.id,
+        quote_asset_id=quote1.id,
+        created_at_source=DECISION - timedelta(hours=6),
+    )
+    _, pair_a2 = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address=PAIR_ADDRESS,
+        base_asset_id=asset.id,
+        quote_asset_id=quote2.id,
+        created_at_source=DECISION - timedelta(hours=6),
+    )
+    pool_b, pair_b = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address="PairOther111111111111111111111111111111111",
+        base_asset_id=asset.id,
+        quote_asset_id=quote1.id,
+        created_at_source=DECISION - timedelta(hours=6),
+    )
+    pool_c, pair_c = upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address="PairThird111111111111111111111111111111111",
+        base_asset_id=other_asset.id,
+        quote_asset_id=quote1.id,
+        created_at_source=DECISION - timedelta(hours=6),
+    )
+    pool_a.created_at = DECISION - timedelta(hours=6)
+    pair_a1.created_at = DECISION - timedelta(hours=6)
+    pair_a2.created_at = DECISION - timedelta(hours=2)
+    pool_b.created_at = DECISION - timedelta(hours=3)
+    pair_b.created_at = DECISION - timedelta(hours=3)
+    pool_c.created_at = DECISION - timedelta(hours=1)
+    pair_c.created_at = DECISION - timedelta(hours=1)
+    session.flush()
+
+    bounds = load_pair_creation_bounds(session)
+    assert bounds[PAIR_ADDRESS] == ensure_utc(DECISION - timedelta(hours=6)) - (
+        PAIR_CREATION_BOUND_EPSILON
+    )
+    assert (
+        bounds["PairOther111111111111111111111111111111111"]
+        == ensure_utc(DECISION - timedelta(hours=3)) - PAIR_CREATION_BOUND_EPSILON
+    )
+    assert (
+        bounds["PairThird111111111111111111111111111111111"]
+        == ensure_utc(DECISION - timedelta(hours=1)) - PAIR_CREATION_BOUND_EPSILON
+    )
+    only_asset = load_pair_creation_bounds(session, asset_ids=[asset.id])
+    assert set(only_asset) == {
+        PAIR_ADDRESS,
+        "PairOther111111111111111111111111111111111",
+    }
+    assert load_pair_creation_bounds(session, asset_ids=[999999]) == {}

@@ -11,6 +11,15 @@ shared ``compute_market_block`` math — the *identical* formulas the SQL path
 uses. A parity test (`tests/test_lake_features.py`) seeds both paths from the
 same underlying numbers and asserts the feature values match feature-for-feature.
 
+The lake's first-wins dedup is additionally constrained to observations at
+or after a pair's creation in SQL (``Pair.created_at``), supplied by the
+caller as ``pair_created_at``: a snapshot can only be written after its
+pair exists, so an observation that predates creation can never be the row
+SQL's first-wins snapshot represents. The same bound applies to the
+low-liquidity flag scans. When no bounds are supplied the reconstruction
+is unconstrained (the pre-fix behavior); the parity job, the lake replay
+path, and backtests supply them.
+
 Beyond the market/liquidity block, the lake path reconstructs the on-chain
 holder and contract-flag features from the archived RPC evidence payloads:
 
@@ -42,10 +51,12 @@ works against the local disk lake (zero-container profile) and MinIO/S3
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import threading
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -136,6 +147,16 @@ pools AS (
             'attributes', json_object(
                 'address', json_extract_string(r.payload_json, '$.pairAddress'),
                 'base_token_price_usd', json_extract_string(r.payload_json, '$.priceUsd'),
+                -- Volume mirrors the DexScreener normalizer's ``or`` chain
+                -- (``volume.h1 or volume.h24 or volume.m5``): the first
+                -- nonzero window wins; with no nonzero window the result is
+                -- the m5 value -- 0.0 when m5 is present-but-zero, NULL only
+                -- when every window is missing -- because SQL stores an
+                -- all-zero payload as 0.0. The computed volume is emitted
+                -- as h1 (h24/m5 NULL); ``norm`` only reads the COALESCE of
+                -- the three windows, so the value is what the SQL path has.
+                -- The DexScreener payload carries JSON numbers, so ``<> 0``
+                -- is the right truthiness test for the ``or`` chain.
                 'volume_usd', json_object(
                     'h1', CASE
                         WHEN COALESCE(
@@ -143,27 +164,26 @@ pools AS (
                                 json_extract_string(r.payload_json, '$.volume.h1') AS DOUBLE
                             ),
                             0
-                        ) = 0 THEN NULL
-                        ELSE json_extract_string(r.payload_json, '$.volume.h1')
-                    END,
-                    'h24', CASE
+                        ) <> 0 THEN json_extract_string(r.payload_json, '$.volume.h1')
                         WHEN COALESCE(
                             TRY_CAST(
                                 json_extract_string(r.payload_json, '$.volume.h24') AS DOUBLE
                             ),
                             0
-                        ) = 0 THEN NULL
-                        ELSE json_extract_string(r.payload_json, '$.volume.h24')
-                    END,
-                    'm5', CASE
+                        ) <> 0 THEN json_extract_string(r.payload_json, '$.volume.h24')
                         WHEN COALESCE(
                             TRY_CAST(
                                 json_extract_string(r.payload_json, '$.volume.m5') AS DOUBLE
                             ),
                             0
-                        ) = 0 THEN NULL
-                        ELSE json_extract_string(r.payload_json, '$.volume.m5')
-                    END
+                        ) <> 0 THEN json_extract_string(r.payload_json, '$.volume.m5')
+                        WHEN json_extract_string(r.payload_json, '$.volume.m5') IS NOT NULL
+                            AND json_extract_string(r.payload_json, '$.volume.m5') <> ''
+                            THEN '0'
+                        ELSE NULL
+                    END,
+                    'h24', NULL,
+                    'm5', NULL
                 ),
                 'transactions', json_object(
                     'h1', json_object(
@@ -236,6 +256,22 @@ norm AS (
       AND pair_address IS NOT NULL
       AND LIST_CONTAINS($asset_addresses, base_address)
 ),
+-- A snapshot can only be written after its pair exists in SQL, so the lake
+-- must not select observations that predate the pair's creation: the
+-- earliest observation at/after ``Pair.created_at`` is the one SQL's
+-- first-wins snapshot represents. ``$pair_bound_keys`` / ``$pair_bound_values``
+-- carry the map (pool address -> earliest SQL ``Pair.created_at``, naive
+-- UTC); a pair absent from the map, or an empty map, leaves that pair
+-- unconstrained (the pre-fix behavior).
+bounds AS (
+    SELECT MAP($pair_bound_keys, $pair_bound_values) AS pair_bounds
+),
+bounded AS (
+    SELECT norm.*
+    FROM norm, bounds
+    WHERE bounds.pair_bounds[pair_address] IS NULL
+        OR observed_at >= bounds.pair_bounds[pair_address]
+),
 -- One row per (pair, hour, source), matching insert_market_snapshot_once.
 -- One row per (pair, hour, source), matching insert_market_snapshot_once's
 -- first-wins dedup. Both ingestion shapes are represented: the aggregate
@@ -249,7 +285,7 @@ deduped AS (
                 PARTITION BY pair_address, ts, source_id
                 ORDER BY observed_at
             ) AS rn
-        FROM norm
+        FROM bounded
     )
     WHERE rn = 1
 )
@@ -324,6 +360,20 @@ pools AS (
         from_json(json_extract_string(r.payload_json, '$.new_pools'), '["JSON"]')
     ) AS t(pool)
 )
+-- One row per feed-envelope pool item. The feed envelope is the flag count's
+-- unit: one envelope item per poll per pool, and its content changes each
+-- poll, so (unlike per-pool payloads, whose unchanged repeats collapse
+-- under the compactor's content-hash dedupe) the envelope count tracks the
+-- number of processing passes -- which is what SQL's per-pass
+-- low_liquidity flag count is. Per-pool payloads are deliberately NOT
+-- counted: the same scan's individual pool payload would double-count, and
+-- unchanged per-pool repeats undercount. Residual gaps: pools past the
+-- feed window (per-pool polls keep flagging after the feed stops listing
+-- them) and re-processings of the same evidence (SQL flags again; the lake
+-- has no new row). The flag count is deliberately NOT bounded by pair
+-- creation: flags reference the contract, not the pair, so a legitimate
+-- flag can predate ``Pair.created_at`` (the pair row may be inserted by a
+-- later pass); bounding them created 13 new undercounts on 2026-11-16.
 SELECT
     observed_at,
     split_part(
@@ -357,6 +407,77 @@ class LakeReconstruction:
     suspicious_contract_flags: float | None
 
 
+# Same-pass processing lag allowance for the pair-creation bound. A
+# snapshot's ``observed_at`` is stamped when its payload is received; the
+# ``Pair`` row is inserted a few milliseconds later in the same ingestion
+# pass, so the first snapshot for a pair can predate ``Pair.created_at`` by
+# that lag. Measured on the lab DB (3,355 pairs): the first snapshot's
+# observed_at is within 85ms before ``Pair.created_at`` (median 0.000s), while
+# genuinely pre-creation observations are a poll interval (>= 30s) earlier.
+# 5s sits cleanly between the two, so the bound keeps same-pass rows and
+# still excludes pre-creation rows.
+PAIR_CREATION_BOUND_EPSILON = timedelta(seconds=5)
+
+
+def load_pair_creation_bounds(
+    session: Session, *, asset_ids: list[int] | None = None
+) -> dict[str, datetime]:
+    """Earliest SQL ``Pair.created_at`` per pool address.
+
+    A snapshot can only be written after its pair exists in SQL, so the
+    lake's first-wins dedup must not select observations that predate the
+    pair's creation. The bound is the earliest ``Pair.created_at`` for the
+    pool address (several ``Pair`` rows can share one pool address when the
+    pair was re-created), less ``PAIR_CREATION_BOUND_EPSILON`` for the
+    same-pass processing lag (see above). Returned datetimes are aware UTC;
+    a pool address with no pair row is absent, and a pair absent from the map
+    is unconstrained in the reconstruction.
+    """
+    stmt = (
+        select(models.Pool.address, func.min(models.Pair.created_at))
+        .join(models.Pair, models.Pair.pool_id == models.Pool.id)
+        .group_by(models.Pool.address)
+    )
+    if asset_ids is not None:
+        stmt = stmt.where(models.Pair.base_asset_id.in_(asset_ids))
+    return {
+        str(address): ensure_utc(created) - PAIR_CREATION_BOUND_EPSILON
+        for address, created in session.execute(stmt).all()
+        if address and created is not None
+    }
+
+
+def _naive_pair_bounds(
+    pair_created_at: Mapping[str, datetime] | None,
+) -> dict[str, datetime]:
+    """Pair-creation bounds as naive UTC datetimes (the lake's TIMESTAMP type)."""
+    if not pair_created_at:
+        return {}
+    return {
+        address: ensure_utc(created).replace(tzinfo=None)
+        for address, created in pair_created_at.items()
+        if created is not None
+    }
+
+
+def _bounds_fingerprint(pair_created_at: Mapping[str, datetime] | None) -> str | None:
+    """Short stable fingerprint of the pair-creation bounds for the cache key.
+
+    The reconstruction depends on the bounds, so two reconstructions of the
+    same (store, asset, hour) with different bounds must not share a cache
+    entry. ``None`` when no bounds are supplied.
+    """
+    if not pair_created_at:
+        return None
+    digest = hashlib.sha256()
+    for address in sorted(pair_created_at):
+        digest.update(address.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(ensure_utc(pair_created_at[address]).isoformat().encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()[:16]
+
+
 class LakeFeatureFactory:
     """Computes the lake-covered feature block from the Parquet lake: the
     market/liquidity series plus the on-chain holder and contract-flag
@@ -368,7 +489,8 @@ class LakeFeatureFactory:
     interchangeable for the lake-covered features.
 
     Reconstructions are cached at the class level, keyed by
-    ``(store, asset address, hour)``: repeated backtest steps over the same
+    ``(store, asset address, hour, pair-creation-bounds fingerprint)``:
+    repeated backtest steps over the same
     window create a fresh ``LakeFeatureFactory`` every hour, and a per-instance
     cache would be useless. The cache is a bounded LRU, is exact when the
     decision lands on an hour boundary (the backtest contract — ``hours_between``
@@ -379,9 +501,13 @@ class LakeFeatureFactory:
     :meth:`clear_cache` if new evidence is compacted into the lake mid-process.
     """
 
-    # Class-level ``(store, asset_address, hour) -> LakeReconstruction``
-    # cache, shared across factory instances, bounded via LRU eviction.
-    _cache: OrderedDict[tuple[object, str, datetime], LakeReconstruction] = OrderedDict()
+    # Class-level ``(store, asset_address, hour, bounds fingerprint) ->
+    # LakeReconstruction`` cache, shared across factory instances,
+    # bounded via LRU eviction. The fingerprint is ``None`` when the
+    # reconstruction ran unconstrained.
+    _cache: OrderedDict[tuple[object, str, datetime, str | None], LakeReconstruction] = (
+        OrderedDict()
+    )
     _cache_lock = threading.RLock()
     cache_max_entries: int = 4096
     # Process-lifetime cache counters: a hit serves a reconstruction from the
@@ -448,12 +574,23 @@ class LakeFeatureFactory:
 
     @require_decision_ts
     def build_for_asset(
-        self, *, asset_address: str, decision_ts: datetime
+        self,
+        *,
+        asset_address: str,
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> dict[str, FeatureValue]:
         """Reconstruct the lake-covered features for one asset: the
         market/liquidity block plus the on-chain holder and contract-flag
-        features, with the same missing semantics the SQL path reports."""
-        recon = self._reconstruct(asset_address, decision_ts)
+        features, with the same missing semantics the SQL path reports.
+
+        ``pair_created_at`` maps pool address -> earliest SQL
+        ``Pair.created_at`` (see :func:`load_pair_creation_bounds`); it
+        constrains the lake's first-wins dedup to observations at/after pair
+        creation, matching the SQL snapshot path. ``None`` reconstructs
+        unconstrained (the pre-fix behavior).
+        """
+        recon = self._reconstruct(asset_address, decision_ts, pair_created_at)
         check_rows_point_in_time(recon.market_rows, decision_ts, feature_name="lake_market_block")
         check_rows_point_in_time(
             recon.liquidity_rows, decision_ts, feature_name="lake_market_block"
@@ -462,7 +599,10 @@ class LakeFeatureFactory:
 
     @require_decision_ts
     def build_for_assets(
-        self, addresses: list[str], decision_ts: datetime
+        self,
+        addresses: list[str],
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> dict[str, dict[str, FeatureValue]]:
         """Reconstruct the lake-covered block for many assets in ONE pass: the
         Parquet lake is downloaded once and all assets are queried in a single
@@ -471,18 +611,21 @@ class LakeFeatureFactory:
 
         Honors the class-level ``(asset, hour)`` cache for hour-boundary
         decisions (the backtest contract); sub-hour decision times always
-        compute fresh.
+        compute fresh. The cache key also carries a fingerprint of
+        ``pair_created_at``, so a bounded and an unbounded reconstruction of
+        the same (store, asset, hour) never share an entry.
         """
         decision_ts = ensure_utc(decision_ts)
         hour = floor_to_hour(decision_ts)
         cacheable = decision_ts == hour
         store_key = self._store_key()
+        bounds_fingerprint = _bounds_fingerprint(pair_created_at)
         cached: dict[str, LakeReconstruction] = {}
         todo: list[str] = []
         if cacheable:
             with self._cache_lock:
                 for address in addresses:
-                    entry = self._cache.get((store_key, address, hour))
+                    entry = self._cache.get((store_key, address, hour, bounds_fingerprint))
                     if entry is not None:
                         cached[address] = entry
                         self._count_hit()
@@ -492,7 +635,7 @@ class LakeFeatureFactory:
             todo = list(addresses)
         recons: dict[str, LakeReconstruction] = dict(cached)
         if todo:
-            batch = self._reconstruct_batch(todo, decision_ts)
+            batch = self._reconstruct_batch(todo, decision_ts, pair_created_at)
             recons.update(batch)
             self._count_miss(len(todo))
             if cacheable:
@@ -500,7 +643,7 @@ class LakeFeatureFactory:
                     for address, recon in batch.items():
                         if len(self._cache) >= self.cache_max_entries:
                             self._cache.popitem(last=False)
-                        self._cache[(store_key, address, hour)] = recon
+                        self._cache[(store_key, address, hour, bounds_fingerprint)] = recon
         # Point-in-time enforcement (plan #8): defensive second net behind
         # the ``observed_at <= $decision_ts`` SQL filters - a future-observed
         # row fails the replay instead of leaking into the features.
@@ -569,6 +712,7 @@ class LakeFeatureFactory:
         *,
         decision_ts: datetime,
         asset_ids: list[int] | None = None,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> dict[int, dict[str, FeatureValue]]:
         """Compute the lake-covered block (market/liquidity + holder +
         contract flags) for each asset from the archived Parquet lake and
@@ -579,6 +723,9 @@ class LakeFeatureFactory:
         SQL path (same batched ``upsert_features``), without touching any live
         normalized tables. All assets are reconstructed in one download /
         one DuckDB session per decision time.
+
+        When ``pair_created_at`` is not supplied it is loaded from the
+        session, so replay rows match the SQL path's pair-creation bound.
         """
         stmt = select(models.Asset)
         if asset_ids is not None:
@@ -586,7 +733,14 @@ class LakeFeatureFactory:
         assets = session.scalars(stmt).all()
         if not assets:
             return {}
-        values_by_asset = self.build_for_assets([asset.address for asset in assets], decision_ts)
+        bounds = (
+            pair_created_at
+            if pair_created_at is not None
+            else load_pair_creation_bounds(session, asset_ids=[asset.id for asset in assets])
+        )
+        values_by_asset = self.build_for_assets(
+            [asset.address for asset in assets], decision_ts, pair_created_at=bounds
+        )
         output: dict[int, dict[str, FeatureValue]] = {}
         for asset in assets:
             values = values_by_asset[asset.address]
@@ -612,12 +766,22 @@ class LakeFeatureFactory:
             )
         return output
 
-    def _series_from_lake(self, asset_address: str, decision_ts: datetime) -> LakeMarketSeries:
+    def _series_from_lake(
+        self,
+        asset_address: str,
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
+    ) -> LakeMarketSeries:
         """Reconstruct the normalized market/liquidity series via DuckDB."""
-        recon = self._reconstruct(asset_address, decision_ts)
+        recon = self._reconstruct(asset_address, decision_ts, pair_created_at)
         return LakeMarketSeries(recon.market_rows, recon.liquidity_rows, recon.pair_created_at)
 
-    def _reconstruct(self, asset_address: str, decision_ts: datetime) -> LakeReconstruction:
+    def _reconstruct(
+        self,
+        asset_address: str,
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
+    ) -> LakeReconstruction:
         """Reconstruct for an asset at a decision time, serving the
         ``(asset, hour)`` cache when the decision lands on an hour boundary.
 
@@ -630,14 +794,19 @@ class LakeFeatureFactory:
         hour = floor_to_hour(decision_ts)
         if decision_ts != hour:
             self._count_miss()
-            return self._reconstruct_uncached(asset_address, decision_ts)
-        key = (self._store_key(), asset_address, hour)
+            return self._reconstruct_uncached(asset_address, decision_ts, pair_created_at)
+        key = (
+            self._store_key(),
+            asset_address,
+            hour,
+            _bounds_fingerprint(pair_created_at),
+        )
         with self._cache_lock:
             cached = self._cache.get(key)
         if cached is not None:
             self._count_hit()
             return cached
-        recon = self._reconstruct_uncached(asset_address, decision_ts)
+        recon = self._reconstruct_uncached(asset_address, decision_ts, pair_created_at)
         with self._cache_lock:
             if len(self._cache) >= self.cache_max_entries:
                 self._cache.popitem(last=False)
@@ -646,13 +815,19 @@ class LakeFeatureFactory:
         return recon
 
     def _reconstruct_uncached(
-        self, asset_address: str, decision_ts: datetime
+        self,
+        asset_address: str,
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> LakeReconstruction:
         """Reconstruct one asset, delegating to the batched run."""
-        return self._reconstruct_batch([asset_address], decision_ts)[asset_address]
+        return self._reconstruct_batch([asset_address], decision_ts, pair_created_at)[asset_address]
 
     def _reconstruct_batch(
-        self, addresses: list[str], decision_ts: datetime
+        self,
+        addresses: list[str],
+        decision_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> dict[str, LakeReconstruction]:
         """Reconstruct many assets in ONE pass: list and download the Parquet
         lake once, then query all assets in a single DuckDB session.
@@ -682,7 +857,9 @@ class LakeFeatureFactory:
                 files.append(str(dest))
             con = duckdb.connect()
             try:
-                market_by_asset = self._market_series_batch(con, files, addresses, naive_ts)
+                market_by_asset = self._market_series_batch(
+                    con, files, addresses, naive_ts, pair_created_at
+                )
                 holder_by_asset = self._holder_features_batch(con, files, addresses, naive_ts)
                 flag_by_asset = self._flag_count_batch(con, files, addresses, naive_ts)
             finally:
@@ -710,9 +887,12 @@ class LakeFeatureFactory:
         files: list[str],
         asset_address: str,
         naive_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> tuple[list[SimpleNamespace], list[SimpleNamespace], datetime | None]:
         """Single-asset wrapper over the batched market-series reconstruction."""
-        return self._market_series_batch(con, files, [asset_address], naive_ts)[asset_address]
+        return self._market_series_batch(con, files, [asset_address], naive_ts, pair_created_at)[
+            asset_address
+        ]
 
     def _market_series_batch(
         self,
@@ -720,17 +900,28 @@ class LakeFeatureFactory:
         files: list[str],
         addresses: list[str],
         naive_ts: datetime,
+        pair_created_at: Mapping[str, datetime] | None = None,
     ) -> dict[str, tuple[list[SimpleNamespace], list[SimpleNamespace], datetime | None]]:
         """Reconstruct the market/liquidity series for all assets in one query
-        (the body of the old ``_series_from_lake``, batched)."""
+        (the body of the old ``_series_from_lake``, batched).
+
+        ``pair_created_at`` (pool address -> earliest SQL ``Pair.created_at``)
+        bounds the first-wins dedup to observations at/after pair creation,
+        matching the SQL snapshot path; an empty map leaves every pair
+        unconstrained.
+        """
         if not addresses:
             return {}
+        bounds = _naive_pair_bounds(pair_created_at)
+        bound_keys = sorted(bounds)
         rows = con.execute(
             _RECONSTRUCT_SQL,
             {
                 "files": files,
                 "asset_addresses": addresses,
                 "decision_ts": naive_ts,
+                "pair_bound_keys": bound_keys,
+                "pair_bound_values": [bounds[key] for key in bound_keys],
             },
         ).fetchall()
         columns = [description[0] for description in con.description]
@@ -925,11 +1116,15 @@ class LakeFeatureFactory:
         naive_ts: datetime,
     ) -> dict[str, float | None]:
         """Count evidence-backed contract flags per asset in one query: the
-        GeckoTerminal pool scans whose ``reserve_in_usd`` fell below the
-        discovery liquidity threshold (each created one ``low_liquidity``
+        ``new_pools`` feed items whose pool reserve fell below the discovery
+        liquidity threshold (each feed poll creates one ``low_liquidity``
         ``ContractFlag`` row in the SQL path) PLUS the contract analyzer's
         findings archived as ``contract_analysis`` evidence — the same set of
         ``ContractFlag`` rows the SQL path's ``_contract_flag_count`` counts.
+
+        The feed envelope is the count's unit (see ``_FLAG_RECONSTRUCT_SQL``):
+        per-pool payloads are not counted. The count is deliberately not
+        bounded by pair creation (flags reference the contract, not the pair).
         """
         if not addresses:
             return {}

@@ -49,7 +49,7 @@ from common.config import Settings, get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
 from features.factory import FeatureFactory, FeatureValue
-from features.lake import LAKE_FEATURE_NAMES, LakeFeatureFactory
+from features.lake import LAKE_FEATURE_NAMES, LakeFeatureFactory, load_pair_creation_bounds
 from ops.notifier import notify_parity_mismatch
 from storage import models
 from storage.repository import record_health
@@ -110,8 +110,14 @@ def compare_asset(
         value.name: value for value in FeatureFactory().build_for_asset(session, asset, decision_ts)
     }
     if lake_values is None:
+        # The lake's first-wins dedup must not select observations that
+        # predate the pair's creation in SQL; supply the SQL pair-creation
+        # times so the lake reconstruction matches the snapshot path.
+        bounds = load_pair_creation_bounds(session, asset_ids=[asset.id])
         lake_values = LakeFeatureFactory(settings=settings or get_settings()).build_for_asset(
-            asset_address=asset.address, decision_ts=decision_ts
+            asset_address=asset.address,
+            decision_ts=decision_ts,
+            pair_created_at=bounds,
         )
     # One-sided missingness is archive coverage, not a value divergence. A
     # partially compacted or stale lake cannot reconstruct that feature, and
@@ -259,6 +265,11 @@ def run_parity(
         assets = session.scalars(stmt).all()
         mismatches: list[ParityMismatch] = []
         errors = 0
+        # The lake's first-wins dedup must not select observations that
+        # predate a pair's creation in SQL; load the SQL pair-creation times
+        # once and pass them to the batched reconstruction so it matches the
+        # snapshot path.
+        pair_bounds = load_pair_creation_bounds(session, asset_ids=[asset.id for asset in assets])
         # Reconstruct the lake-covered block for every asset in ONE download /
         # one DuckDB session, so a full-lake pass is not O(assets) downloads.
         lake_factory = LakeFeatureFactory(settings=settings)
@@ -285,7 +296,7 @@ def run_parity(
                 "duration_sec": round(monotonic() - started, 3),
             }
         lake_values = lake_factory.build_for_assets(
-            [asset.address for asset in assets], decision_ts
+            [asset.address for asset in assets], decision_ts, pair_created_at=pair_bounds
         )
         coverage_names = set(LAKE_FEATURE_NAMES) - {"suspicious_contract_flags"}
         has_coverage = any(

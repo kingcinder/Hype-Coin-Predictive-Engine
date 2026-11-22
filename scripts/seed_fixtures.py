@@ -393,6 +393,26 @@ def _seed_parity_in_session(session: Session, decision_ts: datetime) -> dict[str
     # in its own hour so neither path has to arbitrate two rows in one hour.
     low_observed = decision_ts - timedelta(hours=3, minutes=30)
     raw_low = observe_market(low_observed, 0.50, 100.0, 1, 1, 900.0)
+    # Production-faithful companion: processing the feed item stores the
+    # individual pool payload as its own evidence row (the one SQL's
+    # ContractFlag references). The lake counts per-pool payloads, not the
+    # feed envelope.
+    store_raw_evidence(
+        session,
+        source=gt,
+        payload=_pool_payload(
+            pair_address=pair_address,
+            base_address=address,
+            price=0.50,
+            volume=100.0,
+            liquidity=900.0,
+            buys=1,
+            sells=1,
+            created_at=created,
+        ),
+        observed_at=low_observed + timedelta(milliseconds=20),
+    )
+    evidence_rows += 1
     session.add(
         models.ContractFlag(
             contract_id=contract.id,

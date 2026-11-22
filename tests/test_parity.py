@@ -189,6 +189,16 @@ def _seed_consistent(session, tmp_path, settings) -> models.Asset:
         },
         observed_at=low_observed,
     )
+    # Production-faithful companion: processing the feed item stores the
+    # individual pool payload as its own evidence row (the one SQL's
+    # ContractFlag references). The lake counts per-pool payloads, not the
+    # feed envelope.
+    store_raw_evidence(
+        session,
+        source=gt,
+        payload=_pool_payload(PAIR_ADDRESS, 0.5, 100, 900, 1, 1, created),
+        observed_at=low_observed + timedelta(milliseconds=20),
+    )
     low_ts = low_observed.replace(minute=0, second=0, microsecond=0)
     insert_market_snapshot_once(
         session,
@@ -640,10 +650,10 @@ def test_parity_builds_lake_block_once_per_run(session, tmp_path, monkeypatch) -
     calls = {"n": 0, "addresses": None}
     real = parity_module.LakeFeatureFactory.build_for_assets
 
-    def counting_batch(self, addresses, decision_ts):
+    def counting_batch(self, addresses, decision_ts, pair_created_at=None):
         calls["n"] += 1
         calls["addresses"] = list(addresses)
-        return real(self, addresses, decision_ts)
+        return real(self, addresses, decision_ts, pair_created_at)
 
     monkeypatch.setattr(parity_module.LakeFeatureFactory, "build_for_assets", counting_batch)
     result = run_parity(session, decision_ts=DECISION, settings=settings)

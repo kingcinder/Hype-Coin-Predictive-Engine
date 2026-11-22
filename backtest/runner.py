@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from common.config import get_settings
 from common.time import ensure_utc, hours_between, utc_now
 from features.factory import FeatureFactory, FeatureValue
-from features.lake import LakeFeatureFactory
+from features.lake import LakeFeatureFactory, load_pair_creation_bounds
 from scoring.formulas import compute_scores
 from storage import models
 
@@ -62,6 +62,7 @@ def build_replay_features(
     decision_ts: datetime,
     asset_ids: list[int],
     feature_source: str = "sql",
+    pair_created_at: dict[str, datetime] | None = None,
 ) -> dict[int, dict[str, FeatureValue]]:
     """Build point-in-time features for backtest replay WITHOUT persisting.
 
@@ -70,12 +71,21 @@ def build_replay_features(
     recomputed values at historical decision times, and must not read or
     disturb any production state. ``feature_source`` selects the read path:
     ``"sql"`` (live normalized tables) or ``"lake"`` (archived Parquet replay).
+
+    The ``"lake"`` path is bounded by the SQL pair-creation times (loaded
+    here when ``pair_created_at`` is not supplied), so a replay step
+    reconstructs the same rows the SQL snapshot path would have had.
     """
     if feature_source == "lake":
         assets = session.scalars(select(models.Asset).where(models.Asset.id.in_(asset_ids))).all()
         id_by_address = {asset.address: asset.id for asset in assets if asset.address}
+        bounds = (
+            pair_created_at
+            if pair_created_at is not None
+            else load_pair_creation_bounds(session, asset_ids=list(id_by_address.values()))
+        )
         by_address = LakeFeatureFactory().build_for_assets(
-            list(id_by_address), ensure_utc(decision_ts)
+            list(id_by_address), ensure_utc(decision_ts), pair_created_at=bounds
         )
         return {
             id_by_address[address]: features
@@ -108,7 +118,15 @@ def _score_replay_candidates(
     """
     candidates = []
     for asset_id, features in feature_map.items():
-        raw = {name: feature.value for name, feature in features.items()}
+        # Scoring-path consistency (reports/backtest-consistency-20261121.md):
+        # build `raw` from non-missing features ONLY -- the same convention
+        # scoring.engine.score_assets and scripts/rescore.py `_build_features`
+        # use. A missing feature placeholder value (0.0) must never reach
+        # compute_scores: a missing spread_estimate stored as 0.0 scored as
+        # a perfect spread (research_priority inflated via liquidity_access),
+        # and a missing catalyst_proximity_hours stored as 0.0 scored as
+        # "catalyst right now".
+        raw = {name: feature.value for name, feature in features.items() if not feature.missing}
         missing = [name for name, feature in features.items() if feature.missing]
         result = compute_scores(raw, missing, session=None)
         candidates.append(
@@ -269,6 +287,12 @@ class BacktestRunner:
         lake_cache_before = (
             LakeFeatureFactory.cache_stats() if config.feature_source == "lake" else None
         )
+        # Load the SQL pair-creation bounds once for the whole walk-forward:
+        # the lake replay must not select observations that predate a pair's
+        # creation, exactly like the parity job's bounded reconstruction.
+        lake_pair_bounds = (
+            load_pair_creation_bounds(session) if config.feature_source == "lake" else None
+        )
 
         for decision_ts in hours_between(start, end):
             asset_ids = [
@@ -290,6 +314,7 @@ class BacktestRunner:
                 decision_ts=decision_ts,
                 asset_ids=asset_ids,
                 feature_source=config.feature_source,
+                pair_created_at=lake_pair_bounds,
             )
             candidates = sorted(
                 (
