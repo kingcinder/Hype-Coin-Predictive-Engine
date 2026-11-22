@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 20.0
     max_request_retries: int = 3
 
+    # Ticket 1 (M1) feature staleness bounds: a market/liquidity snapshot
+    # older than this at decision time is treated as missing rather than
+    # presented as current, and a forecast older than its bound reads as
+    # unknown instead of a frozen probability carried forward forever.
+    feature_market_max_age_seconds: float = 7200.0
+    feature_forecast_max_age_seconds: float = 93600.0
+
     target_chains_csv: str = Field(
         default="solana,base,ethereum",
         validation_alias="TARGET_CHAINS",

@@ -268,6 +268,31 @@ def compute_market_block(
     latest_market = market_rows[-1] if market_rows else None
     latest_liquidity = liquidity_rows[-1] if liquidity_rows else None
 
+    # Ticket 1 (M1) staleness guard: the market refresh revisits each known
+    # pair at most once per 24h, so the latest snapshot at decision time can
+    # be many hours old. Presenting it as current lets a token sit GREEN on
+    # pre-collapse data; past the configured bound the block reads as
+    # missing instead, routing the asset into the existing missing-data
+    # machinery (unknown-liquidity points, defaulted inputs) in the risk
+    # rules. Age is measured against decision time, so point-in-time
+    # replays with then-fresh rows are unaffected.
+    market_max_age = timedelta(seconds=get_settings().feature_market_max_age_seconds)
+    market_stale = (
+        latest_market is not None and decision_ts - ensure_utc(latest_market.ts) > market_max_age
+    )
+    liquidity_stale = (
+        latest_liquidity is not None
+        and decision_ts - ensure_utc(latest_liquidity.ts) > market_max_age
+    )
+    if market_stale or liquidity_stale:
+        log.debug(
+            "staleness guard: asset=%s market_stale=%s liquidity_stale=%s at %s",
+            getattr(asset, "id", "?"),
+            market_stale,
+            liquidity_stale,
+            decision_ts,
+        )
+
     current_price = _safe_float(latest_market.price_usd, None) if latest_market else None
     m5 = _latest_snapshot_before(market_rows, decision_ts - timedelta(minutes=5))
     h1 = _latest_snapshot_before(market_rows, decision_ts - timedelta(hours=1))
@@ -327,19 +352,27 @@ def compute_market_block(
         max([row.observed_at for row in liquidity_rows], default=None), decision_ts
     )
 
+    five_min_return = _pct_return(current_price, _safe_float(m5.price_usd, None) if m5 else None)
+    one_hour_return = _pct_return(current_price, _safe_float(h1.price_usd, None) if h1 else None)
+    if market_stale:
+        # Every market-derived measurement describes the stale snapshot,
+        # not the token at decision time. Pair age is exempt: it is a fact
+        # about the pair's creation, not a market measurement.
+        five_min_return = None
+        one_hour_return = None
+        volume_accel = None
+        buy_sell_ratio = None
+        buys = None
+        volatility = None
+        venue_agreement = None
+    if liquidity_stale:
+        latest_liq = None
+        liquidity_change = None
+        spread_estimate = None
+
     values = [
-        _feature(
-            "five_min_return",
-            _pct_return(current_price, _safe_float(m5.price_usd, None) if m5 else None),
-            source_count,
-            market_freshness,
-        ),
-        _feature(
-            "one_hour_return",
-            _pct_return(current_price, _safe_float(h1.price_usd, None) if h1 else None),
-            source_count,
-            market_freshness,
-        ),
+        _feature("five_min_return", five_min_return, source_count, market_freshness),
+        _feature("one_hour_return", one_hour_return, source_count, market_freshness),
         _feature("volume_acceleration", volume_accel, source_count, market_freshness),
         _feature("liquidity_depth", latest_liq, source_count, liquidity_freshness),
         _feature("liquidity_change", liquidity_change, source_count, liquidity_freshness),
@@ -1211,6 +1244,12 @@ class FeatureFactory:
             .limit(1)
         )
         if not row:
+            return None
+        # Ticket 1 (M2): forecasts are written only inside training runs,
+        # so an unbounded read carries a frozen probability forward
+        # indefinitely. Past the configured bound the forecast is unknown.
+        forecast_max_age = timedelta(seconds=get_settings().feature_forecast_max_age_seconds)
+        if ensure_utc(decision_ts) - ensure_utc(row.decision_ts) > forecast_max_age:
             return None
         return float(row.p_collapse_24h)
 
