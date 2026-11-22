@@ -119,6 +119,39 @@ def _int_from_result(value: Any) -> int:
         return 0
 
 
+def _interleave_by_chain(
+    items: list[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Round-robin interleave of per-chain pool lists, preserving each chain's order.
+
+    New pools are ingested chain by chain in ``target_chains`` order, so the
+    shared GeckoTerminal rate limit (about 5 trades fetches per scan) used to
+    open while Solana pools were still being stored, and Base/Ethereum pools
+    were never reached. Interleaving spreads the first fetches fairly across
+    chains instead of giving them all to the first chain.
+    """
+    by_chain: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for chain_slug, payload in items:
+        if chain_slug not in by_chain:
+            by_chain[chain_slug] = []
+            order.append(chain_slug)
+        by_chain[chain_slug].append(payload)
+    out: list[tuple[str, dict[str, Any]]] = []
+    index = 0
+    while True:
+        progressed = False
+        for chain_slug in order:
+            pool_list = by_chain[chain_slug]
+            if index < len(pool_list):
+                out.append((chain_slug, pool_list[index]))
+                progressed = True
+        if not progressed:
+            break
+        index += 1
+    return out
+
+
 class IngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -129,6 +162,10 @@ class IngestionService:
         self._first_buy_provider_backoff = False
         self._first_buy_stats = {
             "pools": 0,
+            # Fetches per chain this scan. The cap is per chain, not global:
+            # a global cap is consumed in processing order, so the first chain
+            # (Solana) took every slot and EVM pools were never fetched.
+            "pools_by_chain": {},
             "budget_skipped": 0,
             "backoff_skipped": 0,
             "gecko_failures": 0,
@@ -901,77 +938,125 @@ class IngestionService:
         source = self._source(session, "geckoterminal")
         client = GeckoTerminalClient()
         count = 0
+        deferred: list[str] = []
+        failed: list[str] = []
+        pace_detail: str | None = None
+        first_failure: str | None = None
         try:
+            # Phase 1 — discover new pools for EVERY chain before storing any
+            # of them. Previously discovery and storage were interleaved chain
+            # by chain, so a rate limit opened by Solana's first-buy trades
+            # fetches aborted the loop and deferred Base/Ethereum discovery to
+            # a later scan — by which time the 5-minute first-buy window had
+            # closed. Discovery no longer depends on the trades fetches.
+            discovered: list[tuple[str, dict[str, Any]]] = []
             for chain_slug in self.settings.target_chains:
                 if chain_slug not in ("solana", "base", "ethereum"):
                     continue
-                items = client.new_pools(chain_slug)
+                try:
+                    items = client.new_pools(chain_slug)
+                except CircuitOpen as exc:
+                    # Pacing, not a failure: the shared provider gate is inside
+                    # its cooldown window. Defer just this chain; the others
+                    # still get discovered.
+                    deferred.append(chain_slug)
+                    if pace_detail is None:
+                        pace_detail = str(exc)
+                    log.info(
+                        "geckoterminal_new_pools_deferred",
+                        chain=chain_slug,
+                        reason=redact_url(str(exc)),
+                    )
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status in RATE_LIMIT_STATUSES:
+                        # The client just opened the shared cooldown. This is
+                        # pacing, not a provider outage, so the first 429/403
+                        # is yellow too.
+                        deferred.append(chain_slug)
+                        if pace_detail is None:
+                            cooldown = self.settings.provider_circuit_break_seconds
+                            pace_detail = (
+                                f"GeckoTerminal rate limited ({status}); "
+                                f"cooling down for {cooldown:g}s"
+                            )
+                        log.info(
+                            "geckoterminal_new_pools_deferred",
+                            chain=chain_slug,
+                            status=status,
+                            cooldown_seconds=self.settings.provider_circuit_break_seconds,
+                        )
+                        continue
+                    failed.append(chain_slug)
+                    if first_failure is None:
+                        first_failure = redact_url(str(exc))
+                    log.warning(
+                        "geckoterminal_new_pools_failed",
+                        chain=chain_slug,
+                        error=redact_url(str(exc)),
+                    )
+                    continue
                 store_raw_evidence(
                     session,
                     source=source,
                     payload={"chain": chain_slug, "new_pools": items},
                     observed_at=utc_now(),
                 )
-                for pool_payload in items:
-                    if self._store_geckoterminal_pool(session, source, pool_payload):
-                        count += 1
-                # Per-chain commit: new_pools() for the next chain is network I/O,
-                # so the lock must be released before it starts.
+                discovered.extend((chain_slug, pool_payload) for pool_payload in items)
+                # Per-chain commit: storing the next chain's pools is network
+                # I/O, so the lock must be released before it starts.
                 session.commit()
+            # Phase 2 — store round-robin by chain, so the first-buy trades
+            # fetches (capped by the shared GeckoTerminal rate limit at about
+            # 5 per scan) are spread fairly instead of all going to Solana.
+            for _chain_slug, pool_payload in _interleave_by_chain(discovered):
+                if self._store_geckoterminal_pool(session, source, pool_payload):
+                    count += 1
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - storage must not kill the scan.
+            failed.append("storage")
+            if first_failure is None:
+                first_failure = redact_url(str(exc))
+            log.warning("geckoterminal_new_pools_failed", error=redact_url(str(exc)))
+            # The failed store left the session mid-transaction; roll back so
+            # the health row below can still be written.
+            session.rollback()
+        finally:
+            client.close()
+        if failed:
             record_health(
                 session,
                 component="source:geckoterminal_new_pools",
-                state="ok",
-                message=f"{count} normalized pools",
+                state="red",
+                message=first_failure or "new pools ingestion failed",
+                error_count=1,
             )
-        except CircuitOpen as exc:
-            # Pacing, not a failure: the shared provider gate is inside its
-            # cooldown window (often opened by this scan's first-buy fetches),
-            # so the feed is deferred. Degrade to yellow; red stays reserved for
+        elif deferred:
+            # Pacing, not a failure: degrade to yellow; red stays reserved for
             # requests the provider actually rejected or that broke.
             record_health(
                 session,
                 component="source:geckoterminal_new_pools",
                 state="yellow",
                 message=(
-                    f"pacing: {exc}; {count} pools ingested before cooldown, "
-                    "remaining chains deferred to a later scan"
+                    f"pacing: {pace_detail}; {count} pools ingested, "
+                    f"chains deferred: {', '.join(deferred)}"
                 ),
             )
-            log.info("geckoterminal_new_pools_deferred", reason=redact_url(str(exc)), pools=count)
-        except Exception as exc:  # noqa: BLE001
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if status in RATE_LIMIT_STATUSES:
-                # The client just opened the shared cooldown. This is pacing,
-                # not a provider outage, so the first 429/403 is yellow too.
-                cooldown = self.settings.provider_circuit_break_seconds
-                record_health(
-                    session,
-                    component="source:geckoterminal_new_pools",
-                    state="yellow",
-                    message=(
-                        f"pacing: GeckoTerminal rate limited ({status}); cooling down for "
-                        f"{cooldown:g}s; {count} pools ingested before cooldown, "
-                        "remaining chains deferred to a later scan"
-                    ),
-                )
-                log.info(
-                    "geckoterminal_new_pools_deferred",
-                    status=status,
-                    cooldown_seconds=cooldown,
-                    pools=count,
-                )
-            else:
-                record_health(
-                    session,
-                    component="source:geckoterminal_new_pools",
-                    state="red",
-                    message=redact_url(str(exc)),
-                    error_count=1,
-                )
-                log.warning("geckoterminal_new_pools_failed", error=redact_url(str(exc)))
-        finally:
-            client.close()
+            log.info(
+                "geckoterminal_new_pools_deferred",
+                reason=pace_detail,
+                pools=count,
+                deferred=deferred,
+            )
+        else:
+            record_health(
+                session,
+                component="source:geckoterminal_new_pools",
+                state="ok",
+                message=f"{count} normalized pools",
+            )
         return count
 
     def _ingest_solana_holder_snapshots(self, session: Session) -> int:
@@ -1434,11 +1519,18 @@ class IngestionService:
             # circuit: retrying every remaining pool only makes the flood worse.
             self._first_buy_stats["backoff_skipped"] += 1
             return [], False
-        if self._first_buy_stats["pools"] >= self.settings.first_buy_trade_max_pools_per_scan:
-            # Cap provider traffic per scan: first-buy telemetry is useful, but
-            # an unbounded pool walk turns rate limits into a warning flood.
+        if self._first_buy_stats["pools_by_chain"].get(normalized.chain_slug, 0) >= (
+            self.settings.first_buy_trade_max_pools_per_scan
+        ):
+            # Cap provider traffic per chain per scan: first-buy telemetry is
+            # useful, but an unbounded pool walk turns rate limits into a
+            # warning flood. The cap is per chain so one busy chain cannot
+            # starve the others of fetch slots.
             self._first_buy_stats["budget_skipped"] += 1
             return [], False
+        self._first_buy_stats["pools_by_chain"][normalized.chain_slug] = (
+            self._first_buy_stats["pools_by_chain"].get(normalized.chain_slug, 0) + 1
+        )
         self._first_buy_stats["pools"] += 1
         client = GeckoTerminalClient()
         trades: list[dict[str, Any]] = []
