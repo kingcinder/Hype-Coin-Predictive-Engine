@@ -47,7 +47,7 @@ class ReplayEntry:
     entry_ts: datetime  # first snapshot strictly after decision_ts
     entry_price: float  # that snapshot's price, impact-adjusted via simulate_buy
     path: ForwardPath  # forward path from entry_price over the window
-    forward_rows: tuple[tuple[datetime, float], ...]  # (ts, price) in (entry_ts, entry_ts + window]
+    forward_rows: tuple[tuple[datetime, float], ...]  # (ts, price) in (entry_ts, decision_ts + window]
 
 
 def iter_replay_entries(
