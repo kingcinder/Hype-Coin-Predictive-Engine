@@ -10,9 +10,15 @@ the spec's layers in priority order on each snapshot:
    guaranteed capture).
 3. **Completion (runner)** — once the trail is active (the position
    armed, or every rung hit), a giveback of ``exit_trail_fraction``
-   from the peak price exits the remainder in full. The trail is
-   checked before the armed tranche: a tranche is pacing, the trail
-   is completion — when the giveback has happened, selling another
+   from the peak price exits the remainder in full. Task 17's cohort
+   closing hazard rides this layer as the second structural
+   confirmation: a snapshot hazard at or above
+   ``cohort_hazard_complete_threshold`` is a vote alongside the
+   failed-retest giveback and completes the same way. The vote never
+   fires an exit alone — the trail must already be active — and a
+   0.0 hazard (no cohort fit) is no vote. The trail is checked
+   before the armed tranche: a tranche is pacing, the trail is
+   completion — when the giveback has happened, selling another
    depth-capped slice instead of completing would bleed the exit
    down the decay the trail exists to cut off.
 4. **Pacing** — while armed and not completed, tranches sell the
@@ -122,13 +128,20 @@ class ExitSnapshot:
     # Task 16 layer-3 accelerate votes; None = no distribution
     # evidence on this snapshot, which is neutral (never active).
     distribution_votes: DistributionVotes | None = None
+    # Task 17 layer-5 completion vote input:
+    # forecast.cohort_exit.harvest_window_closing_hazard(...) at the
+    # position's phase / hours-in-position, precomputed by the
+    # caller. 0.0 = no cohort evidence (no fit / non-ignited
+    # cohort), which is neutral (never a vote).
+    cohort_hazard: float = 0.0
 
 
 @dataclass(frozen=True)
 class ExitDecision:
     action: str  # "hold" | "sell_tranche" | "exit_all"
     fraction: float  # of qty_remaining to sell now
-    reason: str  # "lp_removal" | "ladder_rung" | "armed_tranche" | "ev_trail" | "hold"
+    reason: str  # "lp_removal" | "ladder_rung" | "armed_tranche" | "ev_trail"
+    #            | "cohort_hazard" | "hold"
 
 
 def _rungs_crossed(
@@ -184,11 +197,25 @@ class ExitPolicy:
                 "ladder_rung",
             )
 
-        # 3. EV-trail runner: active only when armed or all rungs hit;
-        # a giveback of the trail fraction from the peak completes.
+        # 3. Completion (EV-trail runner): active only when armed or
+        # all rungs hit. Structural confirmation completes the exit:
+        # the failed-retest giveback (price falls the trail fraction
+        # from the peak), or Task 17's cohort closing-hazard vote —
+        # the hazard at or above its completion threshold says the
+        # peak is landing now, so waiting for the giveback would
+        # bleed the same decay the trail exists to cut off. The vote
+        # is a confirmation alongside the giveback, never a trigger:
+        # with the trail inactive it changes nothing, and 0.0 is the
+        # cohort stage's no-evidence value, never a vote.
         trail_active = state.armed or state.rungs_hit >= len(settings.exit_ladder_rungs)
         if trail_active and snap.price <= state.peak_price * (1.0 - settings.exit_trail_fraction):
             return self._apply(state, 1.0, "exit_all", "ev_trail")
+        hazard_vote = (
+            snap.cohort_hazard > 0.0
+            and snap.cohort_hazard >= settings.cohort_hazard_complete_threshold
+        )
+        if trail_active and hazard_vote:
+            return self._apply(state, 1.0, "exit_all", "cohort_hazard")
 
         # 4. Armed tranches: depth-paced when pacing is enabled, else
         # the ladder's fixed fraction of the original position.

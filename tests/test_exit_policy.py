@@ -65,6 +65,7 @@ def snap(
     buyers_delta: float = 5.0,
     lp_removed: bool = False,
     votes: DistributionVotes | None = None,
+    hazard: float = 0.0,
 ) -> ExitSnapshot:
     return ExitSnapshot(
         ts=T0 + timedelta(hours=hour),
@@ -74,6 +75,7 @@ def snap(
         unique_buyers_delta=buyers_delta,
         lp_removed=lp_removed,
         distribution_votes=votes,
+        cohort_hazard=hazard,
     )
 
 
@@ -315,6 +317,101 @@ def test_no_trail_exit_inside_the_trail_fraction(policy):
     # armed tranche may still sell, but it must not exit_all).
     decision = policy.on_snapshot(st, snap(price=3.50))
     assert decision.action != "exit_all"
+
+
+# ── Layer 5: cohort closing-hazard completion vote (Task 17) ───────────────
+#
+# forecast.cohort_exit.harvest_window_closing_hazard, precomputed by
+# the caller onto the snapshot. At or above
+# Settings.cohort_hazard_complete_threshold (0.5) it is the
+# structural-confirmation vote alongside the failed-retest giveback
+# inside the completion layer — it completes an exit the trail is
+# already active for, and never fires one alone.
+
+
+def test_cohort_hazard_does_not_fire_exit_alone(policy):
+    # The plan's pinned test: hazard above threshold on an unarmed,
+    # unconfirmed position (healthy flow, price at the peak, no
+    # giveback, no rungs hit) — action stays "hold". The vote is a
+    # completion vote, not a trigger.
+    st = state()
+    decision = policy.on_snapshot(st, snap(hazard=0.9))
+    assert (decision.action, decision.reason) == ("hold", "hold")
+    assert decision.fraction == 0.0
+    assert st.armed is False
+    assert st.qty_remaining == 1.0
+    assert st.exited is False
+
+
+def test_cohort_hazard_vote_completes_an_armed_position(policy):
+    # Armed, price still at the peak (no giveback at all): the
+    # giveback alone would not complete — the position would sell an
+    # armed tranche instead. The hazard vote completes it in full.
+    st = state(peak_price=2.0, rungs_hit=2, qty_remaining=0.5, armed=True)
+    decision = policy.on_snapshot(st, snap(price=2.0, hazard=0.9))
+    assert (decision.action, decision.reason) == ("exit_all", "cohort_hazard")
+    assert decision.fraction == pytest.approx(1.0)
+    assert st.exited and st.qty_remaining == 0.0
+
+
+def test_cohort_hazard_vote_completes_when_all_rungs_hit_unarmed(policy):
+    # The completion layer is also active once every rung has hit;
+    # the vote completes there too (staging satisfied by the ladder,
+    # not by arming).
+    st = state(peak_price=4.0, rungs_hit=4, qty_remaining=0.2, armed=False)
+    decision = policy.on_snapshot(st, snap(price=4.0, hazard=0.9))
+    assert (decision.action, decision.reason) == ("exit_all", "cohort_hazard")
+    assert st.exited
+
+
+def test_cohort_hazard_below_threshold_does_not_complete(policy):
+    # Real cohort evidence under the threshold is not the vote: the
+    # armed position sells its ordinary tranche and keeps running.
+    st = state(peak_price=2.0, rungs_hit=2, qty_remaining=0.5, armed=True)
+    decision = policy.on_snapshot(st, snap(price=2.0, hazard=0.4))
+    assert (decision.action, decision.reason) == ("sell_tranche", "armed_tranche")
+    assert decision.fraction == pytest.approx(0.5)  # 0.25 of original / 0.5 left
+
+
+def test_cohort_hazard_at_threshold_counts_as_the_vote(policy):
+    # "At or above" (the Settings field's own contract): exactly the
+    # threshold completes.
+    st = state(peak_price=2.0, rungs_hit=2, qty_remaining=0.5, armed=True)
+    decision = policy.on_snapshot(st, snap(price=2.0, hazard=0.5))
+    assert (decision.action, decision.reason) == ("exit_all", "cohort_hazard")
+
+
+def test_cohort_hazard_zero_changes_nothing(policy):
+    # 0.0 is the cohort stage's no-evidence value (no fit / non-
+    # ignited cohort): behavior is bit-identical to the pre-Task-17
+    # policy — an armed position tranches, an unarmed one holds.
+    armed_baseline = policy.on_snapshot(state(armed=True), snap())
+    armed_zero = policy.on_snapshot(state(armed=True), snap(hazard=0.0))
+    assert (armed_zero.action, armed_zero.reason, armed_zero.fraction) == (
+        armed_baseline.action,
+        armed_baseline.reason,
+        armed_baseline.fraction,
+    )
+    unarmed = policy.on_snapshot(state(), snap(hazard=0.0))
+    assert unarmed.action == "hold"
+
+
+def test_cohort_hazard_does_not_outrank_the_ladder_floor(policy):
+    # Priority order is untouched: a rung crossing on the same
+    # snapshot is the floor's sale, not a completion.
+    st = state()
+    decision = policy.on_snapshot(st, snap(price=1.6, hazard=0.9))
+    assert (decision.action, decision.reason) == ("sell_tranche", "ladder_rung")
+    assert decision.fraction == pytest.approx(0.25)
+    assert st.exited is False
+
+
+def test_giveback_keeps_its_reason_when_the_vote_also_holds(policy):
+    # Both confirmations present: the failed-retest giveback is the
+    # shipped confirmation and keeps its reason.
+    st = state(peak_price=4.0, rungs_hit=3, qty_remaining=0.25, armed=True)
+    decision = policy.on_snapshot(st, snap(price=3.30, hazard=0.9))
+    assert (decision.action, decision.reason) == ("exit_all", "ev_trail")
 
 
 # ── replay_exit_rows: the row builder over a seeded DB ─────────────────────
