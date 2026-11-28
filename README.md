@@ -12,7 +12,7 @@ Test coverage trajectory (backend core, weekly):
 
 ![Coverage trend](coverage/trend.svg)
 
-Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It separates hype from structural danger and stores point-in-time evidence so scans can be replayed without future leakage.
+Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It works two fronts: **entry** — catch new moons, coins about to make a sharp rise while they are still newly launched and thinly held — and **exit** — reap the harvest moon, exiting near the peak, before the impending crash, while liquidity is still deep enough to exit a real position. It is not a safety or stability finder: a coin that pumps hard and then collapses is a success case if the entry was early and the exit was near the peak. It stores point-in-time evidence so scans can be replayed without future leakage.
 
 ## Current verified state (2026-11-28)
 
@@ -58,8 +58,10 @@ RPC fallback, catch-up pass); outcome **label censoring** (survival requires
 forward price evidence); migrations **0038–0043**; the **v3_bounded relabel**
 as the calibration reference set; **features retention** (`ops/features_retention.py`
 + systemd timer); and the forward-validation scripts (rank-sum, pair-age).
-Ticket 1 itself remains open — `scores_validated` is still `false`; these are
-the repairs aimed at the false-GREEN mechanisms, not a proven live edge.
+Ticket 1's single gate has since been retired by the mission refactor (see
+the mission section below): validation is now two flags, `entry_validated`
+and `exit_validated`, and both currently read `false`; the Ticket 1 repairs
+were aimed at the false-GREEN mechanisms, not a proven live edge.
 Full detail, provenance, and exclusions: [`docs/updates-2026-11-28.md`](docs/updates-2026-11-28.md).
 
 This is research software, not a wallet, custody system, or guaranteed-profit
@@ -76,12 +78,19 @@ does exist, and it is off by default:
   in case a key ever exists.
 - **Copy trading** is off by default and always logs a signal for human
   approval; it never auto-executes.
-- The engine's risk scores are **not fully validated**: headline v6 cells pass
-  (RiskBand 0.9355 vs 3.2920 baseline, BLACK 0.8655 vs 0.8230, calibration
-  error 0.0102), but `scores_validated` is `false` under the tightened
-  live-edge criterion — Ticket 1 (a proven edge on live tokens) is still open
-  (live BLACK 0.0268 vs 0.0217 base, indistinguishable). The Trading view and
-  trading API payloads report `scores_validated: false`.
+- The engine's signals are **not validated** on either front. The old single
+  `scores_validated` gate is retired; `validation/status.py` now reports two
+  flags, and the Trading view and trading API payloads carry both:
+  `entry_validated: false` (the newest report on disk predates the entry
+  evaluator — its p_ignition calibration, live precision@20, and live gain
+  lift cells are all missing) and `exit_validated: false` (no exit-policy
+  captured-fraction cells beat the fixed-ladder baseline yet). The
+  collapse-side cells the old gate read (RiskBand 0.9355 vs 3.2920 baseline,
+  BLACK 0.8655 vs 0.8230, live BLACK 0.0268 vs 0.0217 base,
+  indistinguishable) survive as exit-side diagnostics, not as a gate.
+- **Band semantics:** GREEN means exactly one thing — *no exit signal yet*.
+  It never means "safe": under this mission a GREEN coin can be mid-pump
+  with the harvest window already closing.
 
 ## One-command startup
 

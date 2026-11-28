@@ -62,9 +62,12 @@ def test_candidates_endpoint(client, session) -> None:
         "candidates",
         "excluded_no_evidence",
         "generated_at",
-        "scores_validated",
-        "scores_validation_reason",
-        "scores_validation_report",
+        "entry_validated",
+        "entry_validation_reason",
+        "entry_validation_report",
+        "exit_validated",
+        "exit_validation_reason",
+        "exit_validation_report",
     }
     assert body["candidates"][0]["mint"] == asset.address
     assert set(body["candidates"][0]) == set(CANDIDATE_KEYS)

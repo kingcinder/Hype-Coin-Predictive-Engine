@@ -27,10 +27,20 @@ _PHASE_RANK = {
 }
 _TERMINAL = {LifecyclePhase.DEAD, LifecyclePhase.RUGGED, LifecyclePhase.SURVIVOR}
 
-# Phases that fire a phone alert the moment they are reached: the collapse
-# phase and the danger exits. SURVIVOR is intentionally excluded — it is a
-# positive outcome, not a danger signal.
-_ALERT_PHASES = {LifecyclePhase.COLLAPSE, LifecyclePhase.RUGGED, LifecyclePhase.DEAD}
+# Phases that fire a phone alert the moment they are reached: the entry
+# transitions (IGNITION, PARABOLIC — the new-moon front of the mission),
+# the collapse phase, and the danger exits. SURVIVOR is intentionally
+# excluded — it is a positive outcome, not a signal to act on.
+_ALERT_PHASES = {
+    LifecyclePhase.IGNITION,
+    LifecyclePhase.PARABOLIC,
+    LifecyclePhase.COLLAPSE,
+    LifecyclePhase.RUGGED,
+    LifecyclePhase.DEAD,
+}
+
+# Entry phases get an entry-framed alert message; the rest are terminal.
+_ENTRY_ALERT_PHASES = {LifecyclePhase.IGNITION, LifecyclePhase.PARABOLIC}
 
 IGNITION_WINDOW_HOURS = 24.0
 PARABOLIC_VOLUME_ACCEL = 2.0
@@ -463,11 +473,12 @@ class LifecycleEngine:
         asset: models.Asset,
         event: models.LifecycleEvent,
     ) -> None:
-        """Fire one idempotent lifecycle_transition alert per terminal event.
+        """Fire one idempotent lifecycle_transition alert per alert event.
 
         Deduped on the event id (same pattern as the fingerprint alerts), so a
-        token entering COLLAPSE / RUGGED / DEAD pushes once — never on every
-        scan — and a missed alert is backfilled on the next scan.
+        token entering IGNITION / PARABOLIC / COLLAPSE / RUGGED / DEAD pushes
+        once — never on every scan — and a missed alert is backfilled on the
+        next scan.
         """
         ref = f"lifecycle:{event.id}"
         existing = session.scalar(
@@ -480,9 +491,14 @@ class LifecycleEngine:
         if existing:
             return
         details = event.details or {}
+        phase = LifecyclePhase(event.phase)
+        if phase in _ENTRY_ALERT_PHASES:
+            framing = "entry lifecycle phase"
+        else:
+            framing = "terminal lifecycle phase"
         message = (
-            f"{asset.symbol} reached {event.phase.upper()} — terminal lifecycle "
-            f"phase; one_hour_return={details.get('one_hour_return_pct')}, "
+            f"{asset.symbol} reached {event.phase.upper()} — {framing}; "
+            f"one_hour_return={details.get('one_hour_return_pct')}, "
             f"withdrawal_events={details.get('withdrawal_events')}, "
             f"liquidity_usd={details.get('liquidity_usd')}"
         )

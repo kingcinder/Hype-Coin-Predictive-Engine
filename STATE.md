@@ -11,6 +11,47 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 11 — `scores_validated` RETIRED, SPLIT GATES LIVE — 2026-11-28
+
+- **Gate retirement** (`validation/status.py`): `scores_validation_status`
+  is deleted, not deprecated. New `mission_validation_status()` merges
+  `entry_validation_status()` (Task 6) + `exit_validation_status()`
+  (Task 8); the keys `scores_validated` / `scores_validation_reason` /
+  `scores_validation_report` no longer exist on any surface. The
+  collapse-side cells the old gate read stay in the harness as exit-side
+  diagnostics (spec §6), not as a gate.
+- **Consumers migrated:** all six `**scores_validation_status()` spreads
+  in `api/trading_routes.py` (`/paper/candidates`, `/trading/arm`,
+  `/trading/status`, copy signal / approve / recover) now spread
+  `mission_validation_status()`; the Streamlit banner in
+  `ui/trading_view.py` reports entry and exit validation as two separate
+  lines with their own reasons.
+- **Entry-phase alerts** (`pump_physics/engine.py`): `_ALERT_PHASES`
+  gains `IGNITION` and `PARABOLIC` alongside `COLLAPSE` / `RUGGED` /
+  `DEAD`. Entry transitions fire the same one-shot, deduped
+  `lifecycle_transition` alert (`lifecycle:{event.id}` ref,
+  `ops.alert_quality.alert_generation_allowed` unchanged) with an
+  entry-framed message naming the phase and the same evidence fields.
+- **Mission language:** README headline rewritten to the two-front
+  mission (entry = new moons, exit = harvest) with GREEN redefined as
+  "no exit signal yet," never "safe"; `docs/blueprint.md`'s
+  phase-transition framing promoted to the ratified repo-wide mission
+  statement.
+- **Current gate output** (repo `reports/`, quoted from
+  `mission_validation_status()` on 2026-11-28): `entry_validated: false`
+  and `exit_validated: false` — the newest report
+  (`validation-2026-11-14-v2-relabel.json`) predates the entry/exit
+  evaluators, so every required entry and exit cell reads missing.
+- **Tests:** `tests/test_mission_status_surface.py` (new: merge shape,
+  `/trading/status` + `/paper/candidates` carry two flags and no old
+  keys, banner names both reasons); `tests/test_scores_validation_surface.py`
+  rewritten to the new keys (incl. stale-forecasts precedence through
+  the merge); `tests/test_pump_physics.py` extended — SEEDING → IGNITION
+  and IGNITION → PARABOLIC each fire exactly one deduped alert, and the
+  terminal-alert test's premise updated (IGNITION now alerts; COLLAPSE
+  still fires its own, once). `tests/test_paper_api.py` key-set
+  assertion updated to the six new keys. `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASKS 9/16 SEAM — DISTRIBUTION VOTES WIRED INTO EXIT POLICY — 2026-11-28
 
 - **Wiring landed** (`trading/exit_policy.py`): `ExitSnapshot`

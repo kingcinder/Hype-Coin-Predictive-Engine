@@ -1,8 +1,8 @@
 """Trading view: paper ledger, live-gate state, and the validation warning.
 
-The engine's risk scores are unvalidated research outputs (the latest report
-ranks worse than its baselines), so every decision surface must say so before
-an operator arms live trading.
+The engine's entry and exit signals are unvalidated research outputs until
+their own gates say otherwise, so every decision surface must say so —
+entry and exit separately — before an operator arms live trading.
 """
 
 from __future__ import annotations
@@ -16,13 +16,21 @@ def trading_view() -> None:
     st.subheader("Trading")
     status = api_get("/trading/status") or {}
 
-    if not status.get("scores_validated", False):
+    if not status.get("entry_validated", False):
         st.error(
-            "⚠️ **Scores are not validated.** "
-            f"{status.get('scores_validation_reason', 'no validation report available')}"
+            "⚠️ **Entry signals are not validated.** "
+            f"{status.get('entry_validation_reason', 'no validation report available')}"
         )
     else:
-        st.info(f"Scores validated: {status.get('scores_validation_reason', '')}")
+        st.info(f"Entry validated: {status.get('entry_validation_reason', '')}")
+
+    if not status.get("exit_validated", False):
+        st.error(
+            "⚠️ **Exit signals are not validated.** "
+            f"{status.get('exit_validation_reason', 'no validation report available')}"
+        )
+    else:
+        st.info(f"Exit validated: {status.get('exit_validation_reason', '')}")
 
     col1, col2, col3 = st.columns(3)
     col1.metric("LIVE_TRADING_ENABLED", "on" if status.get("env_flag") else "off")

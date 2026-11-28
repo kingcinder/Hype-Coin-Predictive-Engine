@@ -10,6 +10,17 @@ This is not a trading bot, not a wallet, not guaranteed profit. It is a local-fi
 research intelligence terminal that produces *predictions with calibration*, so the
 operator makes the final call.
 
+**Mission (ratified repo-wide, 2026-11-28).** What this blueprint framed as its goal
+is now the mission statement of the whole engine, in two fronts worked off the one
+lifecycle spine below: **entry** — catch new moons, predicting the
+`SEEDING → IGNITION → PARABOLIC` transitions early enough to be in before the rise —
+and **exit** — reap the harvest moon, predicting the late transitions so a position
+exits near its executable peak, before the collapse, while liquidity still allows
+it. Entry transitions alert with the same one-shot treatment as the danger phases.
+Fitness is graded on pump prediction and exit timing, never on collapse-avoidance:
+the two gates are `entry_validated` and `exit_validated` (`validation/status.py`),
+and a GREEN band means only "no exit signal yet" — never "safe."
+
 ---
 
 ## 1. The Thesis: hype is a physics problem, not a price problem

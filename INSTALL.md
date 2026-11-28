@@ -148,9 +148,9 @@ The engine ships a paper ledger plus a disabled live path:
   created, and DexScreener (keyless) is the live price source for paper
   trading. The GMGN client code is kept intact in case a key ever exists.
 - Copy trading is off by default and only logs signals for human approval.
-- `/trading/status` and the Trading view report `scores_validated: false`
-  while the latest validation report is worse than its baselines. Do not treat
-  these scores as predictive edge.
+- `/trading/status` and the Trading view report `entry_validated: false` and
+  `exit_validated: false` while the entry and exit signals are unproven
+  against their baselines. Do not treat these signals as predictive edge.
 
 ## Docker & Compose (optional container deployment)
 

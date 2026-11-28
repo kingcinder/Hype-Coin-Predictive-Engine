@@ -19,8 +19,9 @@ from storage.repository import (
     insert_market_snapshot_once,
     store_raw_evidence,
     upsert_asset,
+    upsert_pool_and_pair,
 )
-from tests.conftest import seed_market_asset
+from tests.conftest import seed_market_asset, seed_reference
 
 T0 = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
@@ -176,13 +177,15 @@ def test_scan_emits_terminal_phase_alert_once(session) -> None:
     asset = seed_market_asset(session)
     engine = LifecycleEngine()
 
-    # IGNITION (young pool) must NOT fire a terminal alert.
+    # IGNITION (young pool) fires an entry alert since Task 11 — entry
+    # transitions alert with the same one-shot treatment as danger phases.
     engine.scan(session, decision_ts=T0)
     session.commit()
     alerts = session.scalars(
         select(models.Alert).where(models.Alert.alert_type == "lifecycle_transition")
     ).all()
-    assert alerts == []
+    assert len(alerts) == 1
+    assert "IGNITION" in alerts[0].message
 
     # Liquidity withdrawal => COLLAPSE => the operator gets an alert.
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
@@ -205,6 +208,7 @@ def test_scan_emits_terminal_phase_alert_once(session) -> None:
         select(models.Alert).where(
             models.Alert.alert_type == "lifecycle_transition",
             models.Alert.asset_id == asset.id,
+            models.Alert.message.contains("COLLAPSE"),
         )
     )
     assert alert is not None
@@ -212,7 +216,7 @@ def test_scan_emits_terminal_phase_alert_once(session) -> None:
     assert "COLLAPSE" in alert.message
     assert alert.score_snapshot_ref.startswith("lifecycle:")
 
-    # Re-scan must not duplicate the alert (idempotent on the event ref).
+    # Re-scan must not duplicate either alert (idempotent on the event ref).
     engine.scan(session, decision_ts=T0 + timedelta(hours=3))
     session.commit()
     count = session.scalar(
@@ -220,7 +224,122 @@ def test_scan_emits_terminal_phase_alert_once(session) -> None:
         .select_from(models.Alert)
         .where(models.Alert.alert_type == "lifecycle_transition")
     )
-    assert count == 1
+    assert count == 2
+
+
+def _lifecycle_alerts(session, asset_id: int) -> list:
+    return session.scalars(
+        select(models.Alert).where(
+            models.Alert.alert_type == "lifecycle_transition",
+            models.Alert.asset_id == asset_id,
+        )
+    ).all()
+
+
+def test_ignition_transition_fires_one_alert(session) -> None:
+    """Entry transitions alert like danger phases (Task 11): a
+    SEEDING -> IGNITION transition fires exactly one deduped
+    lifecycle_transition alert for the event."""
+    chain, source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="Seed1111111111111111111111111111111111111",
+        symbol="SEED",
+        name="Seed Fixture",
+        first_seen_at=T0 - timedelta(hours=1),
+    )
+    session.add(
+        models.SocialMention(
+            asset_id=asset.id,
+            source_id=source.id,
+            ts=T0 - timedelta(minutes=30),
+            observed_at=T0 - timedelta(minutes=30),
+        )
+    )
+    session.commit()
+    engine = LifecycleEngine()
+
+    # SEEDING (social seed, no pool yet): a phase event, but no alert.
+    result = engine.scan(session, decision_ts=T0)
+    session.commit()
+    assert result["events"] == 1
+    seeding = session.scalar(
+        select(models.LifecycleEvent).where(models.LifecycleEvent.asset_id == asset.id)
+    )
+    assert seeding.phase == LifecyclePhase.SEEDING.value
+    assert _lifecycle_alerts(session, asset.id) == []
+
+    # The pool appears => IGNITION => the operator gets one alert.
+    quote = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="USDC111111111111111111111111111111111111",
+        symbol="USDC",
+        name="USD Coin",
+        first_seen_at=T0 - timedelta(days=365),
+    )
+    upsert_pool_and_pair(
+        session,
+        chain_id=chain.id,
+        dex_id="raydium",
+        pair_address="PairSeed111111111111111111111111111111111",
+        base_asset_id=asset.id,
+        quote_asset_id=quote.id,
+        created_at_source=T0,
+    )
+    session.commit()
+    result = engine.scan(session, decision_ts=T0 + timedelta(hours=1))
+    session.commit()
+    assert result["events"] == 1
+    alerts = _lifecycle_alerts(session, asset.id)
+    assert len(alerts) == 1
+    assert alerts[0].state == "open"
+    assert "IGNITION" in alerts[0].message
+    assert alerts[0].score_snapshot_ref.startswith("lifecycle:")
+
+    # Re-scan must not duplicate the alert (idempotent on the event ref).
+    engine.scan(session, decision_ts=T0 + timedelta(hours=2))
+    session.commit()
+    assert len(_lifecycle_alerts(session, asset.id)) == 1
+
+
+def test_parabolic_transition_fires_one_alert(session) -> None:
+    asset = seed_market_asset(session)
+    engine = LifecycleEngine()
+
+    # IGNITION (young pool) fires its own entry alert under the new rule.
+    engine.scan(session, decision_ts=T0)
+    session.commit()
+    ignition_alerts = [a for a in _lifecycle_alerts(session, asset.id) if "IGNITION" in a.message]
+    assert len(ignition_alerts) == 1
+
+    # Volume detonates a day later => PARABOLIC => one more alert.
+    pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
+    source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
+    insert_market_snapshot_once(
+        session,
+        pair_id=pair.id,
+        source_id=source.id,
+        ts=T0 + timedelta(hours=29),
+        observed_at=T0 + timedelta(hours=29),
+        price_usd=1.10,
+        volume_usd=1_000_000,
+        buys=200,
+        sells=5,
+        trades=205,
+    )
+    session.commit()
+    result = engine.scan(session, decision_ts=T0 + timedelta(hours=30))
+    session.commit()
+    assert result["events"] == 1
+    parabolic_alerts = [a for a in _lifecycle_alerts(session, asset.id) if "PARABOLIC" in a.message]
+    assert len(parabolic_alerts) == 1
+
+    # Re-scan must not duplicate either entry alert.
+    engine.scan(session, decision_ts=T0 + timedelta(hours=31))
+    session.commit()
+    assert len(_lifecycle_alerts(session, asset.id)) == 2
 
 
 def test_scan_skips_assets_without_evidence(session) -> None:
