@@ -10,7 +10,9 @@ decision_ts) that exercises every rule and every prune case:
 
 - Asset A (pair with entry + future snapshots): an old labeled key, an old
   unlabeled key, a resolving-band key with a future price, a resolving-band
-  key without one, and pending keys with entry prices.
+  key without one, pending keys with entry prices, and two labelable keys
+  past the resolving window with no labels yet -- one inside the mission
+  horizon (120h, kept by rule 6) and one beyond it (240h, pruned).
 - Asset B (pair with a single late snapshot): old/resolving/pending keys
   with no entry price, and pending keys with one.
 - Asset C (no pair, so no snapshots at all): only the latest-two rule can
@@ -26,6 +28,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from common.config import Settings
+from ops import features_retention
 from ops.features_retention import (
     _prunable_clause,  # noqa: PLC2701 - white-box test of the mid-pass guard
     build_keep_keys,
@@ -114,8 +117,15 @@ def _seed(engine):
                 created_at_source=T0 - 200 * H,
             )
             pairs[tag] = pair.id
-        # Asset A: entry + future coverage across the timeline.
+        # Asset A: entry + future coverage across the timeline. The
+        # -250/-230 and -130/-110 pairs give the 240h-old and 120h-old
+        # feature keys below an entry price plus a forward price each,
+        # i.e. both keys are labelable in the seeder's sense.
         for ts, price in (
+            (T0 - 250 * H, 0.0005),
+            (T0 - 230 * H, 0.0006),
+            (T0 - 130 * H, 0.0007),
+            (T0 - 110 * H, 0.0008),
             (T0 - 100 * H, 0.001),
             (T0 - 30 * H, 0.002),
             (T0 - 20 * H, 0.003),
@@ -176,6 +186,8 @@ def _seed(engine):
                 )
 
         # Asset A.
+        features(assets["A"], T0 - 240 * H)  # labelable, beyond mission horizon -> prune
+        features(assets["A"], T0 - 120 * H)  # labelable, no labels yet -> keep (rule 6)
         features(assets["A"], T0 - 100 * H)
         labels(assets["A"], T0 - 100 * H)  # labeled -> keep (rule 1)
         features(assets["A"], T0 - 90 * H)  # old, outside resolving -> prune
@@ -197,6 +209,7 @@ def _seed(engine):
         session.commit()
     a, b, c = assets["A"], assets["B"], assets["C"]
     keep = {
+        (a, T0 - 120 * H),
         (a, T0 - 100 * H),
         (a, T0 - 30 * H),
         (a, T0 - 10 * H),
@@ -208,6 +221,7 @@ def _seed(engine):
         (c, T0 - 1 * H),
     }
     prune = {
+        (a, T0 - 240 * H),
         (a, T0 - 90 * H),
         (a, T0 - 60 * H),
         (b, T0 - 100 * H),
@@ -237,15 +251,17 @@ def _count(engine) -> int:
 
 def test_prune_keeps_needed_rows_and_removes_only_prunable_ones(engine, settings):
     expected = _seed(engine)
-    assert _count(engine) == 45
+    # 51 rows: the seed gained two labelable keys for Rule 6 -- the 120h
+    # key survives by Rule 6 (mission horizon), the 240h key prunes.
+    assert _count(engine) == 51
 
     result = run_features_retention(engine, settings=settings)
 
     assert result.get("error") is None
-    assert result["rows_before"] == 45
-    assert result["rows_pruned"] == 18
-    assert result["rows_after"] == 27
-    assert result["keys_kept"] == 9
+    assert result["rows_before"] == 51
+    assert result["rows_pruned"] == 21
+    assert result["rows_after"] == 30
+    assert result["keys_kept"] == 10
     assert result["dry_run"] is False
     remaining = _keys(engine)
     assert remaining == expected["keep"]
@@ -291,30 +307,30 @@ def test_prune_keeps_latest_two_per_asset_even_without_prices(engine, settings):
 def test_prune_is_idempotent(engine, settings):
     _seed(engine)
     first = run_features_retention(engine, settings=settings)
-    assert first["rows_pruned"] == 18
+    assert first["rows_pruned"] == 21  # includes the beyond-horizon 240h key (Rule 6)
     second = run_features_retention(engine, settings=settings)
     assert second["rows_pruned"] == 0
-    assert second["rows_before"] == second["rows_after"] == 27
+    assert second["rows_before"] == second["rows_after"] == 30
 
 
 def test_dry_run_deletes_nothing(engine, settings):
     _seed(engine)
     result = run_features_retention(engine, dry_run=True, settings=settings)
     assert result["dry_run"] is True
-    assert result["rows_pruned"] == 18  # would-be count
-    assert result["rows_before"] == result["rows_after"] == 45
-    assert _count(engine) == 45
+    assert result["rows_pruned"] == 21  # would-be count (Rule 6 keeps the 120h key)
+    assert result["rows_before"] == result["rows_after"] == 51
+    assert _count(engine) == 51
 
 
 def test_max_rows_cap_is_exact(engine, settings):
     _seed(engine)
     result = run_features_retention(engine, settings=settings, max_rows=5)
     assert result["rows_pruned"] == 5
-    assert result["rows_after"] == 40
+    assert result["rows_after"] == 46
     # A second capped pass continues where the first stopped.
     second = run_features_retention(engine, settings=settings, max_rows=5)
     assert second["rows_pruned"] == 5
-    assert second["rows_after"] == 35
+    assert second["rows_after"] == 41
 
 
 def test_rows_written_after_keep_set_built_are_never_pruned(engine, settings):
@@ -346,8 +362,8 @@ def test_rows_written_after_keep_set_built_are_never_pruned(engine, settings):
         clause = _prunable_clause(max_id=int(max_id))
         deleted = conn.execute(text(f"DELETE FROM features WHERE {clause}")).rowcount
         conn.commit()
-    # The 18 old prunable rows are gone; the mid-pass row survives.
-    assert int(deleted or 0) == 18
+    # The 21 old prunable rows are gone; the mid-pass row survives.
+    assert int(deleted or 0) == 21
     with Session(engine) as session:
         probe = session.query(models.Feature).filter_by(feature_name="probe_feature").one_or_none()
         assert probe is not None
@@ -360,15 +376,15 @@ def test_run_records_row_and_health(engine, settings):
     with Session(engine) as session:
         runs = session.query(models.FeatureRetentionRun).all()
         assert len(runs) == 1
-        assert runs[0].rows_before == 45
-        assert runs[0].rows_pruned == 18
-        assert runs[0].keys_kept == 9
+        assert runs[0].rows_before == 51
+        assert runs[0].rows_pruned == 21
+        assert runs[0].keys_kept == 10
         assert runs[0].dry_run is False
         assert runs[0].error is None
         health = session.query(models.SystemHealth).filter_by(component="features_retention").all()
         assert len(health) == 1
         assert health[0].state == "ok"
-        assert "pruned=18" in (health[0].message or "")
+        assert "pruned=21" in (health[0].message or "")
 
 
 def test_features_retention_due(engine, settings):
@@ -399,3 +415,36 @@ def test_empty_features_table_is_a_clean_noop(engine, settings):
     assert result["rows_before"] == 0
     assert result["rows_pruned"] == 0
     assert result["keys_kept"] == 0
+
+
+def test_prune_keeps_mission_label_keys_before_labels_exist(engine, settings):
+    # Feature key 120h old (past pending 24h + resolving 72h), entry +
+    # forward prices present, ZERO rows in labels for it. Under the old
+    # rules it prunes; under Rule 6 (mission horizon 168h) it must survive.
+    seeded = _seed(engine)
+    run_features_retention(engine, settings=settings)
+    assert (seeded["assets"]["A"], T0 - 120 * H) in _keys(engine)
+
+
+def test_prune_still_prunes_beyond_mission_horizon(engine, settings):
+    # Same labelable shape at 240h old: outside the 168h horizon, pruned.
+    seeded = _seed(engine)
+    run_features_retention(engine, settings=settings)
+    assert (seeded["assets"]["A"], T0 - 240 * H) not in _keys(engine)
+
+
+@pytest.mark.xfail(strict=True, reason="forecast constants land in Task 2")
+def test_mission_label_types_match_label_constants():
+    from data_lake import labels as lake_labels  # noqa: F401 - mirrored constants land in Task 2
+    from forecast import labels as forecast_labels
+
+    named = set(features_retention.MISSION_LABEL_TYPES)
+    defined = {
+        forecast_labels.LABEL_FORWARD_MAX_GAIN,
+        forecast_labels.LABEL_FORWARD_MAX_DRAWDOWN,
+        forecast_labels.LABEL_HOURS_TO_PEAK,
+        forecast_labels.LABEL_HOURS_TO_TROUGH,
+    }
+    # Until Tasks 2/7 land the forecast constants do not exist; this test is
+    # written now against the pinned strings and xfail-marked in Step 2.
+    assert defined <= named

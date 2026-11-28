@@ -31,6 +31,17 @@ Keep-set -- a key is kept if ANY rule matches:
    (2) decision_ts per asset. The drift probe samples the single latest
    decision_ts, ``scoring.engine._changed_features`` needs the previous
    one, and the API reads latest-per-asset.
+6. **Mission horizon** -- ``decision_ts`` within
+   ``features_retention_mission_horizon_hours`` (168h) of ``as_of`` AND an
+   entry price AND >= 1 future snapshot inside the 24h forward window
+   (the same labelable test as Rule 3, but with NO labels-existence
+   condition and a far longer horizon). The mission label types in
+   ``MISSION_LABEL_TYPES`` do not all resolve inside the pending +
+   resolving windows: forward labels resolve inside 24h, but harvest
+   labels resolve only when an episode completes -- well past 72h.
+   Without this rule the first retention pass after the mission labels
+   land would prune the feature rows those labels will need, before the
+   labels exist.
 
 Everything else is pruned, in id-range batches of
 ``FEATURES_RETENTION_BATCH_SIZE`` rows, so a pass never holds a long write
@@ -95,6 +106,22 @@ log = get_logger(__name__)
 KEEP_TABLE = "_features_retention_keep"
 COMPONENT = "features_retention"
 
+# The mission label types (spec §5) whose feature keys Rule 6 protects
+# before the labels exist. Tasks 2 and 7 define the label constants with
+# these exact strings; tests/test_features_retention.py pins the overlap.
+MISSION_LABEL_TYPES: tuple[str, ...] = (
+    "forward_max_gain_pct",
+    "forward_max_drawdown_pct",
+    "hours_to_peak",
+    "hours_to_trough",
+    "executable_peak_gain_s02",
+    "executable_peak_gain_s10",
+    "executable_peak_gain_s25",
+    "harvest_window_start_hours",
+    "collapse_confirmed",
+    "second_leg",
+)
+
 
 def _entry_exists_sql(alias: str = "f") -> str:
     """The label seeder's ``_labelable_at`` entry test, verbatim in SQL.
@@ -138,7 +165,7 @@ def build_keep_keys(conn: Connection, *, settings: Settings, as_of: str) -> int:
     """Build the keep-set TEMP table for this pass; return the key count.
 
     The table holds the (asset_id, decision_ts) keys of every feature row
-    the consumers still need, per the four rules in the module docstring.
+    the consumers still need, per the rules in the module docstring.
     Keys are stored exactly as they appear in ``features`` (raw stored
     strings), so the DELETE's ``NOT EXISTS`` match is an exact equality.
     """
@@ -219,6 +246,25 @@ def build_keep_keys(conn: Connection, *, settings: Settings, as_of: str) -> int:
             "WHERE r.asset_id = f.asset_id "
             "AND datetime(r.scored_at) = datetime(f.decision_ts))"
         )
+    )
+    # Rule 6 -- mission horizon: labelable keys (entry + >= 1 forward
+    # price, the Rule 3 tests) younger than the mission horizon are kept
+    # even with NO row in labels yet. Harvest labels resolve only when an
+    # episode completes, well past the resolving window; without this
+    # rule the pass would prune the feature rows the harvest labels will
+    # need before those labels exist. Unlike Rule 3 there is deliberately
+    # no labels-existence condition and no lower age bound.
+    mission = float(settings.features_retention_mission_horizon_hours)
+    conn.execute(
+        text(
+            f"INSERT OR IGNORE INTO {KEEP_TABLE} (asset_id, decision_ts) "
+            "SELECT DISTINCT f.asset_id, f.decision_ts FROM features f "
+            "WHERE datetime(f.decision_ts) >= datetime(:as_of, '-"
+            f"{mission:g} hours') "
+            f"AND {_entry_exists_sql('f')} "
+            f"AND {_future_exists_sql('f', forward_hours=forward_hours)}"
+        ),
+        params,
     )
     keys_kept = conn.execute(text(f"SELECT COUNT(*) FROM {KEEP_TABLE}")).scalar_one()
     log.info("features_retention keep-set built keys_kept=%s as_of=%s", keys_kept, as_of)

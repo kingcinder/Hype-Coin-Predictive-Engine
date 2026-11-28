@@ -341,6 +341,13 @@ class Settings(BaseSettings):
     # forward window, are awaiting the daily retrain's label seeder; 72h
     # gives two missed-retrain days of slack beyond the 24h window.
     features_retention_resolving_hours: float = 72.0
+    # Mission horizon: labelable keys (entry price AND forward prices in
+    # the 24h window) younger than this are kept even with no label row
+    # yet. Harvest labels resolve only when an episode completes -- well
+    # past the resolving window -- so pruning these keys first would
+    # destroy the harvest training pool before its labels exist. See
+    # Rule 6 in ops/features_retention.py.
+    features_retention_mission_horizon_hours: float = 168.0
     # Live paths need the latest N decision_ts per asset (drift probe
     # samples the latest; scoring._changed_features needs the previous).
     features_retention_latest_per_asset: int = 2
