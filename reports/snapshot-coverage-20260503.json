@@ -1,0 +1,11 @@
+{
+  "as_of": "2026-05-03T12:00:00+00:00",
+  "window_hours": 24,
+  "assets_measured": 2,
+  "assets_meeting_density": 0,
+  "pass_share": 0.0,
+  "median_snapshots_per_asset_day": 0.0,
+  "p10_snapshots_per_asset_day": 0.0,
+  "min_pass_share": 0.8,
+  "gate_passed": false
+}

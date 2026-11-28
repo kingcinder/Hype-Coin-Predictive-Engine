@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     ui_refresh_seconds: int = 30
 
     scan_interval_seconds: int = 300
+    # Task 0 coverage gate: the share of forecasted/scored assets whose
+    # forward windows must meet the label density rule
+    # (forecast.labels.forward_evidence_sufficient) for the snapshot
+    # pipeline to be considered healthy. scripts/snapshot_coverage_report.py
+    # exits non-zero below this share.
+    snapshot_coverage_min_pass_share: float = 0.80
     request_timeout_seconds: float = 20.0
     max_request_retries: int = 3
 

@@ -294,6 +294,7 @@ class IngestionService:
         result: dict[str, Any] = {
             "pairs": 0,
             "dexscreener_refresh_pairs": 0,
+            "decision_snapshots": 0,
             "profiles": 0,
             "scores": 0,
             "ignition_events": 0,
@@ -340,6 +341,10 @@ class IngestionService:
             self._commit_stage(session, stop)
             scores = score_current_assets(session, decision_ts=decision_ts)
             result["scores"] = len(scores)
+            self._commit_stage(session, stop)
+            # Task 0: this cycle's forecasts/scores opened forward windows;
+            # guarantee the snapshotted cadence those windows are graded on.
+            result["decision_snapshots"] = self._snapshot_decision_assets(session)
             self._commit_stage(session, stop)
             # ── Risk calibration: learn from historical outcomes ─────────
             try:
@@ -937,6 +942,102 @@ class IngestionService:
                 error_count=1,
             )
             log.warning("dexscreener_refresh_failed", error=redact_url(str(exc)))
+        finally:
+            client.close()
+        return count
+
+    def _snapshot_decision_assets(self, session: Session) -> int:
+        """Snapshot every asset whose forecast/score forward window is open.
+
+        Task 0 precondition: the label density rule needs >= 4 snapshots in
+        the 24h after a decision, one in the final quartile — but pair
+        discovery and the refresh rotation (which requires a prior snapshot
+        and revisits an asset once a day) never guaranteed that cadence to
+        the forecasted/scored set, so decision points accrued without
+        forward observations. This stage closes the gap: every asset with a
+        forecast or score inside the last ``forecast_forward_hours`` is
+        re-fetched through the existing DexScreener pair path
+        (``_store_dexscreener_pair`` -> ``insert_market_snapshot_once``)
+        whenever its latest snapshot predates the current hour bucket.
+        Snapshots are hourly buckets, so the stage costs at most one
+        token-pairs call per open-window asset per hour while guaranteeing
+        ~24 snapshots per forward window. Stalest assets go first.
+        """
+        settings = self.settings
+        source = self._source(session, "dexscreener")
+        now = utc_now()
+        window_start = now - timedelta(hours=settings.forecast_forward_hours)
+        hour_start = floor_to_hour(now)
+        last_snap = (
+            select(func.max(models.MarketSnapshot.ts))
+            .join(models.Pair, models.Pair.id == models.MarketSnapshot.pair_id)
+            .where(models.Pair.base_asset_id == models.Asset.id)
+            .where(models.MarketSnapshot.source_id == source.id)
+            .correlate(models.Asset)
+            .scalar_subquery()
+        )
+        decided = (
+            select(models.Forecast.asset_id)
+            .where(
+                models.Forecast.decision_ts >= window_start,
+                models.Forecast.decision_ts <= now,
+            )
+            .union(
+                select(models.Score.asset_id).where(
+                    models.Score.decision_ts >= window_start,
+                    models.Score.decision_ts <= now,
+                )
+            )
+            .subquery()
+        )
+        rows = session.execute(
+            select(
+                models.Asset.id,
+                models.Chain.slug,
+                models.Asset.address,
+                last_snap.label("last_snap"),
+            )
+            .join(models.Chain, models.Chain.id == models.Asset.chain_id)
+            .join(models.Pair, models.Pair.base_asset_id == models.Asset.id)
+            .join(decided, decided.c.asset_id == models.Asset.id)
+            .where(models.Chain.slug.in_(settings.target_chains))
+            .where(or_(last_snap == None, last_snap < hour_start))  # noqa: E711
+            .group_by(models.Asset.id)
+            .order_by(last_snap.asc())
+        ).all()
+        count = 0
+        client = DexScreenerClient()
+        try:
+            for _asset_id, chain_slug, token_address, _last_snap in rows:
+                try:
+                    pair_payloads = client.token_pairs(chain_slug, token_address)
+                except Exception as exc:  # noqa: BLE001 - one dead token must not stall the stage
+                    log.warning(
+                        "decision_snapshot_token_failed",
+                        error=redact_url(str(exc)),
+                    )
+                    continue
+                for pair_payload in pair_payloads:
+                    if self._store_dexscreener_pair(session, source, pair_payload):
+                        count += 1
+                # Per-asset commit: the next token_pairs() call is network
+                # I/O and must not hold the write lock across it.
+                session.commit()
+            record_health(
+                session,
+                component="source:decision_snapshots",
+                state="ok",
+                message=f"{count} pairs from {len(rows)} assets",
+            )
+        except Exception as exc:  # noqa: BLE001
+            record_health(
+                session,
+                component="source:decision_snapshots",
+                state="red",
+                message=redact_url(str(exc)),
+                error_count=1,
+            )
+            log.warning("decision_snapshots_failed", error=redact_url(str(exc)))
         finally:
             client.close()
         return count

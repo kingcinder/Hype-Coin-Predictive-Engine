@@ -11,6 +11,35 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 0 — SNAPSHOT-COVERAGE PRECONDITION — 2026-11-28
+
+- **Measurement landed:** `ingestion/coverage.py::snapshot_coverage` judges
+  forward-window density per decision point with the label rule itself
+  (`forward_evidence_sufficient`: ≥⌈24h/6h⌉ = 4 snapshots in the 24h after a
+  decision, one in the final quartile, counting only snapshots observed by
+  `as_of`); `scripts/snapshot_coverage_report.py` writes
+  `reports/snapshot-coverage-<YYYYMMDD>.json` + `.md` and exits 0 iff
+  `pass_share >= Settings.snapshot_coverage_min_pass_share` (0.80).
+- **Cadence fix landed:** `IngestionService._snapshot_decision_assets` runs
+  every scan cycle after forecast + scoring: every asset with a forecast or
+  score inside the last `forecast_forward_hours` whose latest DexScreener
+  snapshot predates the current hour bucket is re-fetched through the
+  existing pair path (`_store_dexscreener_pair` →
+  `insert_market_snapshot_once`), stalest first, per-asset commits.
+- **Baseline (live DB): PENDING.** No copy of the live `serpent.db` exists on
+  this VM, so the live baseline could not be measured here. The 2026-11-28
+  live probe stands as the pre-fix picture: `market_snapshots` 26,562 rows /
+  7,849 assets over 5 days (~3.4 points per asset); 99.1% of forecasted
+  assets unevaluable for forward gains. Gate artifact from the end-to-end
+  smoke run against the seeded fixture DB (as_of 2026-05-03):
+  `reports/snapshot-coverage-20260503.json` — 2 assets measured, 0 meeting
+  density, pass_share 0.0, exit 1 (the fixture fleet has no forward-window
+  snapshots; the number is the fixture's, not the live fleet's).
+- **Live gate:** per plan Task 0 Step 4, `snapshot_coverage_report.py` must
+  run against the live DB after one full day of fixed-cadence collection;
+  until it passes there, Tasks 2/4/5/7 report expected evaluable-n and may
+  not be declared done on synthetic fixtures alone. `[verified 2026-11-28]`
+
 ## THREE-SOURCE RECONCILIATION — 2026-11-28
 
 - **Reconciled into `main`:** GitHub tip `1afc6c7` (Nov 21 CI repairs +
