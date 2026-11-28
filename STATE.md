@@ -11,6 +11,46 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 12 — SMART-MONEY GATE (12a) + BUNDLE FLAG (12c) — 2026-11-28
+
+- **12a gate instrument landed:** `scripts/case_control_smart_money.py`
+  — the case-control test of spec §3 item 5 on the only data the lake
+  has (per-wallet trade/PnL history does not exist; `models.Holder` is
+  snapshots only). Decision points are `forward_max_gain_pct` label
+  timestamps; a case is a point at >= 1.0. A point is *converged* when
+  >= 3 of its early holders (holders within 6h pre-decision, on rows
+  observed by the decision) are *repeat winners* — early holders of
+  >= 2 prior cases, the winner set built strictly from decisions
+  earlier than the point judged (same-timestamp points never certify
+  each other; a wallet whose first case-win lands after a decision
+  point does not count for that point). Gate: converged pump share
+  >= 3x the matched-control pump share (controls = non-converged
+  points in the same day + liquidity-depth decile stratum) with
+  n >= 30 converged points; exit 0 authorizes 12b, exit 1 cancels it
+  (plan Step 2). The report also records the spec's case-side
+  formulation (convergence share among cases vs matched non-case
+  controls) for the record; the verdict is the plan's pump-share
+  criterion. The convergence count k = 3 is spec §3 item 5's ">= 3
+  profitable-wallet entries"; the window is the plan's 6h (holder
+  snapshots are the only data that exists), not the spec's 30 minutes.
+- **Live verdict UNMEASURED:** the gate has NOT been run against real
+  data — no copy of the live DB exists on this VM (the configured
+  database is a PostgreSQL at 127.0.0.1:5432 that is not running here;
+  verified 2026-11-28), so no report files exist. Unit-tested on
+  seeded fixtures only (`tests/test_smart_money_gate.py`: the plan's
+  point-in-time pinning test, observed-at discipline, as-of
+  exclusion, decile matching, pass / low-ratio / thin-sample
+  verdicts). Deployment-step follow-up: run
+  `python scripts/case_control_smart_money.py` against the live DB
+  and record the verdict here verbatim; exit 0 authorizes the 12b
+  build, exit 1 cancels it.
+- **12b NOT built — gated, not deferred-silently:** the point-in-time
+  wallet-PnL table (migration 0044), `forecast/wallet_pnl.py`, and
+  the `smart_money_convergence` feature exist only on a recorded
+  live exit-0 verdict, which does not exist. Building them on an
+  unmeasured gate would be building on sand; the build waits on the
+  deployment-step run above. `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASK 11 — `scores_validated` RETIRED, SPLIT GATES LIVE — 2026-11-28
 
 - **Gate retirement** (`validation/status.py`): `scores_validation_status`
