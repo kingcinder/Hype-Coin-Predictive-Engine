@@ -11,6 +11,42 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 15 — DEPTH-LEAD STUDY — 2026-11-28
+
+- **Study instrument landed:** `scripts/depth_lead_study.py` — per
+  Task 7 episode (a stored `executable_peak_gain_s10` label with
+  gain > 0, observed by the run's `as_of`), the episode rows are
+  rebuilt exactly as Task 7's wiring builds them (point-in-time
+  market rows as of the label's own generation time, the forward
+  slice inside `forecast_forward_hours`, the point-in-time depth
+  series, `aligned_harvest_rows`), and `episode_lead` measures the
+  quote-depth peak's lead over the executable-value peak at the
+  f=0.10 reference (notional = 0.10 × peak quote depth,
+  constant-product fill — `forecast.harvest` semantics; peak ties
+  break to the earliest row). `median_lead` is the median of
+  `lead_snapshots` across episodes. The runner writes
+  `reports/depth-lead-study-<YYYYMMDD>.json` + `.md` (per-episode
+  leads, median lead in snapshots and hours, share of episodes with
+  lead > 0, n episodes) and exits 0 iff median lead > 0 — the report
+  is written either way.
+- **Gate recorded for Task 9:** the payload's
+  `pacing_default_enabled` mirrors the verdict — Task 9's
+  `exit_pacing_enabled` may default True only on a recorded PASS
+  from this study; study not run or median lead ≤ 0 → default False
+  and tranches fall back to the ladder's fixed fractions (plan
+  Task 9 Step 5).
+- **Live run PENDING:** no copy of the live DB exists on this VM, so
+  no `reports/depth-lead-study-*` artifact is in this commit and the
+  pacing premise stands UNMEASURED on live data — neither confirmed
+  nor killed. Unit-tested on synthetic episodes only (depth-first
+  lead +3 snapshots, EV-first lead −5, simultaneous peaks 0, median
+  robust to a +40-snapshot outlier, no-usable-depth → None) plus
+  seeded-DB end-to-end runs of the runner (one-episode study →
+  median lead 3.0, exit 0; empty study → exit 1, report written).
+  Per Task 0's rule, Task 15 may not be declared done on synthetic
+  fixtures alone: the live run waits on the live DB (deployment /
+  coverage-gate step). `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASK 13 — SOCIAL-PRESENCE PRIOR — 2026-11-28
 
 - **Extraction landed:** `ingestion/normalizers.py::extract_profile_links`
