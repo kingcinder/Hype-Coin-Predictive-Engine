@@ -20,6 +20,12 @@ priority, BLACK filtered on the unchanged risk band), and it inherits the
 liquidity_access overstatement, so spread-missing tokens ranked too high
 in backtests. The fix builds ``raw`` from non-missing features only in
 ``_score_replay_candidates``, exactly like the engine.
+
+Task 10 note: ``research_priority`` is now an entry ranking
+(ignition / gain / lead time) that reads none of the default-differing
+features, so the liquidity channel described above no longer exists;
+the convention consistency still matters — the replay must reproduce
+the engine's scores field for field, whatever the formula is.
 """
 
 from __future__ import annotations
@@ -40,9 +46,11 @@ DECISION_TS = datetime(2026, 11, 20, tzinfo=UTC)
 
 # Healthy non-missing features shared by both fixture tokens. These are
 # tuned (unlike the sparse fixture in test_scoring_path_consistency.py)
-# so research_priority is positive with headroom: the liquidity_access
-# overstatement must actually move the ranking signal instead of dying
-# in the clamp at 0.
+# so the scored fields are positive with headroom: the liquidity_access
+# overstatement must actually register instead of dying in the clamp
+# at 0. (Pre-Task-10 this tuning existed for research_priority's
+# liquidity channel; that channel is gone, the headroom still serves
+# the exit_risk / catalyst / liquidity_access fingerprints.)
 HEALTHY_FEATURES = {
     "liquidity_depth": 1_000_000.0,
     "pair_age_minutes": 120.0,
@@ -168,11 +176,12 @@ class TestBacktestConsistency:
         Independent of the runner: direct ``compute_scores`` calls under
         both conventions on the same feature map. On the token with missing
         features the old raw (mf=1 0.0s included) understates exit_risk by
-        7.8947, overstates catalyst by 12.0 and liquidity_access by 25.0,
-        and inflates research_priority by exactly
-        hype * (confidence / 100) * (25 / 100) through the liquidity_access
-        term -- the channel that moved backtest top-k selection. On the
-        control token the conventions agree exactly.
+        7.8947, overstates catalyst by 12.0 and liquidity_access by 25.0.
+        (Pre-Task-10 it also inflated research_priority through the
+        liquidity_access term — the channel that moved backtest top-k
+        selection. The Task 10 entry ranking reads none of the three
+        default-differing features, so the conventions now agree on
+        research_priority exactly, on both tokens.)
         """
         for extra, extra_missing, is_missing_token in (
             (MISSING_FEATURES, True, True),
@@ -187,10 +196,11 @@ class TestBacktestConsistency:
                 assert new.exit_risk - old.exit_risk == pytest.approx(7.8947, abs=1e-3)
                 assert old.catalyst - new.catalyst == pytest.approx(12.0, abs=1e-3)
                 assert old.liquidity_access - new.liquidity_access == pytest.approx(25.0, abs=1e-3)
-                expected_rp_delta = new.hype * (new.confidence / 100.0) * 0.25
-                assert old.research_priority - new.research_priority == pytest.approx(
-                    expected_rp_delta, abs=1e-3
-                )
+                # Task 10: the entry ranking no longer reads
+                # liquidity_access (or spread / catalyst proximity /
+                # lifecycle phase), so the missing-feature convention
+                # cannot move it — the old liquidity channel is gone.
+                assert old.research_priority == pytest.approx(new.research_priority)
                 assert old.risk_band == new.risk_band  # assess_risk already strips
             else:
                 assert old.exit_risk == pytest.approx(new.exit_risk)

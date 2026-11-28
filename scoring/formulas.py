@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from common.config import get_settings
 from common.enums import RiskBand
 from risk_engine.rules import assess_risk, band_from_collapse_probability
 
@@ -93,8 +94,8 @@ def compute_scores(
     # not coexist with a GREEN verdict: the final band is the more severe
     # of the rule band and the band the collapse probability maps to. The
     # floor only raises; a missing probability applies no floor. The rule
-    # score itself is unchanged (exit_risk / research_priority keep using
-    # it as a component, as documented below).
+    # score itself is unchanged (exit_risk keeps using it as a component,
+    # as documented below; research_priority no longer reads it — Task 10).
     final_band = risk_assessment.band
     risk_reasons = list(risk_assessment.reasons)
     if "collapse_probability_24h" in _assess_features:
@@ -225,7 +226,6 @@ def compute_scores(
         raw_confidence = band_confidence_map().get(final_band, 50.0)
     confidence = clamp(raw_confidence)
     if session is not None:
-        from common.config import get_settings
         from risk_engine.calibrator import get_active_confidence_calibration
         from risk_engine.confidence_calibration import apply_isotonic_map
 
@@ -247,9 +247,9 @@ def compute_scores(
     # (mean error 0.7085 out-of-sample on the same partition), so the
     # phase-conditioned rate is the calibration. Without a phase map the
     # raw rule score is kept (no invented numbers).
-    # risk_assessment.score still feeds exit_risk / research_priority:
-    # those are composites that use the raw rule score as one component,
-    # not collapse probabilities.
+    # risk_assessment.score still feeds exit_risk: that composite uses
+    # the raw rule score as one component, not a collapse probability.
+    # research_priority no longer reads it (Task 10 entry reframe).
     if phase_calibrated:
         risk_value = clamp(100.0 - confidence)
     else:
@@ -300,16 +300,35 @@ def compute_scores(
         / 1.90
     )
 
-    research_priority = clamp(
-        hype * (confidence / 100.0) * (liquidity_access / 100.0)
-        - risk_assessment.score * 0.35
-        - manipulation * 0.20
-        - uncertainty * 0.10
-        - 0.15 * clamp(collapse_probability * 100.0)
-        + 0.05 * clamp(prelaunch_priority)
+    # research_priority is an ENTRY ranking (Task 10, spec §3/§8): how
+    # attractive this coin is to enter, judged on ignition probability,
+    # expected gain, and lead time to the peak. Collapse probability is
+    # deliberately NOT an input — a coin likely to moon and then die is
+    # the mission's exact target; collapse risk belongs to position
+    # management and stays in exit_risk above, whose formula (including
+    # its collapse term) is unchanged. The pre-reframe formula
+    # subtracted collapse / rule risk / manipulation / uncertainty and
+    # zeroed BLACK-band assets outright, ranking the best trades last.
+    #
+    # Inputs: the persisted forecast's p_ignition_24h when the feature
+    # dict carries it, else the factory's ignition_signal feature (the
+    # scoring engine does not pass the forecast keys through today).
+    # expected_gain_pct := p_ignition until the entry model predicts
+    # gain magnitude directly — ignition probability carries both terms,
+    # weighted once each (0.45 + 0.30). A missing expected_hours_to_peak
+    # earns no lead-time credit: it reads as a full forward window away.
+    _settings = get_settings()
+    p_ignition = float(features.get("p_ignition_24h", ignition))
+    expected_gain_pct = p_ignition
+    expected_hours_to_peak = float(
+        features.get("expected_hours_to_peak", float(_settings.forecast_forward_hours))
     )
-    if final_band == RiskBand.BLACK:
-        research_priority = 0.0
+    entry_score = clamp(
+        0.45 * clamp(p_ignition * 100.0)
+        + 0.30 * clamp(expected_gain_pct * 100.0)
+        + 0.25 * clamp(100.0 - expected_hours_to_peak * (100.0 / _settings.forecast_forward_hours))
+    )
+    research_priority = entry_score  # no band zeroing, no collapse subtraction
 
     drivers = {
         "momentum": momentum,
@@ -321,6 +340,8 @@ def compute_scores(
         "holder_quality": holder_quality,
         "venue_agreement": venue_agreement,
         "ignition_signal": clamp(ignition * 100.0),
+        "p_ignition_24h": clamp(p_ignition * 100.0),
+        "expected_hours_to_peak": expected_hours_to_peak,
         "liquidity_withdrawal_signal": clamp(withdrawal_signal * 100.0),
         "lp_removal_signal": clamp(lp_removal_signal * 100.0),
         "recidivism": recidivism,
