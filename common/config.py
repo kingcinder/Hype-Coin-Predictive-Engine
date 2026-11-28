@@ -544,6 +544,17 @@ class Settings(BaseSettings):
     # exact rank_sum ties in rank_entry_cohort.
     entry_social_prior_multiplier: float = 1.25
 
+    # Launch bundle-share gate (Task 12c, spec §3 item 4): a cohort
+    # row whose same-block bundled share of launch-window buys reaches
+    # this threshold is flagged on the EntryCandidate (informational
+    # in v1 — the flag never alters the rank). NOT the funding-cluster
+    # share: spec item 4's 40% governs the share of early float held
+    # by wallets sharing a funding source, a different measure whose
+    # build is deferred to its own timeframe. 0.30 here governs
+    # same-block bundle share only; neither number is a typo for the
+    # other.
+    entry_bundle_share_threshold: float = 0.30
+
     # Harvest labels (Task 7, spec §4/§5): the executable episode.
     # harvest_theta: the harvest window reaches rows whose executable
     # value is within this fraction of the executable peak (at the 10%

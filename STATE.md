@@ -50,6 +50,34 @@ or `STATE.md` existed before 2026-09-09.
   live exit-0 verdict, which does not exist. Building them on an
   unmeasured gate would be building on sand; the build waits on the
   deployment-step run above. `[verified 2026-11-28]`
+- **12c bundle flag landed:** `EntryCandidate.bundle_flagged` —
+  `rank_entry_cohort` records a cohort row's `launch_bundle_share`
+  raw in `components` (not a rank component; never enters the sum)
+  and flags at >= `Settings.entry_bundle_share_threshold` (0.30, new
+  field). Informational in v1: the flag never changes the rank
+  (pinned by test — same order, same rank sums with and without the
+  key). Threshold reconciliation, per the plan: 0.30 governs the
+  same-block bundle share; spec §3 item 4's 40% governs the
+  funding-cluster share (early float held by wallets sharing a
+  funding source) — different measures of different things; the
+  cluster build stays deferred to its own timeframe and neither
+  number was "fixed."
+- **12c coverage is ZERO today, recorded plainly:** no
+  launch-transaction data persists anywhere in the lake (no
+  per-transaction table — market snapshots carry aggregate buy/sell
+  counts only — and the word "bundle" appeared nowhere in the
+  codebase before this task), and no `IgnitionEvent.details` payload
+  carries a bundle share: `radar/ignition.py`'s three event types
+  persist aggregate launch metadata only (buy/sell counts, ratios,
+  reserve prints). The plan Step 5 fallback is implemented as the
+  extraction seam `scoring/entry_rank.py::launch_bundle_share`, which
+  reads the key from `IgnitionEvent.details` where a future producer
+  writes it and returns None otherwise; the share is never inferred
+  from aggregates (a sniper burst's buy count is not a bundle share).
+  The Task 5 falsification re-run "with the flag recorded" is
+  likewise deployment-gated and currently vacuous: replay feature
+  dicts cannot carry the key until a producer exists.
+  `[verified 2026-11-28]`
 
 ## MISSION REFACTOR TASK 11 — `scores_validated` RETIRED, SPLIT GATES LIVE — 2026-11-28
 

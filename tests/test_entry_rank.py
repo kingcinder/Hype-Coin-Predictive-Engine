@@ -24,11 +24,13 @@ from features.factory import FeatureValue
 from forecast.labels import ForwardPath
 from scoring.entry_rank import (
     ENTRY_RANK_COMPONENTS,
+    launch_bundle_share,
     rank_entry_cohort,
     wash_lite_adjust,
 )
 from scripts import falsify_entry_rank
 from scripts.falsify_entry_rank import evaluate_cohorts
+from storage import models
 from storage.repository import insert_market_snapshot_once, upsert_asset, upsert_pool_and_pair
 from tests.conftest import seed_reference
 
@@ -288,3 +290,122 @@ def test_falsification_run_writes_report_when_kill_bar_fails(session, tmp_path, 
     assert payload["passed"] is False
     assert payload["days"], "expected at least one fully-observed day cohort"
     assert {screen["name"] for screen in payload["screening"]} == set(ENTRY_RANK_COMPONENTS)
+
+
+# ---------------------------------------------------------------------------
+# Launch bundle-share gate (Task 12c)
+# ---------------------------------------------------------------------------
+
+
+def _bundle_base_features() -> dict[str, float]:
+    return {
+        "net_inflow_ratio": 0.10,
+        "buy_sell_ratio": 1.5,
+        "unique_buyers_estimate": 40.0,
+        "liquidity_depth": 5000.0,
+    }
+
+
+def test_bundle_flag_set_at_or_above_threshold():
+    settings = get_settings()
+    # The 12c threshold is the same-block bundle share bar: 0.30. It is
+    # NOT spec §3 item 4's 40% — that number governs the funding-cluster
+    # share, a different measure deferred to its own build.
+    assert settings.entry_bundle_share_threshold == 0.30
+    rows = [
+        (1, {**_bundle_base_features(), "launch_bundle_share": 0.45}),
+        (2, {**_bundle_base_features(), "launch_bundle_share": 0.30}),
+        (3, {**_bundle_base_features(), "launch_bundle_share": 0.29}),
+        (4, _bundle_base_features()),
+    ]
+    candidates = {c.asset_id: c for c in rank_entry_cohort(rows, settings=settings)}
+    assert candidates[1].bundle_flagged is True
+    assert candidates[1].components["launch_bundle_share"] == 0.45
+    # The bar is inclusive: a share exactly at the threshold flags.
+    assert candidates[2].bundle_flagged is True
+    assert candidates[3].bundle_flagged is False
+    assert candidates[3].components["launch_bundle_share"] == 0.29
+    # Key absent: flag False and nothing recorded — the share is never
+    # inferred from aggregates.
+    assert candidates[4].bundle_flagged is False
+    assert "launch_bundle_share" not in candidates[4].components
+
+
+def test_bundle_flag_is_informational_and_never_changes_rank():
+    settings = get_settings()
+    plain = [
+        (1, _bundle_base_features()),
+        (2, {**_bundle_base_features(), "net_inflow_ratio": 0.20}),
+    ]
+    flagged = [
+        (1, {**_bundle_base_features(), "launch_bundle_share": 0.95}),
+        (2, {**_bundle_base_features(), "net_inflow_ratio": 0.20}),
+    ]
+    plain_candidates = rank_entry_cohort(plain, settings=settings)
+    flagged_candidates = rank_entry_cohort(flagged, settings=settings)
+    # Flagging is informational in v1: same order, same rank sums — the
+    # flag does not zero, damp, or boost the rank.
+    assert [c.asset_id for c in flagged_candidates] == [c.asset_id for c in plain_candidates]
+    assert [c.rank_sum for c in flagged_candidates] == [c.rank_sum for c in plain_candidates]
+    by_id = {c.asset_id: c for c in flagged_candidates}
+    assert by_id[1].bundle_flagged is True
+    assert by_id[2].bundle_flagged is False
+    # The recorded share is not a rank component.
+    assert "launch_bundle_share" not in ENTRY_RANK_COMPONENTS
+
+
+def test_launch_bundle_share_extraction_reads_ignition_details(session):
+    chain, source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="BundleShareAddress",
+        symbol="BNDL",
+        name="Bundle Fixture",
+        first_seen_at=T0,
+    )
+    session.flush()
+    session.add(
+        models.IgnitionEvent(
+            asset_id=asset.id,
+            source_id=source.id,
+            event_type="sniper_burst",
+            ts=T0,
+            observed_at=T0,
+            confidence=0.5,
+            details={"buys": 42, "launch_bundle_share": 0.5},
+        )
+    )
+    session.commit()
+    assert launch_bundle_share(session, asset.id) == 0.5
+
+
+def test_launch_bundle_share_absent_without_the_key(session):
+    # Real IgnitionEvent.details payloads (radar/ignition.py) carry
+    # aggregate launch metadata only — buys/sells counts and ratios —
+    # so the extraction reads absent; a sniper burst's buy count is
+    # not a bundle share and is never read as one.
+    chain, source = seed_reference(session)
+    asset = upsert_asset(
+        session,
+        chain_id=chain.id,
+        address="NoBundleKeyAddress",
+        symbol="NBK",
+        name="No Bundle Key Fixture",
+        first_seen_at=T0,
+    )
+    session.flush()
+    session.add(
+        models.IgnitionEvent(
+            asset_id=asset.id,
+            source_id=source.id,
+            event_type="sniper_burst",
+            ts=T0,
+            observed_at=T0,
+            confidence=0.5,
+            details={"buys": 500, "sells": 3, "buy_sell_ratio": 166.667},
+        )
+    )
+    session.commit()
+    assert launch_bundle_share(session, asset.id) is None
+    assert launch_bundle_share(session, 999_999) is None

@@ -28,6 +28,18 @@ contingency falsification (``scripts/social_prior_falsification.py``)
 guards the multiplier: at 1.0 (the demoted state) presence no longer
 scales anything and only breaks exact rank-sum ties.
 
+The launch bundle gate (Task 12c, spec §3 item 4) is a flag, never a
+rank term: when a cohort row carries ``launch_bundle_share`` — the
+same-block bundled share of launch-window buys — a share at or above
+``Settings.entry_bundle_share_threshold`` (0.30) sets
+``EntryCandidate.bundle_flagged`` and the raw share is recorded in
+``components``. Flagging is informational in v1: it does not zero,
+damp, or boost the rank. Where no launch-transaction data exists for
+an asset the key is absent and the flag reads False — the share is
+never inferred from aggregates. (The 0.30 bar governs bundle share
+only; spec item 4's 40% governs the funding-cluster share, a
+different measure deferred to its own build.)
+
 Percentile convention: midrank — ``(count_below + 0.5 * count_equal) /
 cohort_size`` — so ties share their percentile and a single-row cohort
 reads 0.5. A component missing from a row scores percentile 0.0:
@@ -61,6 +73,7 @@ class EntryCandidate:
     rank_sum: float
     components: dict[str, float]  # percentile rank per component, 0..1
     wash_flagged: bool
+    bundle_flagged: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +138,35 @@ def social_presence_at_first_observation(session: Session, asset_id: int) -> Soc
     )
 
 
+def launch_bundle_share(session: Session, asset_id: int) -> float | None:
+    """Same-block bundled share of launch-window buys, where recorded.
+
+    Extraction seam for the 12c bundle gate (plan Task 12 Step 5):
+    reads the ``launch_bundle_share`` key from the asset's
+    ``IgnitionEvent.details`` launch metadata, earliest event first,
+    accepting only a finite number inside [0, 1]. No current producer
+    writes that key — ``radar/ignition.py``'s three event types
+    persist aggregate launch metadata only (buy/sell counts, ratios,
+    reserve prints), and no launch-transaction table exists in the
+    lake — so this returns None on all current data. The share is
+    never inferred from aggregates: a sniper burst's buy count is not
+    a bundle share.
+    """
+    events = session.scalars(
+        select(models.IgnitionEvent)
+        .where(models.IgnitionEvent.asset_id == asset_id)
+        .order_by(models.IgnitionEvent.ts, models.IgnitionEvent.id)
+    ).all()
+    for event in events:
+        value = (event.details or {}).get("launch_bundle_share")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        share = float(value)
+        if 0.0 <= share <= 1.0:
+            return share
+    return None
+
+
 def wash_lite_adjust(
     features: dict[str, float], *, settings: Settings
 ) -> tuple[dict[str, float], bool]:
@@ -186,6 +228,11 @@ def rank_entry_cohort(
     multiplication is a no-op and presence instead breaks exact
     rank_sum ties, ahead of the asset_id tiebreak. All other ties
     break by ascending asset_id so the ordering is deterministic.
+
+    Bundle gate (Task 12c): a row carrying ``launch_bundle_share``
+    records the raw share in ``components`` and is ``bundle_flagged``
+    when the share reaches ``settings.entry_bundle_share_threshold``;
+    the flag never changes the rank. Absent key = unflagged.
     """
     adjusted = [
         (asset_id, *wash_lite_adjust(features, settings=settings)) for asset_id, features in rows
@@ -212,6 +259,14 @@ def rank_entry_cohort(
             # Recorded beside the percentiles; the marker is not itself a
             # percentile and never enters rank_sum.
             components["unique_buyers_acceleration_wash_dropped"] = 1.0
+        bundle_share = features.get("launch_bundle_share")
+        bundle_flagged = False
+        if bundle_share is not None:
+            # The raw share is recorded beside the percentiles, like the
+            # wash-drop marker: it is not a component and never enters
+            # rank_sum. Flagging is informational in v1.
+            components["launch_bundle_share"] = bundle_share
+            bundle_flagged = bundle_share >= settings.entry_bundle_share_threshold
         candidate_presence = presence.get(asset_id) if presence else None
         if candidate_presence is not None and (
             candidate_presence.telegram or candidate_presence.website
@@ -226,6 +281,7 @@ def rank_entry_cohort(
                 rank_sum=rank_sum,
                 components=components,
                 wash_flagged=wash_flagged,
+                bundle_flagged=bundle_flagged,
             )
         )
     demoted = settings.entry_social_prior_multiplier == 1.0
