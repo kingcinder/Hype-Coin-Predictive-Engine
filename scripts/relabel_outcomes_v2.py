@@ -28,11 +28,14 @@ from common.time import ensure_utc, utc_now
 from risk_engine.outcomes import (
     _COLLAPSE_PHASES,
     _SURVIVAL_PHASES,
-    LABEL_VERSION,
     _has_forward_price_evidence,
     _lifecycle_phase_as_of,
     _price_change_since,
 )
+
+# Pinned: this script is the historical v1 -> v2 relabel. The current label
+# version is v3 (see relabel_outcomes_v3.py); do not follow LABEL_VERSION.
+LABEL_VERSION = "v2_bounded"
 from storage import models
 from storage.database import session_scope
 from storage.repository import queued_write

@@ -1,0 +1,25 @@
+# Serpent Circle — features-table retention timer.
+#
+# Fires serpent-features-retention.service daily at 07:00 UTC, after the
+# daily forecast retrain (~05:36 UTC) whose bootstrap labels the points the
+# prune's resolving window protects. The service's --check-due gate makes
+# duplicate/catch-up timer activations exit cleanly without recording a
+# no-op retention pass. If you change FEATURES_RETENTION_CADENCE_HOURS in
+# .env, adjust OnCalendar here to match. Persistent=true catches up after
+# the machine was off.
+#
+# The pass is safe at any time (the resolving window covers retrain/prune
+# timing skew), but after-retrain is ideal; do not move it before 05:36 UTC
+# without a reason.
+
+[Unit]
+Description=Daily Serpent Circle features-table retention pass
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=serpent-features-retention.service
+
+[Install]
+WantedBy=timers.target

@@ -2,7 +2,7 @@
 
 When a phase-confidence map is installed, the stored risk is the calibrated
 collapse probability — the complement of the calibrated survival probability
-— fit out-of-sample on the v2_bounded reference set. Without a phase map (or
+— fit out-of-sample on the v3_bounded reference set. Without a phase map (or
 without a lifecycle_phase feature) the raw rule-engine score is kept.
 
 Why: the raw rule score is badly calibrated as a collapse probability
@@ -65,9 +65,9 @@ def _seed(
     total: int,
     survived: int,
     scored_at: datetime = BASE,
-    label_version: str = "v2_bounded",
+    label_version: str = "v3_bounded",
 ) -> None:
-    """Seed `total` resolved v2 outcomes in one (band, phase) cell, with the
+    """Seed `total` resolved v3 outcomes in one (band, phase) cell, with the
     matching lifecycle_phase Feature rows the fit joins on."""
     for index in range(total):
         ts = scored_at - timedelta(hours=index + 1)

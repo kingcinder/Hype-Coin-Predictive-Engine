@@ -1,0 +1,54 @@
+# Serpent Circle — features-table retention service unit.
+#
+# Runs one features-table prune pass (ops.features_retention --once).
+# The timer (serpent-features-retention.timer) may fire more often than the
+# configured cadence; --check-due exits cleanly and logs when there is nothing
+# to do. The pass deletes only feature rows the trainer, validation harness,
+# and live scoring no longer need (label-anchored keep-set; see
+# ops/features_retention.py), in id-range batches, and never touches the
+# engine process or ports 8000/8501.
+#
+# The pass is safe at any time -- the resolving window covers retrain/prune
+# timing skew -- but running after the daily forecast retrain (~05:36 UTC,
+# which bootstraps the label seeder) is ideal, so the timer fires at 07:00
+# UTC. If you change FEATURES_RETENTION_CADENCE_HOURS in .env, adjust
+# OnCalendar in the timer to match. Persistent=true catches up after the
+# machine was off.
+#
+# Adjust the paths to your checkout and venv:
+#   WorkingDirectory=/opt/serpent
+#   ExecStartPre=/opt/serpent/.venv/bin/alembic -c storage/alembic.ini upgrade head
+#   ExecStart=/bin/sh -c '...'
+#
+# Install:
+#   sudo cp deploy/systemd/serpent-features-retention.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now serpent-features-retention.timer
+#
+# First live prune: run a dry run first and read the report before enabling
+# the timer -- the first prune deletes millions of rows.
+#   SERPENT_DB_PATH=<live db> .venv/bin/python -m ops.features_retention --once --dry-run
+
+[Unit]
+Description=Serpent Circle features-table retention (prune unneeded feature rows)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/serpent
+# Apply the alembic chain before the pass so migration-owned tables (e.g. 0043
+# feature_retention_runs) exist even if this timer fires before any worker
+# booted on a hand-rolled DB copy. Idempotent; mirrors the worker and API units.
+ExecStartPre=/opt/serpent/.venv/bin/alembic -c storage/alembic.ini upgrade head
+ExecStart=/bin/sh -c '/opt/serpent/.venv/bin/python -m ops.features_retention --check-due && exec /opt/serpent/.venv/bin/python -m ops.features_retention --once || rc=$$?; if [ "$${rc:-0}" -eq 1 ]; then echo "features retention pass not due; exiting cleanly"; exit 0; fi; exit "$${rc:-0}"'
+# Read the project .env the same way the worker does.
+EnvironmentFile=-/opt/serpent/.env
+User=serpent
+Group=serpent
+# Failure exits nonzero so systemd can alert, but the module records
+# component:features_retention health as red regardless.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

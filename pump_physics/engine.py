@@ -38,6 +38,10 @@ PARABOLIC_BUY_SELL = 1.3
 SATURATION_BUY_SELL = 0.8
 COLLAPSE_1H_RETURN_PCT = -25.0
 DEAD_AFTER_NO_TRADES_HOURS = 168.0  # 7 days
+# A liquidity withdrawal only signals collapse when it is recent: a single
+# withdrawal months ago is not a collapse.  (v3; the old rule fired on any
+# withdrawal ever, however stale.)
+WITHDRAWAL_RECENT_HOURS = 48.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,10 @@ class PhaseEvidence:
     one_hour_return: float | None
     narrative_velocity: float | None
     last_trade_hours_ago: float | None
+    # Hours since the most recent liquidity withdrawal, or None when the
+    # asset has never had one.  Used to require a withdrawal to be recent
+    # before it can signal COLLAPSE (v3).
+    last_withdrawal_hours_ago: float | None = None
 
 
 def detect_phase(evidence: PhaseEvidence) -> LifecyclePhase:
@@ -81,7 +89,11 @@ def detect_phase(evidence: PhaseEvidence) -> LifecyclePhase:
     if evidence.one_hour_return is not None and evidence.one_hour_return <= COLLAPSE_1H_RETURN_PCT:
         return LifecyclePhase.COLLAPSE
 
-    if evidence.withdrawal_events >= 1:
+    if (
+        evidence.withdrawal_events >= 1
+        and evidence.last_withdrawal_hours_ago is not None
+        and evidence.last_withdrawal_hours_ago <= WITHDRAWAL_RECENT_HOURS
+    ):
         return LifecyclePhase.COLLAPSE
 
     if evidence.ignition_events >= 1:
@@ -190,6 +202,7 @@ class LifecycleEngine:
 
         ignition_events = 0
         withdrawal_events = 0
+        last_withdrawal_ts: datetime | None = None
         for event in session.scalars(
             select(models.IgnitionEvent).where(
                 models.IgnitionEvent.asset_id == asset.id,
@@ -203,6 +216,10 @@ class LifecycleEngine:
                 ignition_events += 1
             elif event.event_type == IgnitionEventType.LIQUIDITY_WITHDRAWAL.value:
                 withdrawal_events += 1
+                if last_withdrawal_ts is None or ensure_utc(event.ts) > ensure_utc(
+                    last_withdrawal_ts
+                ):
+                    last_withdrawal_ts = ensure_utc(event.ts)
 
         market_rows = (
             list(
@@ -295,6 +312,12 @@ class LifecycleEngine:
                 0.0,
                 (decision_ts - ensure_utc(market_rows[-1].ts)).total_seconds() / 3600.0,
             )
+        last_withdrawal_hours_ago = None
+        if last_withdrawal_ts is not None:
+            last_withdrawal_hours_ago = max(
+                0.0,
+                (decision_ts - last_withdrawal_ts).total_seconds() / 3600.0,
+            )
 
         return PhaseEvidence(
             has_pool=has_pool,
@@ -308,6 +331,7 @@ class LifecycleEngine:
             one_hour_return=one_hour_return,
             narrative_velocity=(1.0 if narrative is not None else None),
             last_trade_hours_ago=last_trade_hours_ago,
+            last_withdrawal_hours_ago=last_withdrawal_hours_ago,
         )
 
     def _holder_growth(

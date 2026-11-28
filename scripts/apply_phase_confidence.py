@@ -6,10 +6,10 @@ Usage:
       --cutoff 2026-10-20T20:45:55+00:00 [--expected-eval 19719] [--yes]
 
 Steps:
-  1. refresh_phase_confidence(session, cutoff, label_version="v2_bounded")
+  1. refresh_phase_confidence(session, cutoff, label_version="v3_bounded")
      — fits on the reference set (scored_at <= cutoff - 48h embargo) and
      installs the map in-process.
-  2. Load the harness eval set: evaluated v2_bounded outcomes with
+  2. Load the harness eval set: evaluated v3_bounded outcomes with
      scored_at > cutoff. Assert the count matches --expected-eval when given.
   3. For each eval score, recompute compute_scores from its Feature rows
      and update ONLY confidence / uncertainty / confidence_source in place.
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="ISO cutoff, e.g. 2026-10-20T20:45:55+00:00 (harness partition)",
     )
-    parser.add_argument("--label-version", default="v2_bounded")
+    parser.add_argument("--label-version", default="v3_bounded")
     parser.add_argument(
         "--expected-eval", type=int, default=None, help="assert the eval-set row count matches this"
     )

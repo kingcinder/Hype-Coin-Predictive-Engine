@@ -61,7 +61,7 @@ class ValidationReport:
     # They are withheld from every metric; the count makes the backlog visible.
     unresolved_outcomes: int = 0
     # Top-of-file label accounting (B4): confirmatory metrics are conditional
-    # on resolved v2_bounded rows; censored rows with censored_at set are
+    # on resolved v3_bounded rows; censored rows with censored_at set are
     # reported separately from the unresolved backlog.
     resolved: int = 0
     censored: int = 0

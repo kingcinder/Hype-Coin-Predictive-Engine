@@ -171,6 +171,29 @@ class RetentionRun(Base):
     duration_sec: Mapped[float | None] = mapped_column(Float)
 
 
+class FeatureRetentionRun(Base):
+    """One features-table retention pass: rows before/after and keys kept.
+
+    The features-table pruner (``ops.features_retention``) runs on a
+    configurable cadence and records each pass here so Feed Health can
+    report how fast the features table is shrinking/growing and the
+    ``--check-due`` gate can tell whether a pass is due. A dry-run pass
+    records the would-be pruned count with ``dry_run=True`` and deletes
+    nothing."""
+
+    __tablename__ = "feature_retention_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rows_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    rows_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    rows_pruned: Mapped[int] = mapped_column(Integer, nullable=False)
+    keys_kept: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_sec: Mapped[float | None] = mapped_column(Float)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
 class ScoreDriftRun(Base):
     """One persisted-drift probe measurement — the trend-series point.
 

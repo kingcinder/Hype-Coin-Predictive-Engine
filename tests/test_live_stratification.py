@@ -160,7 +160,7 @@ def test_run_harness_reports_live_and_dead_strata(session) -> None:
                 collapsed=collapsed,
                 rugged=False,
                 survived=not collapsed,
-                label_version="v2_bounded",
+                label_version="v3_bounded",
             )
         )
 

@@ -171,7 +171,7 @@ def compute_scores(
     # Phase-conditioned calibration (v4, 2026-11-20): when a phase map is
     # installed, confidence is the calibrated survival probability for the
     # (risk band, lifecycle phase at score time) cell, fit out-of-sample on
-    # the v2_bounded reference set. Evidence completeness (availability,
+    # the v3_bounded reference set. Evidence completeness (availability,
     # coverage, flags, data-layer uncertainty) is not a survival signal and
     # no longer erodes confidence — it is reported as uncertainty instead.
     # Without a phase map (or a missing lifecycle_phase feature), the
@@ -209,7 +209,7 @@ def compute_scores(
     # Risk calibration (v6, 2026-11-20): when the phase map drives
     # confidence, the risk score is the calibrated collapse probability —
     # the complement of the calibrated survival probability — fit
-    # out-of-sample on the v2_bounded reference set. The raw rule-engine
+    # out-of-sample on the v3_bounded reference set. The raw rule-engine
     # score is badly calibrated as a collapse probability (mean
     # |risk/100 - collapsed| = 0.5026 on the v5 eval set; within-phase it
     # is inverted — lower risk, higher collapse in phase 1), and its

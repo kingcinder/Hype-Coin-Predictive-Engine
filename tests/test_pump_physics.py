@@ -38,6 +38,7 @@ def _evidence(**overrides: Any) -> PhaseEvidence:
         one_hour_return=5.0,
         narrative_velocity=1.0,
         last_trade_hours_ago=1.0,
+        last_withdrawal_hours_ago=None,
     )
     values.update(overrides)
     return PhaseEvidence(**values)
@@ -61,8 +62,28 @@ def test_detect_phase_collapse_on_1h_crash() -> None:
 
 def test_detect_phase_collapse_on_withdrawal() -> None:
     assert (
-        detect_phase(_evidence(withdrawal_events=2, liquidity_usd=50_000.0))
+        detect_phase(
+            _evidence(
+                withdrawal_events=2,
+                liquidity_usd=50_000.0,
+                last_withdrawal_hours_ago=1.0,
+            )
+        )
         == LifecyclePhase.COLLAPSE
+    )
+
+
+def test_detect_phase_ignores_stale_withdrawal() -> None:
+    """A withdrawal from >48h ago is not a collapse signal (v3 rule)."""
+    assert (
+        detect_phase(
+            _evidence(
+                withdrawal_events=2,
+                liquidity_usd=50_000.0,
+                last_withdrawal_hours_ago=100.0,
+            )
+        )
+        != LifecyclePhase.COLLAPSE
     )
 
 

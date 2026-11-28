@@ -1,7 +1,7 @@
 """Tests for the phase-conditioned confidence calibration (v4, 2026-11-20).
 
 Confidence is the calibrated survival probability for the (risk band,
-lifecycle phase at score time) cell, fit out-of-sample on the v2_bounded
+lifecycle phase at score time) cell, fit out-of-sample on the v3_bounded
 reference set. Evidence completeness is reported as uncertainty, not
 confidence, so the most predictable rows (dead tokens) no longer look
 maximally uncertain.
@@ -37,9 +37,9 @@ def _seed(
     total: int,
     survived: int,
     scored_at: datetime = BASE,
-    label_version: str = "v2_bounded",
+    label_version: str = "v3_bounded",
 ) -> None:
-    """Seed `total` resolved v2 outcomes in one (band, phase) cell, with the
+    """Seed `total` resolved v3 outcomes in one (band, phase) cell, with the
     matching lifecycle_phase Feature rows the fit joins on."""
     for index in range(total):
         ts = scored_at - timedelta(hours=index + 1)
@@ -110,10 +110,10 @@ def test_phase_fallback_chain_cell_phase_band_table(session) -> None:
 
 def test_phase_refresh_ignores_post_cutoff_and_v1_rows(session) -> None:
     set_phase_confidence(None)
-    _seed(session, 1, "BLACK", 5, total=10, survived=0)  # pre-cutoff v2
+    _seed(session, 1, "BLACK", 5, total=10, survived=0)  # pre-cutoff v3
     _seed(
         session, 2, "BLACK", 5, total=10, survived=10, scored_at=NOW - timedelta(hours=1)
-    )  # post-cutoff v2
+    )  # post-cutoff v3
     _seed(
         session, 3, "BLACK", 5, total=10, survived=10, label_version="v1_unbounded"
     )  # pre-cutoff v1
@@ -144,7 +144,7 @@ def test_phase_refresh_excludes_ambiguous_outcomes(session) -> None:
                 collapsed=False,
                 survived=False,
                 rugged=False,
-                label_version="v2_bounded",
+                label_version="v3_bounded",
             )
         )
         session.add(

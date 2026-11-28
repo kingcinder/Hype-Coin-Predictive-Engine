@@ -72,7 +72,11 @@ class RiskOutcomeReport:
 
 #: Lifecycle phases that establish an outcome.  A phase outside both sets at
 #: window end (including no event at all) cannot label a prediction.
-_COLLAPSE_PHASES = frozenset({"collapse", "dead", "rugged"})
+#: ``dead`` is deliberately NOT a collapse phase: it means "no price data
+#: for 7 days" (staleness), not a price crash.  A token fading to staleness
+#: inside its window is censored, never collapsed (v3; Nov 27 label bug:
+#: 93.7% of fresh "collapses" were DEAD, not price crashes).
+_COLLAPSE_PHASES = frozenset({"collapse", "rugged"})
 _SURVIVAL_PHASES = frozenset({"survivor", "parabolic", "saturation"})
 _TERMINAL_PHASES = _COLLAPSE_PHASES | _SURVIVAL_PHASES
 
@@ -80,8 +84,10 @@ _TERMINAL_PHASES = _COLLAPSE_PHASES | _SURVIVAL_PHASES
 #: withheld outcomes are visible in ``/health`` without grepping logs.
 UNRESOLVED_OUTCOME_COMPONENT = "outcome_labels"
 
-#: Bounded label version for outcome tracking (v1_unbounded → v2_bounded)
-LABEL_VERSION = "v2_bounded"
+#: Bounded label version for outcome tracking (v1_unbounded → v2_bounded →
+#: v3_bounded).  v3 excludes DEAD from collapse (staleness is not a crash)
+#: and gates outcome recording on recent market data.
+LABEL_VERSION = "v3_bounded"
 
 #: Persist this many outcome changes per transaction. SQLite has one writer;
 #: committing the backlog in bounded batches keeps that lock from spanning the
@@ -221,7 +227,9 @@ def _has_forward_price_evidence(
     ``observed_at`` at or before the evaluation time.  Without it the row is
     censored (unevaluated), never survived.  Collapse labels need no such
     guard: a collapse event is positive evidence, recorded only when the
-    scan actually saw it.
+    scan actually saw it.  (``dead`` is not a collapse phase -- it is the
+    absence of data, not positive evidence -- so it can never label a row
+    collapsed; a DEAD phase at window end is censored.)
     """
     key = (asset_id, ensure_utc(scored_at), ensure_utc(window_end))
     if _cache is not None and key in _cache:
@@ -328,6 +336,40 @@ _EVALUATED_OUTCOME_UPDATE = (
 )
 
 
+def _latest_snapshot_age_hours(
+    session: Session,
+    asset_id: int,
+    decision_ts: datetime,
+) -> float | None:
+    """Hours since the asset's latest valid market snapshot at ``decision_ts``.
+
+    Returns None when the asset has no usable snapshot (no pairs, or no
+    snapshot with a positive price at or before ``decision_ts``).  Used by
+    the scoring freshness gate: an outcome is only recorded for a token
+    that was actually observed trading recently, so stale tokens fading
+    to DEAD cannot manufacture collapse labels.
+    """
+    pair_ids = session.scalars(
+        select(models.Pair.id).where(models.Pair.base_asset_id == asset_id)
+    ).all()
+    if not pair_ids:
+        return None
+    latest_ts = session.scalar(
+        select(func.max(models.MarketSnapshot.ts)).where(
+            models.MarketSnapshot.pair_id.in_(pair_ids),
+            models.MarketSnapshot.ts <= ensure_utc(decision_ts),
+            models.MarketSnapshot.price_usd.is_not(None),
+            models.MarketSnapshot.price_usd > 0,
+        )
+    )
+    if latest_ts is None:
+        return None
+    return max(
+        0.0,
+        (ensure_utc(decision_ts) - ensure_utc(latest_ts)).total_seconds() / 3600.0,
+    )
+
+
 def record_risk_outcome(
     session: Session,
     *,
@@ -359,6 +401,22 @@ def record_risk_outcome(
         )
     )
     if existing:
+        return
+    # Freshness gate (v3): do not record an outcome for a token whose last
+    # valid market snapshot is stale.  A token 5-6 days stale at scoring
+    # crosses the 7-day DEAD threshold inside its window and would otherwise
+    # be labeled collapsed for fading to staleness, not for a price crash.
+    # Stale tokens produce no outcome row at all (they are not predictions).
+    max_age = float(get_settings().risk_outcome_max_snapshot_age_hours)
+    age = _latest_snapshot_age_hours(session, asset_id, decision_ts)
+    if age is None or age > max_age:
+        log.debug(
+            "risk_outcome_skipped_stale",
+            asset_id=asset_id,
+            score_id=score_id,
+            snapshot_age_hours=age,
+            max_age_hours=max_age,
+        )
         return
     session.add(
         models.RiskOutcome(

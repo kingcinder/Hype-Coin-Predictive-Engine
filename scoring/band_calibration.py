@@ -210,7 +210,7 @@ def refresh_band_calibration(
 # mid-range confidence and dominated the calibration error.
 #
 # Fix: confidence becomes the calibrated survival probability conditioned on
-# (risk band, lifecycle phase at score time), fit ONLY on v2_bounded
+# (risk band, lifecycle phase at score time), fit ONLY on v3_bounded
 # evaluated outcomes at or before an explicit cutoff (the harness reference
 # set — out-of-sample by construction; the harness measures the result on
 # the post-cutoff eval set). Evidence completeness moves out of confidence
@@ -258,7 +258,7 @@ def refresh_phase_confidence(
     session: Session,
     *,
     cutoff: datetime | None = None,
-    label_version: str = "v2_bounded",
+    label_version: str = "v3_bounded",
     min_samples: int = _PHASE_CONFIDENCE_MIN_SAMPLES,
 ) -> dict[str, Any]:
     """Fit the (risk band, lifecycle phase) -> survival map on the reference set.

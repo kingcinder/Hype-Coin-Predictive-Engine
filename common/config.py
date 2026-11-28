@@ -323,6 +323,33 @@ class Settings(BaseSettings):
     # so 10 minutes is generous yet bounded.
     retention_timeout_seconds: float = 600.0
 
+    # features-table retention: prune feature rows the trainer,
+    # validation harness, and live scoring no longer need. The policy is
+    # label-anchored, not an arbitrary day count -- a row is kept only if
+    # it is at a labeled key, in the pending/resolving window for a label
+    # that has not landed yet, or at one of the latest two decision_ts per
+    # asset (drift probe + _changed_features + API latest-per-asset).
+    # See ops/features_retention.py for the full policy.
+    features_retention_enabled: bool = True
+    features_retention_cadence_hours: float = 24.0
+    # Pending window: points younger than this still have an unresolved
+    # 24h forward label window (forecast_forward_hours); keep them if an
+    # entry price exists so the daily retrain's label seeder can label them.
+    features_retention_pending_hours: float = 24.0
+    # Resolving window: points older than the pending window but younger
+    # than this, with an entry price AND future prices already in the 24h
+    # forward window, are awaiting the daily retrain's label seeder; 72h
+    # gives two missed-retrain days of slack beyond the 24h window.
+    features_retention_resolving_hours: float = 72.0
+    # Live paths need the latest N decision_ts per asset (drift probe
+    # samples the latest; scoring._changed_features needs the previous).
+    features_retention_latest_per_asset: int = 2
+    # Safety cap: max rows deleted in one pass (0 = unlimited). The pass
+    # deletes in id-range batches of FEATURES_RETENTION_BATCH_SIZE so it
+    # never holds a long write lock against the live engine.
+    features_retention_max_rows_per_pass: int = 0
+    features_retention_batch_size: int = 20_000
+
     # Shared watchdog ceiling for the other blocking engine phases (seconds).
     # Each phase also owns a per-phase setting so an operator can tune an
     # outlier — e.g. a slow night-crawler fleet — without relaxing the rest;
@@ -559,6 +586,11 @@ class Settings(BaseSettings):
 
     # Risk outcome tracking: observation window for evaluating flagged tokens
     risk_outcome_window_hours: float = 48.0
+    # Freshness gate for recording risk outcomes: a token whose last valid
+    # market snapshot is older than this at scoring time gets no outcome
+    # row (it is not a live prediction).  Prevents stale tokens fading to
+    # DEAD inside their window from manufacturing collapse labels (v3).
+    risk_outcome_max_snapshot_age_hours: float = 24.0
     # Price-change thresholds for the unknown-outcome fallback in ensemble
     # feedback: below drop = collapsed-like, above gain = survived-like.
     risk_outcome_price_drop_threshold: float = -0.5  # 50% drop

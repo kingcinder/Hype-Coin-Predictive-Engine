@@ -80,7 +80,7 @@ class OutcomeRow:
     collapsed: bool
     rugged: bool
     survived: bool
-    label_version: str = "v2_bounded"
+    label_version: str = "v3_bounded"
     # Lifecycle phase at score time (RiskOutcome.lifecycle_phase_at_score).
     phase_at_score: str | None = None
 
@@ -707,7 +707,7 @@ def ensemble_weight_tracking(
 
 
 def load_outcomes(session: Session) -> list[OutcomeRow]:
-    """Load evaluated, bounded (v2) risk outcomes joined to their scores.
+    """Load evaluated, bounded (v3) risk outcomes joined to their scores.
 
     Confirmatory metrics use only timestamp-bounded labels. ``v1_unbounded``
     rows are retrospective/exploratory and are excluded.
@@ -717,7 +717,7 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
         .join(models.Score, models.Score.id == models.RiskOutcome.score_id)
         .where(
             models.RiskOutcome.evaluated_at.is_not(None),
-            models.RiskOutcome.label_version == "v2_bounded",
+            models.RiskOutcome.label_version == "v3_bounded",
         )
     ).all()
     out: list[OutcomeRow] = []
@@ -735,7 +735,7 @@ def load_outcomes(session: Session) -> list[OutcomeRow]:
                 collapsed=bool(outcome.collapsed),
                 rugged=bool(outcome.rugged),
                 survived=bool(outcome.survived),
-                label_version=outcome.label_version or "v2_bounded",
+                label_version=outcome.label_version or "v3_bounded",
                 phase_at_score=outcome.lifecycle_phase_at_score or None,
             )
         )
@@ -755,7 +755,7 @@ def load_unresolved_outcome_count(session: Session) -> int:
         select(models.RiskOutcome.scored_at).where(
             models.RiskOutcome.evaluated_at.is_(None),
             models.RiskOutcome.censored_at.is_(None),
-            models.RiskOutcome.label_version == "v2_bounded",
+            models.RiskOutcome.label_version == "v3_bounded",
         )
     ).all()
     count = 0
@@ -861,7 +861,7 @@ def load_scorer_accuracy_history(
     # reload them per outcome so the meta-metric covers all three scorers.
     details_by_score: dict[int, dict[str, Any]] = {}
     for outcome in session.scalars(
-        select(models.RiskOutcome).where(models.RiskOutcome.label_version == "v2_bounded")
+        select(models.RiskOutcome).where(models.RiskOutcome.label_version == "v3_bounded")
     ).all():
         details_by_score[outcome.score_id] = outcome.details or {}
     for o in outcomes:
@@ -1167,7 +1167,7 @@ def run_harness(
         select(func.count(models.RiskOutcome.id)).where(
             models.RiskOutcome.evaluated_at.is_(None),
             models.RiskOutcome.censored_at.is_not(None),
-            models.RiskOutcome.label_version == "v2_bounded",
+            models.RiskOutcome.label_version == "v3_bounded",
         )
     )
     v1_resolved = session.scalar(

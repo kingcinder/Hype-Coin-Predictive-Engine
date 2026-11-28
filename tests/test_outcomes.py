@@ -694,6 +694,9 @@ def test_report_censors_rows_without_a_label_in_their_window(session) -> None:
     withheld = _seed_prediction(session, asset)
     _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(days=4))
     # A later prediction whose 48h window has not elapsed yet is not unresolved.
+    # It needs a fresh snapshot at its own score time: the v3 freshness gate
+    # skips outcomes with no market data within 24h of scoring.
+    _seed_forward_snapshot(session, asset, ts=SCORED_AT + timedelta(days=4))
     _seed_prediction(session, asset, decision_ts=SCORED_AT + timedelta(days=4))
 
     resolved_asset = seed_market_asset(
@@ -815,7 +818,7 @@ def test_legacy_row_with_existing_bounded_row_does_not_break_evaluation(session)
 
     assert bounded_row.collapsed is True
     assert ensure_utc(bounded_row.evaluated_at) == EVAL_TS
-    assert bounded_row.label_version == "v2_bounded"
+    assert bounded_row.label_version == "v3_bounded"
     assert legacy.evaluated_at is None
     assert legacy.label_version == "v1_unbounded"
     rows = session.scalars(
@@ -824,11 +827,11 @@ def test_legacy_row_with_existing_bounded_row_does_not_break_evaluation(session)
     assert len(rows) == 2
 
 
-def test_evaluated_outcome_is_labelled_v2_bounded(session) -> None:
+def test_evaluated_outcome_is_labelled_v3_bounded(session) -> None:
     """A freshly evaluated outcome carries the bounded label version."""
     from risk_engine.outcomes import LABEL_VERSION
 
-    assert LABEL_VERSION == "v2_bounded"
+    assert LABEL_VERSION == "v3_bounded"
     asset = seed_market_asset(session)
     outcome = _seed_prediction(session, asset, model_version="test-label-ver")
     _seed_lifecycle(session, asset, "collapse", SCORED_AT + timedelta(hours=24))
@@ -836,4 +839,4 @@ def test_evaluated_outcome_is_labelled_v2_bounded(session) -> None:
     evaluate_outcomes(session, decision_ts=EVAL_TS, window_hours=WINDOW_HOURS)
 
     assert ensure_utc(outcome.evaluated_at) == EVAL_TS
-    assert outcome.label_version == "v2_bounded"
+    assert outcome.label_version == "v3_bounded"
