@@ -278,6 +278,79 @@ def test_dense_generator_censors_thin_gain_zero(session) -> None:
     assert LABEL_FORWARD_MAX_GAIN not in by_type
 
 
+# ── replay-path mirrors (four-path symmetry) ────────────────────────────────
+#
+# The data-lake replay path was the last generator writing collapse=0
+# unconditionally. Its zeros are held to the same evidence-density rule
+# as the other three paths; positives are never gated.
+
+
+def _seed_replay_feature(session, asset_id: int) -> None:
+    feature = upsert_feature(
+        session,
+        asset_id=asset_id,
+        decision_ts=T0,
+        feature_name="liquidity_depth",
+        feature_value=200_000.0,
+        source_count=1,
+        freshness_score=1.0,
+        missing_flag=False,
+    )
+    # The replay only trusts features observed by their own decision time.
+    feature.observed_at = T0
+
+
+def test_replay_censors_thin_collapse_zero(session) -> None:
+    # Mirror of test_label_engine_censors_thin_collapse_zero: snapshots
+    # only at hours 0-2, so the feature point at hour 0 has two forward
+    # observations out of twenty-four. Flat prices would have produced a
+    # collapse=0 before the fix.
+    from data_lake.labels import replay_historical_labels
+
+    asset = _seed_sparse_asset(session, symbol="RTHIN", snapshot_hours=[0, 1, 2])
+    _seed_replay_feature(session, asset.id)
+    session.commit()
+    counts = replay_historical_labels(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    assert counts["collapse_created"] == 0
+    by_type = _labels_by_type(session, asset.id)
+    assert by_type.get(LABEL_IGNITION) == ["0"]  # ignition zeros are not gated
+    assert LABEL_COLLAPSE not in by_type  # collapse zero censored, not written
+
+
+def test_replay_dense_coverage_still_writes_collapse_zero(session) -> None:
+    # Mirror of test_label_engine_dense_coverage_still_writes_collapse_zero.
+    from data_lake.labels import replay_historical_labels
+
+    asset = _seed_sparse_asset(session, symbol="RDENSE", snapshot_hours=list(range(30)))
+    _seed_replay_feature(session, asset.id)
+    session.commit()
+    counts = replay_historical_labels(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    assert counts["collapse_created"] == 1
+    by_type = _labels_by_type(session, asset.id)
+    assert "0" in by_type.get(LABEL_COLLAPSE, [])
+
+
+def test_replay_collapse_positive_never_gated(session) -> None:
+    # Mirror of test_collapse_positive_never_gated: a single observed
+    # crash writes collapse=1 even with thin coverage.
+    from data_lake.labels import replay_historical_labels
+
+    asset = _seed_sparse_asset(session, symbol="RCRASH", snapshot_hours=[0, 1], price=1.0)
+    rows = session.scalars(select(models.MarketSnapshot)).all()
+    for row in rows:
+        if row.ts.replace(tzinfo=None) == T0 + timedelta(hours=1):
+            row.price_usd = 0.2
+    _seed_replay_feature(session, asset.id)
+    session.commit()
+    counts = replay_historical_labels(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    assert counts["collapse_created"] == 1
+    by_type = _labels_by_type(session, asset.id)
+    assert "1" in by_type.get(LABEL_COLLAPSE, [])
+
+
 def test_gain_positive_never_gated(session) -> None:
     # Mirror of test_collapse_positive_never_gated: a single observed pump
     # writes the gain label even with thin coverage — the positive is the

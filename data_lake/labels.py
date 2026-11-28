@@ -405,12 +405,24 @@ def replay_historical_labels(
             continue  # unreachable: forward_rows is non-empty
         ignition_value = "1" if path.max_gain_pct >= ignition_threshold else "0"
         collapse_value = "1" if path.max_drawdown_pct <= collapse_threshold else "0"
+        # A collapse zero is censored when forward evidence is too thin
+        # to earn it — the same symmetric censoring as the other three
+        # generation paths; positives are never gated.
+        collapse_censored = False
+        if collapse_value == "0":
+            collapse_censored = not forward_evidence_sufficient(
+                [row.ts for row in outcomes],
+                start=feature_ts,
+                window=window,
+            )
         label_observed_at = max(ensure_utc(row.observed_at) for row in [entry, *outcomes])
         source = f"historical-replay:{settings.forecast_model_version}"
         for label_type, value, count_key in (
             (LABEL_IGNITION, ignition_value, "ignition_created"),
             (LABEL_COLLAPSE, collapse_value, "collapse_created"),
         ):
+            if collapse_censored and label_type == LABEL_COLLAPSE:
+                continue
             created = (
                 _upsert_label(
                     session,
