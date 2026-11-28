@@ -890,9 +890,15 @@ def test_captured_fraction_edges():
 
 
 def test_regret_decomposition_sums_to_total():
-    row = ExitRow(asset_id=1, decision_ts=TS, pev_gain_pct=1.8,
-                  clairvoyant_gain_pct=2.0, policy_gain_pct=1.2,
-                  ladder_gain_pct=1.0, horizon_gain_pct=0.4)
+    row = ExitRow(
+        asset_id=1,
+        decision_ts=TS,
+        pev_gain_pct=1.8,
+        clairvoyant_gain_pct=2.0,
+        policy_gain_pct=1.2,
+        ladder_gain_pct=1.0,
+        horizon_gain_pct=0.4,
+    )
     parts = regret_decomposition(row)
     assert parts["executability_gap"] == pytest.approx(0.2)
     assert sum(parts.values()) == pytest.approx(2.0 - 1.2)
