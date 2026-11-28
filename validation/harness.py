@@ -17,7 +17,7 @@ import numpy as np
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
-from common.config import get_settings
+from common.config import Settings, get_settings
 from forecast.labels import LABEL_FORWARD_MAX_GAIN, LABEL_HOURS_TO_PEAK
 from storage import models
 from validation.baselines import (
@@ -1301,17 +1301,28 @@ def load_entry_rows(session: Session) -> list[EntryRow]:
     return rows
 
 
-def load_exit_rows(session: Session) -> list[ExitRow]:
-    """Exit-mission rows — stub until Task 9.
+def load_exit_rows(session: Session, *, settings: Settings | None = None) -> list[ExitRow]:
+    """Exit-mission rows: the Task 9 exit policy replayed over held
+    episodes (policy / ladder / horizon gains against Task 7's
+    executable peaks), via ``trading.exit_policy.replay_exit_rows``.
 
-    Real rows need the Task 9 exit policy replayed over held episodes
-    (policy / ladder / horizon gains against Task 7's executable
-    peaks). Until that policy exists there are no honest rows to load,
-    so this returns ``[]``: the exit evaluator reports
-    ``insufficient_data`` and ``exit_validated`` reads False.
+    The replay window is the persisted snapshot range — the same
+    "everything the lake holds" basis the other loaders use; the
+    walk-forward split in ``run_harness`` decides which rows are
+    evaluation rows. No snapshots -> no rows: the exit evaluator
+    reports ``insufficient_data`` and ``exit_validated`` reads False.
     """
-    del session  # No reads until the Task 9 loader lands.
-    return []
+    from trading.exit_policy import replay_exit_rows
+
+    start_raw, end_raw = session.execute(
+        select(func.min(models.MarketSnapshot.ts), func.max(models.MarketSnapshot.ts))
+    ).one()
+    if start_raw is None or end_raw is None:
+        return []
+    start = _as_utc(start_raw)
+    end = _as_utc(end_raw)
+    assert start is not None and end is not None  # narrowed by the check above
+    return replay_exit_rows(session, start=start, end=end, settings=settings or get_settings())
 
 
 def load_forecast_outcomes(session: Session) -> dict[tuple[int, datetime], tuple[bool, float]]:
@@ -2011,6 +2022,20 @@ def run_harness(
         report.notes.append(f"entry evaluation skipped: {freshness_note}")
     else:
         report.cells.extend(evaluate_entry(eval_entry_rows, regime=regime, min_samples=min_samples))
+
+    # Exit-mission cells (Task 9, spec §6): real ExitRows from the
+    # exit-policy replay, split with the SAME cutoff and 48h embargo
+    # as the entry rows above — evaluation reads the eval tail only.
+    exit_rows = load_exit_rows(session, settings=settings)
+    eval_exit_rows: list[ExitRow] = []
+    if cutoff is None:
+        eval_exit_rows = list(exit_rows)
+    else:
+        for exit_row in exit_rows:
+            ts = _as_utc(exit_row.decision_ts)
+            if ts is None or ts > cutoff:
+                eval_exit_rows.append(exit_row)
+    report.cells.extend(evaluate_exit(eval_exit_rows, regime=regime, min_samples=min_samples))
 
     # Ensemble weight-tracking meta-metric (harness-computed accuracy series).
     tracking = ensemble_weight_tracking(ensemble_history, scorer_accuracy_history)

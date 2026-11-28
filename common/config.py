@@ -560,6 +560,28 @@ class Settings(BaseSettings):
     harvest_second_leg_multiple: float = 1.5
     harvest_second_leg_drawdown_fraction: float = 0.30
 
+    # Exit policy (Task 9, spec §4): the rule-based exit ladder.
+    # Rungs are forward-gain thresholds on entry price; each rung
+    # sells exit_ladder_fraction of the ORIGINAL position, once.
+    exit_ladder_rungs: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
+    exit_ladder_fraction: float = 0.25
+    # Pacing cap: one armed tranche's quote value may not exceed
+    # this fraction of current quote depth (spec §4 layer 4: 10-15%).
+    exit_max_depth_fraction: float = 0.125
+    # EV trail: once active (armed, or all rungs hit), a giveback of
+    # this fraction from the peak price exits the runner in full.
+    exit_trail_fraction: float = 0.15
+    # Arming: net-flow ratio at or below this threshold (flow
+    # rollover) together with a unique-buyer stall arms the ladder.
+    exit_nfr_arm_threshold: float = 0.0
+    # Depth-paced tranche sizing. GATE (Task 15, binding): this may
+    # default True only on a recorded depth-lead study PASS (median
+    # depth lead > 0 on live episodes). The live study is UNMEASURED
+    # (no reports/depth-lead-study-* artifact; see STATE.md Task 15),
+    # so it ships False and armed tranches fall back to the ladder's
+    # fixed fractions until the study clears it.
+    exit_pacing_enabled: bool = False
+
     # Model persistence & comparison thresholds
     model_compare_precision_delta: float = 0.05
     model_compare_cal_delta: float = 0.05
