@@ -560,6 +560,21 @@ class Settings(BaseSettings):
     harvest_second_leg_multiple: float = 1.5
     harvest_second_leg_drawdown_fraction: float = 0.30
 
+    # Exit-window labels (Task 17, spec §5/§8): at each reference
+    # size's executable peak, exit is feasible only if the pool is
+    # still trading — trailing volume at the peak row at or above
+    # this share of the episode's peak trailing volume — and the
+    # constant-product fill of f * D_peak against the depth there
+    # implies slippage at or under this cap (percent).
+    exit_window_volume_floor_share: float = 0.25
+    exit_window_max_slippage_pct: float = 10.0
+    # Cohort stage (Task 17): the cohort peak hazard at the position's
+    # phase / hours-in-position counts as the exit policy's
+    # structural-confirmation (completion) vote at or above this
+    # hazard; it is a vote alongside failed-retest structure, never
+    # a trigger that fires an exit alone.
+    cohort_hazard_complete_threshold: float = 0.5
+
     # Exit policy (Task 9, spec §4): the rule-based exit ladder.
     # Rungs are forward-gain thresholds on entry price; each rung
     # sells exit_ladder_fraction of the ORIGINAL position, once.

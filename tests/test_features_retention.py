@@ -449,7 +449,11 @@ def test_mission_label_types_match_label_constants():
         forecast_labels.LABEL_HARVEST_WINDOW_START,
         forecast_labels.LABEL_COLLAPSE_CONFIRMED,
         forecast_labels.LABEL_SECOND_LEG,
+        forecast_labels.LABEL_EXIT_WINDOW_FEASIBLE_S02,
+        forecast_labels.LABEL_EXIT_WINDOW_FEASIBLE_S10,
+        forecast_labels.LABEL_EXIT_WINDOW_FEASIBLE_S25,
     }
-    # The Task 2 forecast constants and the Task 7 harvest constants
-    # must carry exactly the pinned strings Rule 6 protects.
+    # The Task 2 forecast constants, the Task 7 harvest constants, and
+    # the Task 17 exit-window constants must carry exactly the pinned
+    # strings Rule 6 protects.
     assert defined <= named

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from common.config import Settings
 from common.time import ensure_utc
+from trading.costs import simulate_sell
 
 REFERENCE_DEPTH_FRACTIONS: tuple[float, ...] = (0.02, 0.10, 0.25)
 
@@ -90,6 +92,80 @@ def harvest_path(
         collapse_confirmed=_collapse_confirmed(norm, settings),
         second_leg=_second_leg(exec_ref, settings),
     )
+
+
+def exit_window_feasible(
+    rows: list[tuple[datetime, float, float | None, float | None]],
+    *,
+    settings: Settings,
+) -> dict[float, bool] | None:
+    """Exit feasibility per reference size, at each size's EV peak.
+
+    ``rows`` are ``(ts, price, quote_depth_usd, trailing_volume_usd)``
+    in time order — the harvest rows plus each row's trailing-window
+    volume (the market snapshot's ``volume_usd``: its trailing h1
+    volume). Returns ``None`` when there is no usable depth path or no
+    volume print anywhere: without both paths there is no exitability
+    claim to make (absence, not zero — Task 7's rule).
+
+    For each reference fraction ``f`` the claim is judged at that
+    size's executable-peak row ``t*_EV(f)`` (earliest argmax of the
+    constant-product fill price, ties to the earliest row) — the
+    moment a policy most wants to sell that size. Feasible iff all
+    three legs hold at that row:
+
+    - depth: ``D(t*) >= 0.50 * D_peak`` (episode peak quote depth);
+    - volume: trailing volume at ``t*`` >=
+      ``settings.exit_window_volume_floor_share`` of the episode's
+      peak trailing volume (the pool is still trading, not abandoned;
+      an unreported volume at ``t*`` cannot affirm that, so it fails
+      the leg);
+    - cost: selling the notional ``f * D_peak`` into ``D(t*)`` under
+      constant product implies slippage ``N / (D + N)`` at or under
+      ``settings.exit_window_max_slippage_pct`` — routed through
+      ``trading.costs.simulate_sell`` at that implied slippage so the
+      fill the label asserts is the fill the cost model would book.
+    """
+    if not rows:
+        return None
+    norm = [(ensure_utc(ts), float(price), depth, volume) for ts, price, depth, volume in rows]
+    usable = [
+        (ts, price, float(depth), volume)
+        for ts, price, depth, volume in norm
+        if depth and depth > 0
+    ]
+    if not usable:
+        return None
+    volumes = [volume for _, _, _, volume in norm if volume is not None]
+    if not volumes:
+        return None
+    d_peak = max(depth for _, _, depth, _ in usable)
+    volume_floor = settings.exit_window_volume_floor_share * max(volumes)
+    depth_floor = 0.50 * d_peak
+
+    feasible: dict[float, bool] = {}
+    for fraction in REFERENCE_DEPTH_FRACTIONS:
+        notional = fraction * d_peak
+        peak_row = usable[0]
+        peak_ev = _exec_price(peak_row[1], peak_row[2], notional)
+        for row in usable[1:]:
+            ev = _exec_price(row[1], row[2], notional)
+            if ev > peak_ev:  # strict: EV-peak ties break to the earliest row
+                peak_row, peak_ev = row, ev
+        _, peak_price, peak_depth, peak_volume = peak_row
+        depth_ok = peak_depth >= depth_floor
+        volume_ok = peak_volume is not None and peak_volume >= volume_floor
+        implied_slippage_pct = 100.0 * notional / (peak_depth + notional)
+        _proceeds, fill = simulate_sell(
+            qty=Decimal(str(notional / peak_price)),
+            quote_price=Decimal(str(peak_price)),
+            slip_pct=Decimal(str(implied_slippage_pct)),
+            fee_pct=Decimal(0),
+            priority_sol=Decimal(0),
+        )
+        cost_ok = float(fill.slippage_pct) <= settings.exit_window_max_slippage_pct
+        feasible[fraction] = depth_ok and volume_ok and cost_ok
+    return feasible
 
 
 def _harvest_window_start(

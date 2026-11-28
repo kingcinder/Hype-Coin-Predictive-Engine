@@ -12,7 +12,7 @@ from backtest.runner import point_in_time_market_rows
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
-from forecast.harvest import HarvestPath, harvest_path
+from forecast.harvest import HarvestPath, exit_window_feasible, harvest_path
 from storage import models
 from storage.repository import record_health
 
@@ -30,11 +30,20 @@ LABEL_EXECUTABLE_PEAK_GAIN_S25 = "executable_peak_gain_s25"
 LABEL_HARVEST_WINDOW_START = "harvest_window_start_hours"
 LABEL_COLLAPSE_CONFIRMED = "collapse_confirmed"
 LABEL_SECOND_LEG = "second_leg"
+LABEL_EXIT_WINDOW_FEASIBLE_S02 = "exit_window_feasible_s02"
+LABEL_EXIT_WINDOW_FEASIBLE_S10 = "exit_window_feasible_s10"
+LABEL_EXIT_WINDOW_FEASIBLE_S25 = "exit_window_feasible_s25"
 
 _FRACTION_LABELS: tuple[tuple[float, str], ...] = (
     (0.02, LABEL_EXECUTABLE_PEAK_GAIN_S02),
     (0.10, LABEL_EXECUTABLE_PEAK_GAIN_S10),
     (0.25, LABEL_EXECUTABLE_PEAK_GAIN_S25),
+)
+
+_EXIT_WINDOW_FRACTION_LABELS: tuple[tuple[float, str], ...] = (
+    (0.02, LABEL_EXIT_WINDOW_FEASIBLE_S02),
+    (0.10, LABEL_EXIT_WINDOW_FEASIBLE_S10),
+    (0.25, LABEL_EXIT_WINDOW_FEASIBLE_S25),
 )
 
 
@@ -133,6 +142,18 @@ def harvest_label_specs(path: HarvestPath) -> tuple[tuple[str, str], ...]:
     return tuple(specs)
 
 
+def exit_window_label_specs(feasible: dict[float, bool]) -> tuple[tuple[str, str], ...]:
+    """The exit-window labels a feasibility verdict persists: one
+    binary ``"1"``/``"0"`` per reference size — exit feasible for
+    that size at its executable peak (depth, volume, and cost legs
+    all holding there; see ``forecast.harvest.exit_window_feasible``).
+    """
+    return tuple(
+        (label_type, "1" if feasible[fraction] else "0")
+        for fraction, label_type in _EXIT_WINDOW_FRACTION_LABELS
+    )
+
+
 def point_in_time_depth_series(
     session: Session,
     *,
@@ -184,6 +205,26 @@ def aligned_harvest_rows(
     return aligned
 
 
+def aligned_exit_window_rows(
+    price_volume_points: list[tuple[datetime, float, float | None]],
+    depth_series: list[tuple[datetime, float | None]],
+) -> list[tuple[datetime, float, float | None, float | None]]:
+    """The exit-window row alignment: ``aligned_harvest_rows``' depth
+    walk over price points that also carry their trailing volume, so
+    each row is ``(ts, price, last depth at or before ts, the row's
+    own trailing volume)`` — the exact rows
+    ``forecast.harvest.exit_window_feasible`` judges."""
+    aligned: list[tuple[datetime, float, float | None, float | None]] = []
+    index = 0
+    current: float | None = None
+    for ts, price, volume in sorted(price_volume_points, key=lambda point: (point[0], point[1])):
+        while index < len(depth_series) and depth_series[index][0] <= ts:
+            current = depth_series[index][1]
+            index += 1
+        aligned.append((ts, price, current, volume))
+    return aligned
+
+
 class LabelEngine:
     """Generates point-in-time outcome labels from persisted market history.
 
@@ -205,6 +246,7 @@ class LabelEngine:
             "hours_to_peak": 0,
             "hours_to_trough": 0,
             "harvest": 0,
+            "exit_window": 0,
         }
         try:
             asset_ids = session.scalars(
@@ -306,6 +348,35 @@ class LabelEngine:
                                 source=f"forecast:{self.settings.forecast_model_version}",
                             ):
                                 counts["harvest"] += 1
+                    # Exit-window labels (Task 17), beside the harvest
+                    # labels: per-size exit feasibility at each size's
+                    # executable peak, judged on the same aligned
+                    # episode plus each row's trailing volume. Absence
+                    # when there is no depth/volume path, same rule as
+                    # the harvest labels above.
+                    ewin = exit_window_feasible(
+                        aligned_exit_window_rows(
+                            [
+                                (ensure_utc(row.ts), float(row.price_usd), row.volume_usd)
+                                for row in future_rows
+                                if row.price_usd is not None
+                            ],
+                            depth_series,
+                        ),
+                        settings=self.settings,
+                    )
+                    if ewin is not None:
+                        for label_type, label_value in exit_window_label_specs(ewin):
+                            if upsert_label(
+                                session,
+                                asset_id=asset_id,
+                                ts=decision,
+                                label_type=label_type,
+                                label_value=label_value,
+                                decision_ts=decision_ts,
+                                source=f"forecast:{self.settings.forecast_model_version}",
+                            ):
+                                counts["exit_window"] += 1
                     collapse_value = (
                         1.0 if trough_pct <= self.settings.forecast_collapse_threshold else 0.0
                     )
@@ -455,6 +526,7 @@ def seed_labels_at_feature_timestamps(
         "hours_to_peak": 0,
         "hours_to_trough": 0,
         "harvest": 0,
+        "exit_window": 0,
     }
 
     try:
@@ -601,6 +673,32 @@ def seed_labels_at_feature_timestamps(
                         source=source,
                     ):
                         counts["harvest"] += 1
+
+            # Exit-window labels (Task 17), beside the harvest labels —
+            # same placement and absence rule as LabelEngine.generate.
+            ewin = exit_window_feasible(
+                aligned_exit_window_rows(
+                    [
+                        (ensure_utc(snap.ts), float(snap.price_usd), snap.volume_usd)
+                        for snap in future_snaps
+                        if snap.price_usd is not None
+                    ],
+                    depth_series,
+                ),
+                settings=settings,
+            )
+            if ewin is not None:
+                for label_type, label_value in exit_window_label_specs(ewin):
+                    if upsert_label(
+                        session,
+                        asset_id=asset_id,
+                        ts=feature_ts,
+                        label_type=label_type,
+                        label_value=label_value,
+                        decision_ts=decision_ts,
+                        source=source,
+                    ):
+                        counts["exit_window"] += 1
 
             # Write collapse label (upsert for idempotency). A zero is
             # censored when forward evidence is too thin to earn it;

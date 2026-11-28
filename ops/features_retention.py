@@ -120,6 +120,9 @@ MISSION_LABEL_TYPES: tuple[str, ...] = (
     "harvest_window_start_hours",
     "collapse_confirmed",
     "second_leg",
+    "exit_window_feasible_s02",
+    "exit_window_feasible_s10",
+    "exit_window_feasible_s25",
 )
 
 
