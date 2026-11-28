@@ -264,7 +264,15 @@ def test_seed_labels_handles_empty_database(session) -> None:
     counts = seed_labels_at_feature_timestamps(session, decision_ts=decision)
     session.commit()
 
-    assert counts == {"ignition": 0, "collapse": 0, "decision_points": 0}
+    assert counts == {
+        "ignition": 0,
+        "collapse": 0,
+        "decision_points": 0,
+        "forward_max_gain": 0,
+        "forward_max_drawdown": 0,
+        "hours_to_peak": 0,
+        "hours_to_trough": 0,
+    }
     health = session.scalar(
         select(models.SystemHealth)
         .where(models.SystemHealth.component == "forecast_labels_bootstrap")

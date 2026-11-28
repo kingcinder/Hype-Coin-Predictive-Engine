@@ -643,7 +643,9 @@ def test_historical_label_replay_uses_point_in_time_entry_and_bounded_targets(se
         )
     )
     assert counts["decision_points"] == 1
-    assert counts["labels_created"] == 2
+    # 2 binary labels + the 4 continuous forward-path labels (Task 2): the
+    # flat, densely observed window earns its "no pump" gain label.
+    assert counts["labels_created"] == 6
     assert ignition is not None and ignition.label_value == "0"
     assert collapse is not None and collapse.label_value == "0"
     assert ignition.label_source.startswith("historical-replay:")

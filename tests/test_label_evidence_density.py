@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from forecast.labels import (
     LABEL_COLLAPSE,
+    LABEL_FORWARD_MAX_GAIN,
     LABEL_IGNITION,
     LabelEngine,
     forward_evidence_sufficient,
@@ -196,3 +197,98 @@ def test_collapse_positive_never_gated(session) -> None:
     session.commit()
     by_type = _labels_by_type(session, chain_asset.id)
     assert "1" in by_type.get(LABEL_COLLAPSE, [])
+
+
+# ── gain-side mirrors (Task 2: symmetric censoring) ─────────────────────────
+#
+# A forward_max_gain_pct below the ignition threshold is the same kind of
+# claim as collapse=0 — "nothing happened in this window" — so it is held
+# to the same evidence-density rule. Each case below mirrors a collapse
+# case above.
+
+
+def test_label_engine_censors_thin_gain_zero(session) -> None:
+    # Mirror of test_label_engine_censors_thin_collapse_zero: coverage for
+    # two hours out of twenty-four, flat prices — the "no pump" gain label
+    # is censored, not written.
+    asset = _seed_sparse_asset(session, symbol="GTHIN2", snapshot_hours=[0, 1, 2])
+    session.commit()
+    LabelEngine().generate(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    by_type = _labels_by_type(session, asset.id)
+    assert by_type.get(LABEL_IGNITION)  # ignition zeros are not gated
+    assert LABEL_FORWARD_MAX_GAIN not in by_type
+
+
+def test_label_engine_gain_zero_censored_without_final_quartile(session) -> None:
+    # Mirror of test_evidence_without_final_quartile_is_insufficient at the
+    # generator level: twelve snapshots clear the minimum count, but
+    # coverage stops at hour 11 — a pump in the unobserved second half
+    # would be invisible, so the flat window earns no gain label.
+    asset = _seed_sparse_asset(session, symbol="GNOFQ", snapshot_hours=list(range(12)))
+    session.commit()
+    LabelEngine().generate(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    by_type = _labels_by_type(session, asset.id)
+    assert LABEL_FORWARD_MAX_GAIN not in by_type
+
+
+def test_label_engine_dense_coverage_still_writes_gain_zero(session) -> None:
+    # Mirror of test_label_engine_dense_coverage_still_writes_collapse_zero.
+    asset = _seed_sparse_asset(session, symbol="GDENSE", snapshot_hours=list(range(30)))
+    session.commit()
+    LabelEngine().generate(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    by_type = _labels_by_type(session, asset.id)
+    assert "0.000000" in by_type.get(LABEL_FORWARD_MAX_GAIN, [])
+
+
+def test_bootstrap_censors_thin_gain_zero(session) -> None:
+    # Mirror of test_bootstrap_censors_thin_collapse_zero.
+    asset = _seed_sparse_asset(session, symbol="BGTHIN", snapshot_hours=[0, 11, 12, 13])
+    upsert_feature(
+        session,
+        asset_id=asset.id,
+        decision_ts=T0 + timedelta(hours=11),
+        feature_name="liquidity_depth",
+        feature_value=200_000.0,
+        source_count=1,
+        freshness_score=1.0,
+        missing_flag=False,
+    )
+    session.commit()
+    counts = seed_labels_at_feature_timestamps(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    assert counts["forward_max_gain"] == 0
+    by_type = _labels_by_type(session, asset.id)
+    assert by_type.get(LABEL_IGNITION) == ["0"]
+    assert LABEL_FORWARD_MAX_GAIN not in by_type
+
+
+def test_dense_generator_censors_thin_gain_zero(session) -> None:
+    # Mirror of test_dense_generator_censors_thin_collapse_zero.
+    from data_lake.labels import generate_dense_labels
+
+    asset = _seed_sparse_asset(session, symbol="DGTHIN", snapshot_hours=[0, 1])
+    session.commit()
+    generate_dense_labels(session, decision_ts=T0 + timedelta(hours=48), forward_hours=24)
+    session.commit()
+    by_type = _labels_by_type(session, asset.id)
+    assert by_type.get(LABEL_IGNITION)
+    assert LABEL_FORWARD_MAX_GAIN not in by_type
+
+
+def test_gain_positive_never_gated(session) -> None:
+    # Mirror of test_collapse_positive_never_gated: a single observed pump
+    # writes the gain label even with thin coverage — the positive is the
+    # observation itself.
+    asset = _seed_sparse_asset(session, symbol="PUMP1", snapshot_hours=[0, 1], price=1.0)
+    rows = session.scalars(select(models.MarketSnapshot)).all()
+    for row in rows:
+        if row.ts.replace(tzinfo=None) == T0 + timedelta(hours=1):
+            row.price_usd = 3.5
+    session.commit()
+    LabelEngine().generate(session, decision_ts=T0 + timedelta(hours=48))
+    session.commit()
+    by_type = _labels_by_type(session, asset.id)
+    assert "2.500000" in by_type.get(LABEL_FORWARD_MAX_GAIN, [])

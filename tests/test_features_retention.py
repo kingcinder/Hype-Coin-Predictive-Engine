@@ -433,9 +433,8 @@ def test_prune_still_prunes_beyond_mission_horizon(engine, settings):
     assert (seeded["assets"]["A"], T0 - 240 * H) not in _keys(engine)
 
 
-@pytest.mark.xfail(strict=True, reason="forecast constants land in Task 2")
 def test_mission_label_types_match_label_constants():
-    from data_lake import labels as lake_labels  # noqa: F401 - mirrored constants land in Task 2
+    from data_lake import labels as lake_labels  # noqa: F401 - mirrored constants landed in Task 2
     from forecast import labels as forecast_labels
 
     named = set(features_retention.MISSION_LABEL_TYPES)
@@ -445,6 +444,6 @@ def test_mission_label_types_match_label_constants():
         forecast_labels.LABEL_HOURS_TO_PEAK,
         forecast_labels.LABEL_HOURS_TO_TROUGH,
     }
-    # Until Tasks 2/7 land the forecast constants do not exist; this test is
-    # written now against the pinned strings and xfail-marked in Step 2.
+    # The Task 2 forecast constants must carry exactly the pinned strings
+    # Rule 6 protects; Task 7 adds the harvest constants to this overlap.
     assert defined <= named

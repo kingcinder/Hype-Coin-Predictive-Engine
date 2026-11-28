@@ -36,6 +36,13 @@ _LABEL_COMMIT_EVERY = 24
 
 LABEL_IGNITION = "ignition"
 LABEL_COLLAPSE = "collapse"
+# Mirrored from forecast.labels (the canonical definitions); the strings
+# must stay identical — retention Rule 6 and the label consumers join on
+# them.
+LABEL_FORWARD_MAX_GAIN = "forward_max_gain_pct"
+LABEL_FORWARD_MAX_DRAWDOWN = "forward_max_drawdown_pct"
+LABEL_HOURS_TO_PEAK = "hours_to_peak"
+LABEL_HOURS_TO_TROUGH = "hours_to_trough"
 
 
 def _interpolate_price(snapshots: list[models.MarketSnapshot], target_ts: datetime) -> float | None:
@@ -105,9 +112,17 @@ def generate_dense_labels(
 
     # Local import: forecast.labels is the canonical home of the density
     # predicate, and a top-level import would cycle through forecast.engine.
-    from forecast.labels import forward_evidence_sufficient  # noqa: PLC0415
+    from forecast.labels import forward_evidence_sufficient, forward_path  # noqa: PLC0415
 
-    counts = {"ignition": 0, "collapse": 0, "total_decision_points": 0}
+    counts = {
+        "ignition": 0,
+        "collapse": 0,
+        "total_decision_points": 0,
+        "forward_max_gain": 0,
+        "forward_max_drawdown": 0,
+        "hours_to_peak": 0,
+        "hours_to_trough": 0,
+    }
 
     # Get all assets with pairs
     asset_ids = session.scalars(
@@ -186,8 +201,16 @@ def generate_dense_labels(
                 current += timedelta(hours=1)
                 continue
 
-            peak_pct = max(future_prices) / entry_price - 1.0
-            trough_pct = min(future_prices) / entry_price - 1.0
+            path = forward_path(
+                entry_price,
+                current,
+                list(zip(future_stamps, future_prices, strict=True)),
+            )
+            if path is None:
+                current += timedelta(hours=1)
+                continue
+            peak_pct = path.max_gain_pct
+            trough_pct = path.max_drawdown_pct
 
             # Generate ignition label. The source marker ("dense-labels:"
             # + version) is the training/test-distinction key: the forecast
@@ -231,6 +254,34 @@ def generate_dense_labels(
                 if collapse_value == "1":
                     counts["collapse"] += 1
 
+            # Continuous forward path, beside the binary labels. A gain
+            # below the ignition threshold is a "no pump" claim, gated on
+            # the same forward-evidence density as collapse=0 (symmetric
+            # censoring); positives are never gated. The sibling
+            # measurements are written whenever the gain label is.
+            gain_claim_earned = peak_pct >= ignition_threshold or forward_evidence_sufficient(
+                future_stamps,
+                start=current,
+                window=timedelta(hours=forward_hours),
+            )
+            if gain_claim_earned:
+                for label_type, value, count_key in (
+                    (LABEL_FORWARD_MAX_GAIN, path.max_gain_pct, "forward_max_gain"),
+                    (LABEL_FORWARD_MAX_DRAWDOWN, path.max_drawdown_pct, "forward_max_drawdown"),
+                    (LABEL_HOURS_TO_PEAK, path.hours_to_peak, "hours_to_peak"),
+                    (LABEL_HOURS_TO_TROUGH, path.hours_to_trough, "hours_to_trough"),
+                ):
+                    if _upsert_label(
+                        session,
+                        asset_id=asset_id,
+                        ts=current,
+                        label_type=label_type,
+                        value=f"{value:.6f}",
+                        decision_ts=decision_ts,
+                        source=f"dense-labels:{settings.forecast_model_version}",
+                    ):
+                        counts[count_key] += 1
+
             current += timedelta(hours=1)
             hour_count += 1
             if commit_every and hour_count % commit_every == 0:
@@ -263,6 +314,10 @@ def replay_historical_labels(
     actually observed.
     """
     settings = get_settings()
+    # Local import: forecast.labels is the canonical home of the forward
+    # path helper and the density predicate (see generate_dense_labels).
+    from forecast.labels import forward_evidence_sufficient, forward_path  # noqa: PLC0415
+
     as_of = ensure_utc(decision_ts or utc_now())
     sql_as_of = as_of.replace(tzinfo=None)
     forward_hours = forward_hours or settings.forecast_forward_hours
@@ -277,6 +332,10 @@ def replay_historical_labels(
         "decision_points": 0,
         "ignition_created": 0,
         "collapse_created": 0,
+        "forward_max_gain_created": 0,
+        "forward_max_drawdown_created": 0,
+        "hours_to_peak_created": 0,
+        "hours_to_trough_created": 0,
         "labels_created": 0,
         "missing_entry": 0,
         "incomplete_forward_window": 0,
@@ -331,18 +390,21 @@ def replay_historical_labels(
             )
             .order_by(models.MarketSnapshot.ts)
         ).all()
-        future_prices = [float(row.price_usd) for row in outcomes if row.price_usd is not None]
-        if not future_prices:
+        forward_rows = [
+            (ensure_utc(row.ts), float(row.price_usd))
+            for row in outcomes
+            if row.price_usd is not None
+        ]
+        if not forward_rows:
             counts["incomplete_forward_window"] = int(counts["incomplete_forward_window"]) + 1
             continue
 
         entry_price = float(entry.price_usd)
-        ignition_value = (
-            "1" if max(future_prices) / entry_price - 1.0 >= ignition_threshold else "0"
-        )
-        collapse_value = (
-            "1" if min(future_prices) / entry_price - 1.0 <= collapse_threshold else "0"
-        )
+        path = forward_path(entry_price, ensure_utc(feature_ts), forward_rows)
+        if path is None:
+            continue  # unreachable: forward_rows is non-empty
+        ignition_value = "1" if path.max_gain_pct >= ignition_threshold else "0"
+        collapse_value = "1" if path.max_drawdown_pct <= collapse_threshold else "0"
         label_observed_at = max(ensure_utc(row.observed_at) for row in [entry, *outcomes])
         source = f"historical-replay:{settings.forecast_model_version}"
         for label_type, value, count_key in (
@@ -365,6 +427,39 @@ def replay_historical_labels(
             if created:
                 counts[count_key] = int(counts[count_key]) + 1
                 counts["labels_created"] = int(counts["labels_created"]) + 1
+
+        # Continuous forward path, beside the binary labels, with the
+        # same symmetric censoring as the other generation paths: a gain
+        # below the ignition threshold is a "no pump" claim earned only
+        # by forward-evidence density; positives are never gated.
+        gain_claim_earned = path.max_gain_pct >= ignition_threshold or forward_evidence_sufficient(
+            [row.ts for row in outcomes],
+            start=feature_ts,
+            window=window,
+        )
+        if gain_claim_earned:
+            for label_type, num_value, count_key in (
+                (LABEL_FORWARD_MAX_GAIN, path.max_gain_pct, "forward_max_gain_created"),
+                (LABEL_FORWARD_MAX_DRAWDOWN, path.max_drawdown_pct, "forward_max_drawdown_created"),
+                (LABEL_HOURS_TO_PEAK, path.hours_to_peak, "hours_to_peak_created"),
+                (LABEL_HOURS_TO_TROUGH, path.hours_to_trough, "hours_to_trough_created"),
+            ):
+                created = (
+                    _upsert_label(
+                        session,
+                        asset_id=asset_id,
+                        ts=feature_ts,
+                        label_type=label_type,
+                        value=f"{num_value:.6f}",
+                        decision_ts=label_observed_at,
+                        source=source,
+                    )
+                    if not dry_run
+                    else True
+                )
+                if created:
+                    counts[count_key] = int(counts[count_key]) + 1
+                    counts["labels_created"] = int(counts["labels_created"]) + 1
 
     if not dry_run:
         session.flush()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -18,6 +19,10 @@ log = get_logger(__name__)
 
 LABEL_IGNITION = "ignition"
 LABEL_COLLAPSE = "collapse"
+LABEL_FORWARD_MAX_GAIN = "forward_max_gain_pct"
+LABEL_FORWARD_MAX_DRAWDOWN = "forward_max_drawdown_pct"
+LABEL_HOURS_TO_PEAK = "hours_to_peak"
+LABEL_HOURS_TO_TROUGH = "hours_to_trough"
 
 
 def forward_evidence_sufficient(
@@ -48,6 +53,54 @@ def forward_evidence_sufficient(
     return any(ts >= final_quartile_start for ts in stamps)
 
 
+@dataclass(frozen=True)
+class ForwardPath:
+    max_gain_pct: float  # max(future)/entry - 1
+    max_drawdown_pct: float  # min(future)/entry - 1 (<= 0)
+    hours_to_peak: float  # hours from decision to argmax price
+    hours_to_trough: float  # hours from decision to argmin price
+
+
+def forward_path(
+    entry_price: float,
+    start: datetime,
+    rows: list[tuple[datetime, float]],
+) -> ForwardPath | None:
+    """The full forward path from one decision point, in a single pass.
+
+    Returns ``None`` when ``rows`` is empty. Peak/trough ties break to
+    the earliest timestamp, so the timing fields name the first moment
+    the extreme was reached.
+    """
+    if not rows:
+        return None
+    start_utc = ensure_utc(start)
+    peak_ts, peak_price = ensure_utc(rows[0][0]), rows[0][1]
+    trough_ts, trough_price = peak_ts, peak_price
+    for raw_ts, price in rows[1:]:
+        ts = ensure_utc(raw_ts)
+        if price > peak_price or (price == peak_price and ts < peak_ts):
+            peak_ts, peak_price = ts, price
+        if price < trough_price or (price == trough_price and ts < trough_ts):
+            trough_ts, trough_price = ts, price
+    return ForwardPath(
+        max_gain_pct=peak_price / entry_price - 1.0,
+        max_drawdown_pct=trough_price / entry_price - 1.0,
+        hours_to_peak=(peak_ts - start_utc).total_seconds() / 3600.0,
+        hours_to_trough=(trough_ts - start_utc).total_seconds() / 3600.0,
+    )
+
+
+def forward_label_specs(path: ForwardPath) -> tuple[tuple[str, float, str], ...]:
+    """The continuous labels a forward path persists: (type, value, count key)."""
+    return (
+        (LABEL_FORWARD_MAX_GAIN, path.max_gain_pct, "forward_max_gain"),
+        (LABEL_FORWARD_MAX_DRAWDOWN, path.max_drawdown_pct, "forward_max_drawdown"),
+        (LABEL_HOURS_TO_PEAK, path.hours_to_peak, "hours_to_peak"),
+        (LABEL_HOURS_TO_TROUGH, path.hours_to_trough, "hours_to_trough"),
+    )
+
+
 class LabelEngine:
     """Generates point-in-time outcome labels from persisted market history.
 
@@ -61,7 +114,14 @@ class LabelEngine:
 
     def generate(self, session: Session, *, decision_ts: datetime | None = None) -> dict[str, int]:
         decision_ts = ensure_utc(decision_ts or utc_now())
-        counts = {"ignition": 0, "collapse": 0}
+        counts = {
+            "ignition": 0,
+            "collapse": 0,
+            "forward_max_gain": 0,
+            "forward_max_drawdown": 0,
+            "hours_to_peak": 0,
+            "hours_to_trough": 0,
+        }
         try:
             asset_ids = session.scalars(
                 select(models.Asset.id)
@@ -86,12 +146,20 @@ class LabelEngine:
                         for row in rows[index + 1 :]
                         if row.price_usd is not None and ensure_utc(row.ts) <= decision + window
                     ]
-                    future = [float(row.price_usd) for row in future_rows if row.price_usd]
-                    if not future:
-                        continue
                     entry = float(price)
-                    peak_pct = max(future) / entry - 1.0
-                    trough_pct = min(future) / entry - 1.0
+                    path = forward_path(
+                        entry,
+                        decision,
+                        [
+                            (ensure_utc(row.ts), float(row.price_usd))
+                            for row in future_rows
+                            if row.price_usd is not None
+                        ],
+                    )
+                    if path is None:
+                        continue
+                    peak_pct = path.max_gain_pct
+                    trough_pct = path.max_drawdown_pct
                     if self._upsert_label(
                         session,
                         asset_id=asset_id,
@@ -102,6 +170,34 @@ class LabelEngine:
                         source=f"forecast:{self.settings.forecast_model_version}",
                     ):
                         counts["ignition"] += 1
+                    # Continuous forward path, beside the binary labels. A
+                    # gain below the ignition threshold is a "no pump" claim
+                    # about the whole window, earned only by the same
+                    # forward-evidence density that gates collapse=0 below;
+                    # at or above the threshold the observed pump is itself
+                    # the evidence, so positives are never gated. The
+                    # sibling measurements (drawdown, hours to peak/trough)
+                    # are written whenever the gain label is.
+                    gain_claim_earned = (
+                        peak_pct >= self.settings.forecast_ignition_threshold
+                        or forward_evidence_sufficient(
+                            [row.ts for row in future_rows],
+                            start=decision,
+                            window=window,
+                        )
+                    )
+                    if gain_claim_earned:
+                        for label_type, value, count_key in forward_label_specs(path):
+                            if upsert_label(
+                                session,
+                                asset_id=asset_id,
+                                ts=decision,
+                                label_type=label_type,
+                                label_value=f"{value:.6f}",
+                                decision_ts=decision_ts,
+                                source=f"forecast:{self.settings.forecast_model_version}",
+                            ):
+                                counts[count_key] += 1
                     collapse_value = (
                         1.0 if trough_pct <= self.settings.forecast_collapse_threshold else 0.0
                     )
@@ -242,7 +338,15 @@ def seed_labels_at_feature_timestamps(
     ignition_threshold = settings.forecast_ignition_threshold
     collapse_threshold = settings.forecast_collapse_threshold
     window = timedelta(hours=forward_hours)
-    counts = {"ignition": 0, "collapse": 0, "decision_points": 0}
+    counts = {
+        "ignition": 0,
+        "collapse": 0,
+        "decision_points": 0,
+        "forward_max_gain": 0,
+        "forward_max_drawdown": 0,
+        "hours_to_peak": 0,
+        "hours_to_trough": 0,
+    }
 
     try:
         # Find all (asset_id, decision_ts) pairs that have features but no labels
@@ -314,14 +418,20 @@ def seed_labels_at_feature_timestamps(
             if not future_snaps:
                 continue
 
-            future_prices = [
-                float(p) for snap in future_snaps if (p := snap.price_usd) is not None and p > 0
-            ]
-            if not future_prices:
+            path = forward_path(
+                entry_price,
+                ensure_utc(feature_ts),
+                [
+                    (ensure_utc(snap.ts), float(snap.price_usd))
+                    for snap in future_snaps
+                    if snap.price_usd is not None
+                ],
+            )
+            if path is None:
                 continue
 
-            peak_pct = max(future_prices) / entry_price - 1.0
-            trough_pct = min(future_prices) / entry_price - 1.0
+            peak_pct = path.max_gain_pct
+            trough_pct = path.max_drawdown_pct
 
             source = f"feature-aligned:{settings.forecast_model_version}"
 
@@ -337,6 +447,28 @@ def seed_labels_at_feature_timestamps(
                 source=source,
             ):
                 counts["ignition"] += 1
+
+            # Continuous forward path, beside the binary labels, with the
+            # same symmetric censoring as LabelEngine.generate: a gain
+            # below the ignition threshold is a "no pump" claim earned
+            # only by forward-evidence density; positives are never gated.
+            gain_claim_earned = peak_pct >= ignition_threshold or forward_evidence_sufficient(
+                [snap.ts for snap in future_snaps],
+                start=feature_ts,
+                window=window,
+            )
+            if gain_claim_earned:
+                for label_type, value, count_key in forward_label_specs(path):
+                    if upsert_label(
+                        session,
+                        asset_id=asset_id,
+                        ts=feature_ts,
+                        label_type=label_type,
+                        label_value=f"{value:.6f}",
+                        decision_ts=decision_ts,
+                        source=source,
+                    ):
+                        counts[count_key] += 1
 
             # Write collapse label (upsert for idempotency). A zero is
             # censored when forward evidence is too thin to earn it;
