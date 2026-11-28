@@ -272,6 +272,7 @@ def test_seed_labels_handles_empty_database(session) -> None:
         "forward_max_drawdown": 0,
         "hours_to_peak": 0,
         "hours_to_trough": 0,
+        "harvest": 0,
     }
     health = session.scalar(
         select(models.SystemHealth)

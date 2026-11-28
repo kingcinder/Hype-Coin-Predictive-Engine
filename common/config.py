@@ -544,6 +544,22 @@ class Settings(BaseSettings):
     # exact rank_sum ties in rank_entry_cohort.
     entry_social_prior_multiplier: float = 1.25
 
+    # Harvest labels (Task 7, spec §4/§5): the executable episode.
+    # harvest_theta: the harvest window reaches rows whose executable
+    # value is within this fraction of the executable peak (at the 10%
+    # reference size) while depth holds >= 50% of peak depth.
+    harvest_theta: float = 0.125
+    # Collapse-confirmation: price gives back this share of the peak
+    # price, with no recovery to within
+    # harvest_collapse_recovery_fraction of the peak inside 4h.
+    harvest_collapse_drawdown_fraction: float = 0.50
+    harvest_collapse_recovery_fraction: float = 0.20
+    # Second leg: after a drawdown of this share from the prior EV
+    # peak, a new EV peak above harvest_second_leg_multiple x the
+    # prior peak flags a second leg (kept, never deleted).
+    harvest_second_leg_multiple: float = 1.5
+    harvest_second_leg_drawdown_fraction: float = 0.30
+
     # Model persistence & comparison thresholds
     model_compare_precision_delta: float = 0.05
     model_compare_cal_delta: float = 0.05

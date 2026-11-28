@@ -443,7 +443,13 @@ def test_mission_label_types_match_label_constants():
         forecast_labels.LABEL_FORWARD_MAX_DRAWDOWN,
         forecast_labels.LABEL_HOURS_TO_PEAK,
         forecast_labels.LABEL_HOURS_TO_TROUGH,
+        forecast_labels.LABEL_EXECUTABLE_PEAK_GAIN_S02,
+        forecast_labels.LABEL_EXECUTABLE_PEAK_GAIN_S10,
+        forecast_labels.LABEL_EXECUTABLE_PEAK_GAIN_S25,
+        forecast_labels.LABEL_HARVEST_WINDOW_START,
+        forecast_labels.LABEL_COLLAPSE_CONFIRMED,
+        forecast_labels.LABEL_SECOND_LEG,
     }
-    # The Task 2 forecast constants must carry exactly the pinned strings
-    # Rule 6 protects; Task 7 adds the harvest constants to this overlap.
+    # The Task 2 forecast constants and the Task 7 harvest constants
+    # must carry exactly the pinned strings Rule 6 protects.
     assert defined <= named

@@ -12,6 +12,7 @@ from backtest.runner import point_in_time_market_rows
 from common.config import get_settings
 from common.logging import get_logger
 from common.time import ensure_utc, utc_now
+from forecast.harvest import HarvestPath, harvest_path
 from storage import models
 from storage.repository import record_health
 
@@ -23,6 +24,18 @@ LABEL_FORWARD_MAX_GAIN = "forward_max_gain_pct"
 LABEL_FORWARD_MAX_DRAWDOWN = "forward_max_drawdown_pct"
 LABEL_HOURS_TO_PEAK = "hours_to_peak"
 LABEL_HOURS_TO_TROUGH = "hours_to_trough"
+LABEL_EXECUTABLE_PEAK_GAIN_S02 = "executable_peak_gain_s02"
+LABEL_EXECUTABLE_PEAK_GAIN_S10 = "executable_peak_gain_s10"
+LABEL_EXECUTABLE_PEAK_GAIN_S25 = "executable_peak_gain_s25"
+LABEL_HARVEST_WINDOW_START = "harvest_window_start_hours"
+LABEL_COLLAPSE_CONFIRMED = "collapse_confirmed"
+LABEL_SECOND_LEG = "second_leg"
+
+_FRACTION_LABELS: tuple[tuple[float, str], ...] = (
+    (0.02, LABEL_EXECUTABLE_PEAK_GAIN_S02),
+    (0.10, LABEL_EXECUTABLE_PEAK_GAIN_S10),
+    (0.25, LABEL_EXECUTABLE_PEAK_GAIN_S25),
+)
 
 
 def forward_evidence_sufficient(
@@ -101,6 +114,76 @@ def forward_label_specs(path: ForwardPath) -> tuple[tuple[str, float, str], ...]
     )
 
 
+def harvest_label_specs(path: HarvestPath) -> tuple[tuple[str, str], ...]:
+    """The labels a harvest path persists: (type, preformatted value).
+
+    Executable-peak gains are written at all three reference sizes so
+    the exit evaluator never recomputes paths. The window-start label
+    is absent when no row qualified — absence, not a zero. The two
+    episode flags are binary ``"1"``/``"0"``.
+    """
+    specs: list[tuple[str, str]] = [
+        (label_type, f"{path.executable_peak_gain_pct[fraction]:.6f}")
+        for fraction, label_type in _FRACTION_LABELS
+    ]
+    if path.harvest_window_start_hours is not None:
+        specs.append((LABEL_HARVEST_WINDOW_START, f"{path.harvest_window_start_hours:.6f}"))
+    specs.append((LABEL_COLLAPSE_CONFIRMED, "1" if path.collapse_confirmed else "0"))
+    specs.append((LABEL_SECOND_LEG, "1" if path.second_leg else "0"))
+    return tuple(specs)
+
+
+def point_in_time_depth_series(
+    session: Session,
+    *,
+    asset_id: int,
+    observed_by: datetime,
+) -> list[tuple[datetime, float | None]]:
+    """The asset's quote-depth (USD) series as known at ``observed_by``.
+
+    Liquidity snapshots join through the asset's pairs to their pools,
+    exactly as market snapshots join through pairs. The point-in-time
+    gate is ``observed_at`` (and ``ts``): a depth print restated after
+    the label-generation run cannot leak into a historical label. The
+    depth value is ``reserve_usd`` — the USD-denominated depth series;
+    ``reserve_quote`` is native quote units and would break the USD
+    reference-notional math in ``forecast.harvest``.
+    """
+    pairs = list(session.scalars(select(models.Pair).where(models.Pair.base_asset_id == asset_id)))
+    pool_ids = sorted({pair.pool_id for pair in pairs if pair.pool_id is not None})
+    if not pool_ids:
+        return []
+    rows = session.scalars(
+        select(models.LiquiditySnapshot)
+        .where(
+            models.LiquiditySnapshot.pool_id.in_(pool_ids),
+            models.LiquiditySnapshot.ts <= observed_by,
+            models.LiquiditySnapshot.observed_at <= observed_by,
+        )
+        .order_by(models.LiquiditySnapshot.ts, models.LiquiditySnapshot.id)
+    ).all()
+    return [(ensure_utc(row.ts), row.reserve_usd) for row in rows]
+
+
+def aligned_harvest_rows(
+    price_points: list[tuple[datetime, float]],
+    depth_series: list[tuple[datetime, float | None]],
+) -> list[tuple[datetime, float, float | None]]:
+    """Align a price path to its depth path: each price row carries the
+    last depth print at or before its ts (``None`` before the first
+    print). Price points are sorted by ts — the harvest semantics
+    (window intervals, drawdowns, legs) are sequence-dependent."""
+    aligned: list[tuple[datetime, float, float | None]] = []
+    index = 0
+    current: float | None = None
+    for ts, price in sorted(price_points):
+        while index < len(depth_series) and depth_series[index][0] <= ts:
+            current = depth_series[index][1]
+            index += 1
+        aligned.append((ts, price, current))
+    return aligned
+
+
 class LabelEngine:
     """Generates point-in-time outcome labels from persisted market history.
 
@@ -121,6 +204,7 @@ class LabelEngine:
             "forward_max_drawdown": 0,
             "hours_to_peak": 0,
             "hours_to_trough": 0,
+            "harvest": 0,
         }
         try:
             asset_ids = session.scalars(
@@ -134,6 +218,9 @@ class LabelEngine:
                     session, asset_id=asset_id, decision_ts=decision_ts
                 )
                 rows = [row for row in rows if row.price_usd is not None and row.price_usd > 0]
+                depth_series = point_in_time_depth_series(
+                    session, asset_id=asset_id, observed_by=decision_ts
+                )
                 for index, decision_row in enumerate(rows):
                     decision = ensure_utc(decision_row.ts)
                     if decision + window > decision_ts:
@@ -147,15 +234,12 @@ class LabelEngine:
                         if row.price_usd is not None and ensure_utc(row.ts) <= decision + window
                     ]
                     entry = float(price)
-                    path = forward_path(
-                        entry,
-                        decision,
-                        [
-                            (ensure_utc(row.ts), float(row.price_usd))
-                            for row in future_rows
-                            if row.price_usd is not None
-                        ],
-                    )
+                    future_points = [
+                        (ensure_utc(row.ts), float(row.price_usd))
+                        for row in future_rows
+                        if row.price_usd is not None
+                    ]
+                    path = forward_path(entry, decision, future_points)
                     if path is None:
                         continue
                     peak_pct = path.max_gain_pct
@@ -198,6 +282,30 @@ class LabelEngine:
                                 source=f"forecast:{self.settings.forecast_model_version}",
                             ):
                                 counts[count_key] += 1
+                    # Harvest labels, beside the forward labels and BEFORE
+                    # the collapse censoring below can skip the point: the
+                    # executable episode is its own claim, gated only on a
+                    # depth path existing (no depth path -> absence, not
+                    # zeros). Written unconditionally of the forward
+                    # density gate for the same reason positives are.
+                    hpath = harvest_path(
+                        entry,
+                        decision,
+                        aligned_harvest_rows(future_points, depth_series),
+                        settings=self.settings,
+                    )
+                    if hpath is not None:
+                        for label_type, label_value in harvest_label_specs(hpath):
+                            if upsert_label(
+                                session,
+                                asset_id=asset_id,
+                                ts=decision,
+                                label_type=label_type,
+                                label_value=label_value,
+                                decision_ts=decision_ts,
+                                source=f"forecast:{self.settings.forecast_model_version}",
+                            ):
+                                counts["harvest"] += 1
                     collapse_value = (
                         1.0 if trough_pct <= self.settings.forecast_collapse_threshold else 0.0
                     )
@@ -346,6 +454,7 @@ def seed_labels_at_feature_timestamps(
         "forward_max_drawdown": 0,
         "hours_to_peak": 0,
         "hours_to_trough": 0,
+        "harvest": 0,
     }
 
     try:
@@ -418,15 +527,12 @@ def seed_labels_at_feature_timestamps(
             if not future_snaps:
                 continue
 
-            path = forward_path(
-                entry_price,
-                ensure_utc(feature_ts),
-                [
-                    (ensure_utc(snap.ts), float(snap.price_usd))
-                    for snap in future_snaps
-                    if snap.price_usd is not None
-                ],
-            )
+            future_points = [
+                (ensure_utc(snap.ts), float(snap.price_usd))
+                for snap in future_snaps
+                if snap.price_usd is not None
+            ]
+            path = forward_path(entry_price, ensure_utc(feature_ts), future_points)
             if path is None:
                 continue
 
@@ -469,6 +575,32 @@ def seed_labels_at_feature_timestamps(
                         source=source,
                     ):
                         counts[count_key] += 1
+
+            # Harvest labels, beside the forward labels and before the
+            # collapse censoring below can skip the point — same
+            # placement and gating as LabelEngine.generate (depth path
+            # or absence).
+            depth_series = point_in_time_depth_series(
+                session, asset_id=asset_id, observed_by=decision_ts
+            )
+            hpath = harvest_path(
+                entry_price,
+                ensure_utc(feature_ts),
+                aligned_harvest_rows(future_points, depth_series),
+                settings=settings,
+            )
+            if hpath is not None:
+                for label_type, label_value in harvest_label_specs(hpath):
+                    if upsert_label(
+                        session,
+                        asset_id=asset_id,
+                        ts=feature_ts,
+                        label_type=label_type,
+                        label_value=label_value,
+                        decision_ts=decision_ts,
+                        source=source,
+                    ):
+                        counts["harvest"] += 1
 
             # Write collapse label (upsert for idempotency). A zero is
             # censored when forward evidence is too thin to earn it;
