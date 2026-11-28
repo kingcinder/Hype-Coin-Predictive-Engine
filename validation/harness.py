@@ -8,6 +8,7 @@ split into pure helpers so synthetic self-tests exercise the same code path.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, overload
@@ -17,6 +18,7 @@ from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session
 
 from common.config import get_settings
+from forecast.labels import LABEL_FORWARD_MAX_GAIN, LABEL_HOURS_TO_PEAK
 from storage import models
 from validation.baselines import (
     base_rate_proportion,
@@ -99,6 +101,31 @@ class ForecastRow:
     p_ignition_24h: float
     expected_hours_to_collapse: float | None
     expected_hours_to_peak: float | None
+
+
+# Spec §5 binary head: an entry "hit" is a max forward gain of +100%.
+ENTRY_GAIN_THRESHOLD = 1.0
+# Spec §6: the entry precision cell reads the top 20 by research_priority.
+ENTRY_PRECISION_K = 20
+
+
+@dataclass
+class EntryRow:
+    """One scored decision point with its realized forward path.
+
+    Built from Task 2's continuous labels (``forward_max_gain_pct`` /
+    ``hours_to_peak``) joined to the score and forecast at the same
+    decision timestamp. Missing joins stay ``None`` — an unscored or
+    unforecast point is reported as such, never fabricated.
+    """
+
+    asset_id: int
+    decision_ts: datetime
+    research_priority: float | None
+    p_ignition_24h: float | None
+    max_gain_pct: float  # from forward_max_gain_pct label
+    hours_to_peak: float | None  # from hours_to_peak label
+    phase_at_score: str | None  # live-stratum membership via LIVE_PHASES
 
 
 @overload
@@ -276,6 +303,234 @@ def evaluate_probabilities(
         )
     )
 
+    return cells
+
+
+def _gain_lift(priorities: np.ndarray, hits: np.ndarray) -> float:
+    """Top-decile hit rate ÷ overall hit rate (spec §6).
+
+    A hit-rate ratio, never a mean-gain ratio: mean MFE is dominated by a
+    handful of extreme runners and would certify a ranking whose typical
+    top pick never doubles.
+    """
+    n = len(hits)
+    if n == 0:
+        return float("nan")
+    base = float(np.mean(hits))
+    if not np.isfinite(base) or base <= 0:
+        return float("nan")
+    order = np.argsort(-np.asarray(priorities, dtype=float), kind="stable")
+    decile = max(1, math.ceil(n * 0.1))
+    return float(np.mean(np.asarray(hits, dtype=float)[order][:decile]) / base)
+
+
+def _evaluate_entry_priority(
+    rows: list[EntryRow],
+    *,
+    output: str,
+    regime: str,
+    min_samples: int,
+) -> list[MetricCell]:
+    """precision@20 + gain-lift cells for one row set (all rows or live)."""
+    ranked_pairs: list[tuple[float, EntryRow]] = []
+    for r in rows:
+        if r.research_priority is not None:
+            ranked_pairs.append((r.research_priority, r))
+    ranked_pairs.sort(key=lambda pair: pair[0], reverse=True)
+    ranked = [r for _priority, r in ranked_pairs]
+    n = len(ranked)
+    if n < min_samples or n == 0:
+        return [
+            _insufficient_cell(output, "precision_at_20", regime, n, note="insufficient samples"),
+            _insufficient_cell(
+                output, "gain_lift_top_decile", regime, n, note="insufficient samples"
+            ),
+        ]
+    # `ranked` is priority-sorted, so the hit array's head is the top group.
+    hits = np.array(
+        [1.0 if r.max_gain_pct >= ENTRY_GAIN_THRESHOLD else 0.0 for r in ranked], dtype=float
+    )
+    base = base_rate_proportion(hits)
+    base_ci = base_rate_wilson_ci(hits)
+
+    k_eff = min(ENTRY_PRECISION_K, n)
+    hits_top = float(hits[:k_eff].sum())
+    precision = hits_top / k_eff
+    precision_ci = wilson_ci(hits_top, k_eff)
+    cells = [
+        MetricCell(
+            output=output,
+            metric="precision_at_20",
+            regime=regime,
+            n=n,
+            value=precision,
+            ci_low=precision_ci.low,
+            ci_high=precision_ci.high,
+            baseline_value=base,
+            baseline_ci_low=base_ci.low,
+            baseline_ci_high=base_ci.high,
+            verdict=verdict(
+                precision,
+                precision_ci,
+                base,
+                base_ci,
+                higher_is_better=True,
+                n=n,
+                min_samples=min_samples,
+            ),
+            note=(
+                f"share of the top {k_eff} by research_priority reaching the "
+                "§5 gain threshold (max_gain_pct >= 1.0)"
+            ),
+        )
+    ]
+
+    priorities = np.array([p for p, _r in ranked_pairs], dtype=float)
+    lift = _gain_lift(priorities, hits)
+    lift_ci = _bootstrap_ci(priorities, hits, _gain_lift)
+    cells.append(
+        MetricCell(
+            output=output,
+            metric="gain_lift_top_decile",
+            regime=regime,
+            n=n,
+            value=lift,
+            ci_low=lift_ci[0],
+            ci_high=lift_ci[1],
+            baseline_value=1.0,
+            baseline_ci_low=1.0,
+            baseline_ci_high=1.0,
+            verdict=verdict(
+                lift,
+                WilsonCI(*lift_ci),
+                1.0,
+                WilsonCI(1.0, 1.0),
+                higher_is_better=True,
+                n=n,
+                min_samples=min_samples,
+            ),
+            note="top-decile hit rate / overall hit rate at the §5 gain threshold",
+        )
+    )
+    return cells
+
+
+def _median_hours_to_peak_cell(
+    rows: list[EntryRow],
+    live_rows: list[EntryRow],
+    *,
+    regime: str,
+    min_samples: int,
+) -> MetricCell:
+    """Lead-time cell: median realized hours_to_peak over ignited live rows.
+
+    "Ignited" uses the engine's own ignition definition (max forward gain
+    reaching ``forecast_ignition_threshold``). The baseline is the median
+    over ALL ignited rows, so the cell measures whether live-token signals
+    arrive earlier than the typical ignition, not earlier than themselves.
+    """
+    output = "entry_priority:live"
+    threshold = get_settings().forecast_ignition_threshold
+    live_hours = np.array(
+        [
+            r.hours_to_peak
+            for r in live_rows
+            if r.max_gain_pct >= threshold and r.hours_to_peak is not None
+        ],
+        dtype=float,
+    )
+    all_hours = np.array(
+        [
+            r.hours_to_peak
+            for r in rows
+            if r.max_gain_pct >= threshold and r.hours_to_peak is not None
+        ],
+        dtype=float,
+    )
+    n = len(live_hours)
+    if n < min_samples or len(all_hours) == 0:
+        return _insufficient_cell(
+            output,
+            "median_hours_to_peak",
+            regime,
+            n,
+            note="insufficient ignited live rows with a realized hours_to_peak",
+        )
+    value = float(np.median(live_hours))
+    baseline = float(np.median(all_hours))
+    ci = _bootstrap_ci(live_hours, live_hours, lambda v, _d: float(np.median(v)))
+    base_ci = _bootstrap_ci(all_hours, all_hours, lambda v, _d: float(np.median(v)))
+    return MetricCell(
+        output=output,
+        metric="median_hours_to_peak",
+        regime=regime,
+        n=n,
+        value=value,
+        ci_low=ci[0],
+        ci_high=ci[1],
+        baseline_value=baseline,
+        baseline_ci_low=base_ci[0],
+        baseline_ci_high=base_ci[1],
+        verdict=verdict(
+            value,
+            WilsonCI(*ci),
+            baseline,
+            WilsonCI(*base_ci),
+            higher_is_better=False,
+            n=n,
+            min_samples=min_samples,
+        ),
+        note="median realized hours_to_peak over ignited live rows; lower = earlier signal",
+    )
+
+
+def evaluate_entry(rows: list[EntryRow], *, regime: str, min_samples: int = 30) -> list[MetricCell]:
+    """Entry-mission cells (spec §6) over already-split eval rows.
+
+    ``rows`` must be window C only — the embargoed eval tail produced by
+    ``run_harness``'s walk-forward split. This function never re-splits:
+    screening (window A) and baselines (window B) live outside it, and any
+    feature screened by Tasks 5/13/14 enters as a frozen component list,
+    never as a number fitted on window C.
+    """
+    settings = get_settings()
+    cells: list[MetricCell] = []
+
+    # p_ignition_24h probability block against Task 2's ignition outcomes
+    # (max forward gain reaching the ignition threshold). Reuses
+    # evaluate_probabilities; its ECE cell is the calibration_error cell
+    # the entry gate reads.
+    prob_rows = [r for r in rows if r.p_ignition_24h is not None]
+    probs = np.array([r.p_ignition_24h for r in prob_rows], dtype=float)
+    ignition_labels = np.array(
+        [1.0 if r.max_gain_pct >= settings.forecast_ignition_threshold else 0.0 for r in prob_rows],
+        dtype=float,
+    )
+    for cell in evaluate_probabilities(
+        probs,
+        ignition_labels,
+        output="p_ignition_24h",
+        regime=regime,
+        min_samples=min_samples,
+    ):
+        if cell.metric == "ece":
+            cell.metric = "calibration_error"
+        cells.append(cell)
+
+    cells.extend(
+        _evaluate_entry_priority(
+            rows, output="entry_priority", regime=regime, min_samples=min_samples
+        )
+    )
+    live_rows = [r for r in rows if (r.phase_at_score or "") in LIVE_PHASES]
+    cells.extend(
+        _evaluate_entry_priority(
+            live_rows, output="entry_priority:live", regime=regime, min_samples=min_samples
+        )
+    )
+    cells.append(
+        _median_hours_to_peak_cell(rows, live_rows, regime=regime, min_samples=min_samples)
+    )
     return cells
 
 
@@ -787,6 +1042,65 @@ def load_forecasts(session: Session) -> list[ForecastRow]:
             )
         )
     return out
+
+
+def load_entry_rows(session: Session) -> list[EntryRow]:
+    """Entry-mission rows from Task 2's continuous forward labels.
+
+    One row per (asset, ts) carrying a ``forward_max_gain_pct`` label.
+    ``research_priority`` joins from the score at the same decision ts;
+    ``p_ignition_24h`` from the forecast made FROM that ts (its source
+    feature timestamp — the ForecastRow join key, since a forecast's
+    persisted decision_ts is the training-run time); the live-stratum
+    phase from the risk outcome recorded at the same score, where present.
+    """
+    gains: dict[tuple[int, datetime], float] = {}
+    hours: dict[tuple[int, datetime], float] = {}
+    for label in session.scalars(
+        select(models.Label).where(
+            models.Label.label_type.in_((LABEL_FORWARD_MAX_GAIN, LABEL_HOURS_TO_PEAK))
+        )
+    ).all():
+        label_ts = _as_utc(label.ts)
+        if label_ts is None:
+            continue
+        try:
+            value = float(label.label_value)
+        except (TypeError, ValueError):
+            continue
+        if label.label_type == LABEL_FORWARD_MAX_GAIN:
+            gains[(label.asset_id, label_ts)] = value
+        else:
+            hours[(label.asset_id, label_ts)] = value
+    priorities: dict[tuple[int, datetime], float] = {}
+    for score in session.scalars(select(models.Score)).all():
+        score_ts = _as_utc(score.decision_ts)
+        if score_ts is not None:
+            priorities[(score.asset_id, score_ts)] = float(score.research_priority)
+    ignition: dict[tuple[int, datetime], float] = {}
+    for forecast in load_forecasts(session):
+        forecast_ts = _as_utc(forecast.source_features_ts)
+        if forecast_ts is not None:
+            ignition[(forecast.asset_id, forecast_ts)] = float(forecast.p_ignition_24h)
+    phases: dict[tuple[int, datetime], str] = {}
+    for outcome in load_outcomes(session):
+        outcome_ts = _as_utc(outcome.decision_ts)
+        if outcome_ts is not None and outcome.phase_at_score:
+            phases[(outcome.asset_id, outcome_ts)] = outcome.phase_at_score
+    rows: list[EntryRow] = []
+    for (asset_id, ts), max_gain in sorted(gains.items()):
+        rows.append(
+            EntryRow(
+                asset_id=asset_id,
+                decision_ts=ts,
+                research_priority=priorities.get((asset_id, ts)),
+                p_ignition_24h=ignition.get((asset_id, ts)),
+                max_gain_pct=max_gain,
+                hours_to_peak=hours.get((asset_id, ts)),
+                phase_at_score=phases.get((asset_id, ts)),
+            )
+        )
+    return rows
 
 
 def load_forecast_outcomes(session: Session) -> dict[tuple[int, datetime], tuple[bool, float]]:
@@ -1417,6 +1731,75 @@ def run_harness(
             min_samples=min_samples,
         )
     )
+
+    # Entry-mission cells (Task 6, spec §6). Entry rows are split with the
+    # SAME cutoff and 48h embargo as the outcome rows above — never a
+    # separate split. Three-window discipline (spec §2, principle 7):
+    # feature screening (Tasks 5/13/14) happens on window A, strictly
+    # before the reference side (window B: baselines and any weight
+    # fitting); the embargoed eval tail is window C, the only window
+    # entry_validated reads. Screening outputs enter here only as frozen
+    # component lists, never as numbers fitted on C; where a screening
+    # task tests more than one feature, its own report applies
+    # Benjamini-Hochberg across the screened set and quotes corrected
+    # q-values (the screening scripts own the correction).
+    entry_rows = load_entry_rows(session)
+    eval_entry_rows: list[EntryRow] = []
+    if cutoff is None:
+        eval_entry_rows = list(entry_rows)
+    else:
+        for row in entry_rows:
+            ts = _as_utc(row.decision_ts)
+            if ts is None or ts > cutoff:
+                eval_entry_rows.append(row)
+            # Rows at or before the cutoff — the 48h embargo band and
+            # the reference side (window B) alike — are excluded from
+            # the eval cells by construction of this split.
+    report.notes.append(
+        "entry windows: A = feature screening (frozen component lists; "
+        "Benjamini-Hochberg q-values owned by the screening scripts), "
+        "B = reference side of the embargoed split, C = embargoed eval "
+        "tail (the only window entry_validated reads)"
+    )
+    # Forecast-freshness precondition (spec §3/§10): stale forecasts are
+    # never evaluated as if current. On staleness the only entry-side
+    # output is the freshness cell, and entry_validated reads False.
+    settings = get_settings()
+    newest_forecast_ts = max(
+        (f.decision_ts for f in forecasts if f.decision_ts is not None), default=None
+    )
+    forecast_stale = newest_forecast_ts is None or (
+        datetime.now(UTC) - newest_forecast_ts
+        > timedelta(hours=settings.forecast_max_staleness_hours)
+    )
+    if forecast_stale:
+        if newest_forecast_ts is None:
+            freshness_note = "stale forecasts: no forecast rows persisted"
+        else:
+            freshness_note = (
+                "stale forecasts: newest forecast decision_ts "
+                f"{newest_forecast_ts.isoformat()} is older than "
+                "forecast_max_staleness_hours"
+            )
+        report.cells.append(
+            MetricCell(
+                output="forecasts",
+                metric="freshness",
+                regime=regime,
+                n=len(forecasts),
+                value=float("nan"),
+                ci_low=float("nan"),
+                ci_high=float("nan"),
+                baseline_value=float(settings.forecast_max_staleness_hours),
+                baseline_ci_low=float(settings.forecast_max_staleness_hours),
+                baseline_ci_high=float(settings.forecast_max_staleness_hours),
+                verdict="insufficient_data",
+                note=freshness_note,
+            )
+        )
+        report.notes.append(f"entry evaluation skipped: {freshness_note}")
+    else:
+        report.cells.extend(evaluate_entry(eval_entry_rows, regime=regime, min_samples=min_samples))
 
     # Ensemble weight-tracking meta-metric (harness-computed accuracy series).
     tracking = ensemble_weight_tracking(ensemble_history, scorer_accuracy_history)

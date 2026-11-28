@@ -512,6 +512,10 @@ class Settings(BaseSettings):
     forecast_enabled: bool = True
     forecast_forward_hours: int = 24
     forecast_ignition_threshold: float = 0.20
+    # Entry-gate precondition (spec §3/§10): a newest forecast older than
+    # this is stale — entry_validated reads False with a named reason
+    # instead of evaluating stale rows as if they were current.
+    forecast_max_staleness_hours: float = 6.0
     forecast_collapse_threshold: float = -0.70
     forecast_min_samples: int = 30
     forecast_train_frequency_hours: int = 24
