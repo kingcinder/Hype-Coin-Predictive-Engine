@@ -765,7 +765,7 @@ def test_first_buy_rate_limit_backoff_resets_on_next_scan(session, monkeypatch) 
         ingestion_service, "run_lifecycle", lambda session, decision_ts=None: {"events": 0}
     )
     monkeypatch.setattr(
-        ingestion_service, "run_forecast_if_due", lambda session, decision_ts=None: {"forecasts": 0}
+        ingestion_service, "run_forecast_cycle", lambda session, decision_ts=None: {"forecasts": 0}
     )
     monkeypatch.setattr(
         ingestion_service,
@@ -2053,7 +2053,7 @@ def test_scan_never_touches_archive(session, tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(
         ingestion_service,
-        "run_forecast_if_due",
+        "run_forecast_cycle",
         lambda session, decision_ts=None: {"forecasts": 0},
     )
     monkeypatch.setattr(

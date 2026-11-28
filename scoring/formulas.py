@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from common.enums import RiskBand
-from risk_engine.rules import assess_risk
+from risk_engine.rules import assess_risk, band_from_collapse_probability
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -59,6 +59,15 @@ class ScoreResult:
     confidence_source: str = "fallback"
 
 
+_BAND_SEVERITY: dict[RiskBand, int] = {
+    RiskBand.GREEN: 0,
+    RiskBand.YELLOW: 1,
+    RiskBand.ORANGE: 2,
+    RiskBand.RED: 3,
+    RiskBand.BLACK: 4,
+}
+
+
 def compute_scores(
     features: dict[str, float],
     missing_features: list[str] | None = None,
@@ -76,6 +85,27 @@ def compute_scores(
     _missing = set(missing_features)
     _assess_features = {k: v for k, v in features.items() if k not in _missing}
     risk_assessment = assess_risk(_assess_features, session=session)
+
+    # Ticket 1 step 4 (M2): the ML band floors the final band. Inside
+    # assess_risk a RED-band collapse probability contributes at most +20
+    # points, so a structurally clean token with a 60% modeled collapse
+    # probability scored 20 and stayed GREEN. A RED-band probability must
+    # not coexist with a GREEN verdict: the final band is the more severe
+    # of the rule band and the band the collapse probability maps to. The
+    # floor only raises; a missing probability applies no floor. The rule
+    # score itself is unchanged (exit_risk / research_priority keep using
+    # it as a component, as documented below).
+    final_band = risk_assessment.band
+    risk_reasons = list(risk_assessment.reasons)
+    if "collapse_probability_24h" in _assess_features:
+        _p_collapse = float(_assess_features["collapse_probability_24h"])
+        ml_band = band_from_collapse_probability(_p_collapse, session=session)
+        if _BAND_SEVERITY[ml_band] > _BAND_SEVERITY[final_band]:
+            final_band = ml_band
+            risk_reasons.append(
+                "Band floored by forecast model: "
+                f"{_p_collapse:.0%} collapse probability maps to {ml_band.value}"
+            )
     # E1: the honest coverage set is the union of factory-flagged missing
     # features and the inputs that silently hit their rule-engine default
     # (e.g. collapse_probability_24h after mask_unreliable_forecast pops it).
@@ -187,12 +217,12 @@ def compute_scores(
     phase_calibrated = phase_map is not None and phase_rank is not None
     if phase_map is not None and phase_rank is not None:
         raw_confidence = phase_map.get(
-            (risk_assessment.band, phase_rank),
-            band_confidence_map().get(risk_assessment.band, 50.0),
+            (final_band, phase_rank),
+            band_confidence_map().get(final_band, 50.0),
         )
         confidence_source = "phase-calibrated"
     else:
-        raw_confidence = band_confidence_map().get(risk_assessment.band, 50.0)
+        raw_confidence = band_confidence_map().get(final_band, 50.0)
     confidence = clamp(raw_confidence)
     if session is not None:
         from common.config import get_settings
@@ -278,7 +308,7 @@ def compute_scores(
         - 0.15 * clamp(collapse_probability * 100.0)
         + 0.05 * clamp(prelaunch_priority)
     )
-    if risk_assessment.band == RiskBand.BLACK:
+    if final_band == RiskBand.BLACK:
         research_priority = 0.0
 
     drivers = {
@@ -317,9 +347,9 @@ def compute_scores(
         catalyst=round(catalyst, 4),
         exit_risk=round(exit_risk, 4),
         research_priority=round(research_priority, 4),
-        risk_band=risk_assessment.band,
+        risk_band=final_band,
         confidence_source=confidence_source,
         drivers=drivers,
-        risk_reasons=risk_assessment.reasons,
+        risk_reasons=risk_reasons,
         missing_features=all_missing,
     )

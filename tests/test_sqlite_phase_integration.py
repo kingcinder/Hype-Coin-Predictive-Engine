@@ -66,7 +66,7 @@ def test_seeded_sqlite_scan_data_lake_retention_and_parity(session, tmp_path, mo
     monkeypatch.setattr(service_module, "alert_upcoming_catalysts", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(service_module, "run_lifecycle", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(service_module, "run_notifier", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(service_module, "run_forecast_if_due", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service_module, "run_forecast_cycle", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(service_module, "get_rpc_pool", lambda _chain: _RpcPool())
     monkeypatch.setattr(service_module, "persist_pool_snapshots", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(service_module, "record_pool_health", lambda *_args, **_kwargs: None)

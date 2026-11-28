@@ -158,6 +158,56 @@ def run_forecast_if_due(
     return result
 
 
+def run_forecast_inference(
+    session: Session,
+    *,
+    decision_ts: datetime | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Inference-only pass: refresh Forecast rows from the persisted model.
+
+    Ticket 1 step 4 (M2): Forecast rows used to be written only inside the
+    training run, so between 24h-cadence retrains the scoring path served a
+    frozen probability computed from the then-latest features. The persisted
+    model passed the real-metrics gate when it was saved (the gate runs
+    before persistence in ForecastEngine.run), so reusing it for inference
+    on the scan cadence is consistent with the training path's own trust
+    decision.
+    """
+    settings = settings or get_settings()
+    if not settings.forecast_enabled:
+        return {"status": "disabled"}
+    from forecast.persistence import load_model
+
+    model = load_model()
+    if model is None:
+        return {"status": "no_model", "forecasts": 0}
+    decision_ts = ensure_utc(decision_ts or utc_now())
+    predicted = ForecastEngine()._predict(session, model, decision_ts)
+    return {"status": "ok", "forecasts": len(predicted), "inference_only": True}
+
+
+def run_forecast_cycle(
+    session: Session,
+    *,
+    decision_ts: datetime | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Scan-cadence entry point: train when due, otherwise infer.
+
+    Training still runs on its persisted cadence (and predicts as part of
+    the run); every other scan refreshes Forecast rows from the persisted
+    model so probabilities track current features instead of freezing at
+    the last training run.
+    """
+    settings = settings or get_settings()
+    if forecast_due(session, settings=settings):
+        result = ForecastEngine().run(session, decision_ts=decision_ts)
+        result["scheduled"] = True
+        return result
+    return run_forecast_inference(session, decision_ts=decision_ts, settings=settings)
+
+
 def maybe_run_forecast() -> dict[str, Any]:
     """Cadence-gated forecast pass for worker loops and APScheduler."""
     from storage.database import SessionLocal

@@ -15,7 +15,7 @@ from common.logging import get_logger
 from common.time import ensure_utc, floor_to_hour, utc_now
 from common.urls import redact_url
 from fingerprint.engine import FingerprintEngine
-from forecast.engine import run_forecast_if_due
+from forecast.engine import run_forecast_cycle
 from ingestion.birdeye_client import BirdeyeClient
 from ingestion.contract_analyzer import ContractAnalysis, analyze_contract
 from ingestion.data_quality import check_market_snapshots
@@ -335,7 +335,7 @@ class IngestionService:
             self._commit_stage(session, stop)
             result["lifecycle"] = run_lifecycle(session, decision_ts=decision_ts)
             self._commit_stage(session, stop)
-            forecast_result = run_forecast_if_due(session, decision_ts=decision_ts)
+            forecast_result = run_forecast_cycle(session, decision_ts=decision_ts)
             result["forecasts"] = forecast_result.get("forecasts", 0)
             self._commit_stage(session, stop)
             scores = score_current_assets(session, decision_ts=decision_ts)
