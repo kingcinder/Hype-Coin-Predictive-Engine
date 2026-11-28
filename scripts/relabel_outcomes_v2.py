@@ -32,14 +32,14 @@ from risk_engine.outcomes import (
     _lifecycle_phase_as_of,
     _price_change_since,
 )
-
-# Pinned: this script is the historical v1 -> v2 relabel. The current label
-# version is v3 (see relabel_outcomes_v3.py); do not follow LABEL_VERSION.
-LABEL_VERSION = "v2_bounded"
 from storage import models
 from storage.database import session_scope
 from storage.repository import queued_write
 from storage.write_queue import start_write_queue, stop_write_queue
+
+# Pinned: this script is the historical v1 -> v2 relabel. The current label
+# version is v3 (see relabel_outcomes_v3.py); do not follow LABEL_VERSION.
+LABEL_VERSION = "v2_bounded"
 
 
 def _candidate_rows(session: Session) -> list[models.RiskOutcome]:

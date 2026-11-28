@@ -29,13 +29,14 @@ Usage:
   # Override the fixed threshold (minutes)
   .venv/bin/python scripts/forward_validate_pair_age.py --threshold 555.27
 """
+
 from __future__ import annotations
 
 import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,6 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-UTC = timezone.utc
 
 # Default fresh window: post-Nov-20 (the rule was derived Nov 20-22, so
 # post-Nov-20 data is unseen by the rule).
@@ -114,10 +114,14 @@ def measure(name: str, labels: np.ndarray, assets: np.ndarray, flag: np.ndarray)
     sel_assets = assets[flag]
     prec = float(sel_lab.mean()) if len(sel_lab) else float("nan")
     groups: dict[int, list[float]] = {}
-    for a, l in zip(sel_assets, sel_lab):
-        groups.setdefault(int(a), []).append(float(l))
+    for a, lab in zip(sel_assets, sel_lab, strict=True):
+        groups.setdefault(int(a), []).append(float(lab))
     gl = list(groups.values())
-    ci = bootstrap_ci(gl, lambda x: float(np.mean(x))) if len(gl) > 1 else (float("nan"), float("nan"))
+    ci = (
+        bootstrap_ci(gl, lambda x: float(np.mean(x)))
+        if len(gl) > 1
+        else (float("nan"), float("nan"))
+    )
     base = base_rate_proportion(labels)
     bci = base_rate_wilson_ci(labels)
     ver = verdict(prec, ci[0], ci[1], base, bci.low, bci.high, len(gl), False, min_assets=30)
@@ -137,7 +141,8 @@ def measure(name: str, labels: np.ndarray, assets: np.ndarray, flag: np.ndarray)
     }
     print(
         f"{name}: n={result['n']} n_assets={result['n_assets']} collapses={result['collapses']} "
-        f"base={result['base_rate']:.4f} base_ci=[{result['base_ci'][0]:.4f},{result['base_ci'][1]:.4f}] "
+        f"base={result['base_rate']:.4f} "
+        f"base_ci=[{result['base_ci'][0]:.4f},{result['base_ci'][1]:.4f}] "
         f"selected_n={result['selected_n']} selected_assets={result['selected_assets']} "
         f"selected_collapses={result['selected_collapses']} precision={result['precision']:.4f} "
         f"ci=[{result['ci'][0]:.4f},{result['ci'][1]:.4f}] verdict={result['verdict']}",
@@ -150,7 +155,9 @@ def main() -> None:
     global H, bootstrap_ci, verdict, base_rate_proportion, base_rate_wilson_ci
     ap = argparse.ArgumentParser(description="Forward-validate the pair-age bottom-decile rule.")
     ap.add_argument("--db", default=None, help="path to serpent.db (default: repo serpent.db)")
-    ap.add_argument("--start", default=None, help="window start ISO date/datetime (default: 2026-11-20)")
+    ap.add_argument(
+        "--start", default=None, help="window start ISO date/datetime (default: 2026-11-20)"
+    )
     ap.add_argument("--end", default=None, help="window end ISO date/datetime (exclusive)")
     ap.add_argument(
         "--threshold",

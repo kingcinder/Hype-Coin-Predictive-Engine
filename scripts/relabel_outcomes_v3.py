@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -197,16 +197,8 @@ def main() -> None:
         parser.error("--batch must be >= 1")
 
     now = utc_now()
-    start = (
-        datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
-        if args.start
-        else None
-    )
-    end = (
-        datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
-        if args.end
-        else None
-    )
+    start = datetime.fromisoformat(args.start).replace(tzinfo=UTC) if args.start else None
+    end = datetime.fromisoformat(args.end).replace(tzinfo=UTC) if args.end else None
     if args.apply:
         start_write_queue()
         try:

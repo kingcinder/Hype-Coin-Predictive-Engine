@@ -226,8 +226,7 @@ def _as_utc(ts: datetime) -> datetime:
 def _keys(engine):
     with Session(engine) as session:
         return {
-            (row.asset_id, _as_utc(row.decision_ts))
-            for row in session.query(models.Feature).all()
+            (row.asset_id, _as_utc(row.decision_ts)) for row in session.query(models.Feature).all()
         }
 
 
@@ -345,18 +344,12 @@ def test_rows_written_after_keep_set_built_are_never_pruned(engine, settings):
         )
         conn.commit()
         clause = _prunable_clause(max_id=int(max_id))
-        deleted = conn.execute(
-            text(f"DELETE FROM features WHERE {clause}")
-        ).rowcount
+        deleted = conn.execute(text(f"DELETE FROM features WHERE {clause}")).rowcount
         conn.commit()
     # The 18 old prunable rows are gone; the mid-pass row survives.
     assert int(deleted or 0) == 18
     with Session(engine) as session:
-        probe = (
-            session.query(models.Feature)
-            .filter_by(feature_name="probe_feature")
-            .one_or_none()
-        )
+        probe = session.query(models.Feature).filter_by(feature_name="probe_feature").one_or_none()
         assert probe is not None
         assert probe.asset_id == asset_c
 
@@ -372,11 +365,7 @@ def test_run_records_row_and_health(engine, settings):
         assert runs[0].keys_kept == 9
         assert runs[0].dry_run is False
         assert runs[0].error is None
-        health = (
-            session.query(models.SystemHealth)
-            .filter_by(component="features_retention")
-            .all()
-        )
+        health = session.query(models.SystemHealth).filter_by(component="features_retention").all()
         assert len(health) == 1
         assert health[0].state == "ok"
         assert "pruned=18" in (health[0].message or "")

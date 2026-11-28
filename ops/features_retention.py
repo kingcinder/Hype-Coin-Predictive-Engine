@@ -134,9 +134,7 @@ def _future_exists_sql(alias: str = "f", *, forward_hours: int) -> str:
     )
 
 
-def build_keep_keys(
-    conn: Connection, *, settings: Settings, as_of: str
-) -> int:
+def build_keep_keys(conn: Connection, *, settings: Settings, as_of: str) -> int:
     """Build the keep-set TEMP table for this pass; return the key count.
 
     The table holds the (asset_id, decision_ts) keys of every feature row
@@ -222,9 +220,7 @@ def build_keep_keys(
             "AND datetime(r.scored_at) = datetime(f.decision_ts))"
         )
     )
-    keys_kept = conn.execute(
-        text(f"SELECT COUNT(*) FROM {KEEP_TABLE}")
-    ).scalar_one()
+    keys_kept = conn.execute(text(f"SELECT COUNT(*) FROM {KEEP_TABLE}")).scalar_one()
     log.info("features_retention keep-set built keys_kept=%s as_of=%s", keys_kept, as_of)
     return int(keys_kept)
 
@@ -266,9 +262,7 @@ def prune_features(
             "duration_sec": 0.0,
         }
     rows_before = conn.execute(text("SELECT COUNT(*) FROM features")).scalar_one()
-    id_min, id_max = conn.execute(
-        text("SELECT MIN(id), MAX(id) FROM features")
-    ).one()
+    id_min, id_max = conn.execute(text("SELECT MIN(id), MAX(id) FROM features")).one()
     keys_kept = build_keep_keys(conn, settings=settings, as_of=str(as_of))
     conn.commit()
 
@@ -304,9 +298,7 @@ def prune_features(
             width = min(batch, cap - deleted)
         hi = min(lo + width - 1, int(id_max))
         result = conn.execute(
-            text(
-                f"DELETE FROM features WHERE id BETWEEN :lo AND :hi AND {clause}"
-            ),
+            text(f"DELETE FROM features WHERE id BETWEEN :lo AND :hi AND {clause}"),
             {"lo": lo, "hi": hi},
         )
         conn.commit()
@@ -317,7 +309,10 @@ def prune_features(
     conn.commit()
     log.info(
         "features_retention pass done pruned=%s rows %s->%s keys_kept=%s",
-        deleted, rows_before, rows_after, keys_kept,
+        deleted,
+        rows_before,
+        rows_after,
+        keys_kept,
     )
     return {
         "rows_before": int(rows_before),
@@ -331,9 +326,7 @@ def prune_features(
 
 def _latest_run(session: Session) -> models.FeatureRetentionRun | None:
     return session.scalar(
-        select(models.FeatureRetentionRun)
-        .order_by(models.FeatureRetentionRun.ts.desc())
-        .limit(1)
+        select(models.FeatureRetentionRun).order_by(models.FeatureRetentionRun.ts.desc()).limit(1)
     )
 
 
@@ -380,9 +373,7 @@ def run_features_retention(
     started = monotonic()
     try:
         with engine.connect() as conn:
-            result = prune_features(
-                conn, settings=settings, dry_run=dry_run, max_rows=max_rows
-            )
+            result = prune_features(conn, settings=settings, dry_run=dry_run, max_rows=max_rows)
     except Exception as exc:  # noqa: BLE001 - record + report, never raise
         result = {
             "rows_before": 0,
@@ -415,8 +406,7 @@ def run_features_retention(
             message=(
                 f"pruned={result['rows_pruned']} kept_keys={result['keys_kept']} "
                 f"rows {result['rows_before']}->{result['rows_after']} "
-                f"dry_run={dry_run}"
-                + (f" error={result['error']}" if result.get("error") else "")
+                f"dry_run={dry_run}" + (f" error={result['error']}" if result.get("error") else "")
             ),
         )
         session.commit()
@@ -425,7 +415,10 @@ def run_features_retention(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Serpent Circle features-table retention: prune feature rows the trainer, validation harness, and live scoring no longer need"
+        description=(
+            "Serpent Circle features-table retention: prune feature rows the trainer, "
+            "validation harness, and live scoring no longer need"
+        )
     )
     parser.add_argument("--once", action="store_true", help="run one retention pass and exit")
     parser.add_argument(
@@ -442,7 +435,10 @@ def main() -> None:
         "--max-rows",
         type=int,
         default=None,
-        help="cap rows deleted in this pass (0 = unlimited; default: FEATURES_RETENTION_MAX_ROWS_PER_PASS)",
+        help=(
+            "cap rows deleted in this pass "
+            "(0 = unlimited; default: FEATURES_RETENTION_MAX_ROWS_PER_PASS)"
+        ),
     )
     args = parser.parse_args()
 

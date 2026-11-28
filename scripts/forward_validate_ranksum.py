@@ -39,6 +39,7 @@ Usage:
   # Also write the fixed threshold + reference distributions to a JSON file
   .venv/bin/python scripts/forward_validate_ranksum.py --save-reference <path>
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +47,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -54,7 +55,6 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-UTC = timezone.utc
 
 # v6 validation cutoff (verification round, fixed). The reference set is the
 # pre-cutoff outcomes; this boundary is HARDCODED so the threshold never
@@ -152,10 +152,14 @@ def measure(name: str, labels: np.ndarray, assets: np.ndarray, flag: np.ndarray)
     sel_assets = assets[flag]
     prec = float(sel_lab.mean()) if len(sel_lab) else float("nan")
     groups: dict[int, list[float]] = {}
-    for a, l in zip(sel_assets, sel_lab):
-        groups.setdefault(int(a), []).append(float(l))
+    for a, lab in zip(sel_assets, sel_lab, strict=True):
+        groups.setdefault(int(a), []).append(float(lab))
     gl = list(groups.values())
-    ci = bootstrap_ci(gl, lambda x: float(np.mean(x))) if len(gl) > 1 else (float("nan"), float("nan"))
+    ci = (
+        bootstrap_ci(gl, lambda x: float(np.mean(x)))
+        if len(gl) > 1
+        else (float("nan"), float("nan"))
+    )
     base = base_rate_proportion(labels)
     bci = base_rate_wilson_ci(labels)
     ver = verdict(prec, ci[0], ci[1], base, bci.low, bci.high, len(gl), False, min_assets=30)
@@ -175,7 +179,8 @@ def measure(name: str, labels: np.ndarray, assets: np.ndarray, flag: np.ndarray)
     }
     print(
         f"{name}: n={result['n']} n_assets={result['n_assets']} collapses={result['collapses']} "
-        f"base={result['base_rate']:.4f} base_ci=[{result['base_ci'][0]:.4f},{result['base_ci'][1]:.4f}] "
+        f"base={result['base_rate']:.4f} "
+        f"base_ci=[{result['base_ci'][0]:.4f},{result['base_ci'][1]:.4f}] "
         f"selected_n={result['selected_n']} selected_assets={result['selected_assets']} "
         f"selected_collapses={result['selected_collapses']} precision={result['precision']:.4f} "
         f"ci=[{result['ci'][0]:.4f},{result['ci'][1]:.4f}] verdict={result['verdict']}",
@@ -198,14 +203,15 @@ def build_reference(db_path: str, live_outcomes: list) -> dict:
     ref_dists: dict[str, np.ndarray] = {}
     for f in FEATURES:
         vals = sorted(
-            feat[(a, norm_ts(ts))][f]
-            for a, ts in keys
-            if f in feat.get((a, norm_ts(ts)), {})
+            feat[(a, norm_ts(ts))][f] for a, ts in keys if f in feat.get((a, norm_ts(ts)), {})
         )
         ref_dists[f] = np.array(vals, dtype=float)
         print(f"  reference distribution {f}: n={len(vals)}", flush=True)
     ref_scores = np.array(
-        [rank_sum_for_row(feat.get((o.asset_id, norm_ts(o.decision_ts)), {}), ref_dists) for o in ref]
+        [
+            rank_sum_for_row(feat.get((o.asset_id, norm_ts(o.decision_ts)), {}), ref_dists)
+            for o in ref
+        ]
     )
     threshold = float(np.percentile(ref_scores, 90))
     print(
@@ -213,8 +219,16 @@ def build_reference(db_path: str, live_outcomes: list) -> dict:
         f"median={np.median(ref_scores):.4f} p90={threshold:.4f} max={ref_scores.max():.4f}",
         flush=True,
     )
-    print(f"FIXED threshold (90th percentile of reference live rank-sum): {threshold:.6f}", flush=True)
-    return {"threshold": threshold, "ref_dists": ref_dists, "ref_n": len(ref), "ref_scores": ref_scores}
+    print(
+        f"FIXED threshold (90th percentile of reference live rank-sum): {threshold:.6f}",
+        flush=True,
+    )
+    return {
+        "threshold": threshold,
+        "ref_dists": ref_dists,
+        "ref_n": len(ref),
+        "ref_scores": ref_scores,
+    }
 
 
 def load_reference(path: str) -> dict:
@@ -249,9 +263,7 @@ def validate_window(
 ) -> dict:
     """Apply the FIXED threshold to one window and measure it."""
     rows = [
-        o
-        for o in live_outcomes
-        if o.decision_ts > start and (end is None or o.decision_ts <= end)
+        o for o in live_outcomes if o.decision_ts > start and (end is None or o.decision_ts <= end)
     ]
     print(
         f"\n[{name}] window: decision_ts > {start.isoformat()}"
@@ -270,17 +282,22 @@ def validate_window(
     labels = np.array([lab_row(o.collapsed, o.rugged) for o in rows], dtype=float)
     assets = np.array([o.asset_id for o in rows], dtype=int)
     scores = np.array(
-        [rank_sum_for_row(feat.get((o.asset_id, norm_ts(o.decision_ts)), {}), ref_dists) for o in rows]
+        [
+            rank_sum_for_row(feat.get((o.asset_id, norm_ts(o.decision_ts)), {}), ref_dists)
+            for o in rows
+        ]
     )
     flag = scores >= threshold
     result = measure(f"[{name}] rank-sum >= fixed threshold", labels, assets, flag)
     result["threshold"] = threshold
     days: dict[str, list] = {}
-    for o, s, l in zip(rows, scores, labels):
-        days.setdefault(o.decision_ts.strftime("%Y-%m-%d"), []).append((bool(s >= threshold), float(l)))
+    for o, s, lab in zip(rows, scores, labels, strict=True):
+        days.setdefault(o.decision_ts.strftime("%Y-%m-%d"), []).append(
+            (bool(s >= threshold), float(lab))
+        )
     for d in sorted(days):
-        sel = [l for f_, l in days[d] if f_]
-        all_ = [l for _, l in days[d]]
+        sel = [lab for f_, lab in days[d] if f_]
+        all_ = [lab for _, lab in days[d]]
         print(
             f"  [{name}] day {d}: n={len(all_)} base={np.mean(all_):.4f} "
             f"selected_n={len(sel)} precision={np.mean(sel) if sel else float('nan'):.4f}",
@@ -320,7 +337,11 @@ def reproduce_eval() -> None:
     top[order[:497]] = True
     result = measure("reproduce-eval COMBO top-10% (top 497)", labels, assets, top)
     ok = abs(result["precision"] - 0.1268) < 0.001 and result["verdict"] == "beats_baseline"
-    print(f"reproduce-eval: {'PASS' if ok else 'FAIL'} (expect precision 0.1268, verdict beats_baseline)", flush=True)
+    print(
+        f"reproduce-eval: {'PASS' if ok else 'FAIL'} "
+        "(expect precision 0.1268, verdict beats_baseline)",
+        flush=True,
+    )
     if not ok:
         raise SystemExit("reproduce-eval FAILED; measurement code does not match the edge hunt")
 
@@ -339,7 +360,10 @@ def reference_auc_check(db_path: str, live_outcomes: list) -> None:
     keys = [(o.asset_id, o.decision_ts) for o in ref]
     feat = load_feature_matrix(db_path, keys)
     labels = np.array([lab_row(o.collapsed, o.rugged) for o in ref], dtype=float)
-    print(f"reference AUC check: n={len(ref)} collapses={int(labels.sum())} base={labels.mean():.4f}", flush=True)
+    print(
+        f"reference AUC check: n={len(ref)} collapses={int(labels.sum())} base={labels.mean():.4f}",
+        flush=True,
+    )
     scored = []
     for f in FEATURES + ["spread_estimate", "volume_acceleration", "pair_age_minutes"]:
         col = np.array(
@@ -362,24 +386,36 @@ def reference_auc_check(db_path: str, live_outcomes: list) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Forward-validate the rank-sum candidate rule.")
     ap.add_argument("--db-path", default=None, help="SQLite DB path (default: live serpent.db)")
-    ap.add_argument("--start", default=None, help="window start ISO date/datetime (default: 2026-11-20)")
+    ap.add_argument(
+        "--start", default=None, help="window start ISO date/datetime (default: 2026-11-20)"
+    )
     ap.add_argument("--end", default=None, help="window end ISO date/datetime (default: none)")
-    ap.add_argument("--reproduce-eval", action="store_true", help="replay the eval-window result and exit")
-    ap.add_argument("--save-reference", default=None, help="write fixed threshold + reference dists to JSON")
+    ap.add_argument(
+        "--reproduce-eval", action="store_true", help="replay the eval-window result and exit"
+    )
+    ap.add_argument(
+        "--save-reference", default=None, help="write fixed threshold + reference dists to JSON"
+    )
     ap.add_argument(
         "--load-reference",
         default=None,
-        help="load fixed threshold + reference dists from JSON (default: reports/ranksum-reference-20261121.json when it exists)",
+        help=(
+            "load fixed threshold + reference dists from JSON "
+            "(default: reports/ranksum-reference-20261121.json when it exists)"
+        ),
     )
     ap.add_argument(
         "--recompute-reference",
         action="store_true",
         help="recompute the reference from the live DB instead of loading the saved JSON",
     )
-    ap.add_argument("--skip-reference-auc", action="store_true", help="skip the reference AUC diagnostic")
+    ap.add_argument(
+        "--skip-reference-auc", action="store_true", help="skip the reference AUC diagnostic"
+    )
     args = ap.parse_args()
 
-    global H, bootstrap_ci, verdict, base_rate_proportion, base_rate_wilson_ci, rankdata, roc_auc_score
+    global H, bootstrap_ci, verdict, base_rate_proportion, base_rate_wilson_ci, rankdata
+    global roc_auc_score
 
     db_path = args.db_path or os.environ.get("SERPENT_DB_PATH", DEFAULT_DB)
     # Set the DB path BEFORE importing repo modules so settings resolve to it.
@@ -391,9 +427,12 @@ def main() -> None:
     from validation import harness as _H  # noqa: E402
     from validation.baselines import (  # noqa: E402
         base_rate_proportion as _brp,
+    )
+    from validation.baselines import (
         base_rate_wilson_ci as _brw,
     )
-    from validation.metrics import bootstrap_ci as _bc, verdict as _verdict  # noqa: E402
+    from validation.metrics import bootstrap_ci as _bc  # noqa: E402
+    from validation.metrics import verdict as _verdict
 
     H = _H
     bootstrap_ci = _bc
@@ -445,7 +484,10 @@ def main() -> None:
             "ref_distributions": {f: sorted(float(v) for v in ref_dists[f]) for f in FEATURES},
         }
         Path(args.save_reference).write_text(json.dumps(payload, indent=2))
-        print(f"saved fixed threshold + reference distributions to {args.save_reference}", flush=True)
+        print(
+            f"saved fixed threshold + reference distributions to {args.save_reference}",
+            flush=True,
+        )
 
     if not args.skip_reference_auc:
         reference_auc_check(db_path, live)
