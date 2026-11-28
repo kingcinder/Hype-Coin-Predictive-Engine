@@ -11,6 +11,45 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASKS 9/16 SEAM — DISTRIBUTION VOTES WIRED INTO EXIT POLICY — 2026-11-28
+
+- **Wiring landed** (`trading/exit_policy.py`): `ExitSnapshot`
+  gains `distribution_votes: DistributionVotes | None = None`
+  (None = neutral). In the armed-tranche layer only, votes with
+  `DistributionVotes.accelerates` true (≥ 2 of 3, per Task 16's
+  derivation in `features/factory.py::distribution_votes`) scale
+  the tranche — pacing-sized or fixed-fraction alike — by the
+  pace multiplier `_ACCELERATE_PACE_MULTIPLIER = 2.0` (module
+  constant; the plan names no Settings field for it and the
+  pinned tests fix the value: 0.25 → 0.5 fixed-fraction,
+  0.10 → 0.20 depth-capped), still clamped to the full remainder.
+  The votes are consulted nowhere else: arming reads only flow
+  rollover + buyer stall, so unarmed votes change nothing and
+  votes alone never fire an exit. This closes the deferral
+  recorded in the Task 16 entry below.
+- **Tests:** `tests/test_exit_policy.py` —
+  `test_accelerate_votes_pull_tranche_forward_only_when_armed`
+  (unarmed + 2 votes → hold, still unarmed, nothing sold; armed
+  + 2 votes → tranche doubles; armed + 1 vote → baseline) and
+  `test_accelerate_votes_scale_the_depth_capped_tranche`
+  (pacing on: capped 0.10 → 0.20). Full `test_exit_policy.py` +
+  `test_distribution_features.py` green; ruff + mypy clean on
+  touched files. `[verified 2026-11-28]`
+- **Known gap — stored harvest labels are forecast-engine only:**
+  the stored `executable_peak_gain_s02/s10/s25` labels are
+  written only by `forecast/labels.py`'s two engines
+  (`generate` and `seed_labels_at_feature_timestamps`, via
+  `harvest_label_specs`). The `data_lake/labels.py` dense and
+  replay paths have NO harvest wiring — they never write the
+  executable-peak labels. Stored-label consumers therefore see
+  forecast-engine episodes only: e.g. the Task 15 depth-lead
+  study (`scripts/depth_lead_study.py`) selects its population
+  by the stored `executable_peak_gain_s10` label, so its
+  episodes are the forecast engines' decision points, not the
+  data-lake paths'. Task 9's replay loader is UNAFFECTED — it
+  reads no stored harvest labels and recomputes the executable
+  peak per entry via `forecast.harvest.harvest_path`.
+
 ## MISSION REFACTOR TASK 16 — DISTRIBUTION ENSEMBLE — 2026-11-28
 
 - **Step 1 verification — BRANCH A (deltas reconstructible):**

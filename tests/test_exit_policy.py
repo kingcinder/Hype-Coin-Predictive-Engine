@@ -30,6 +30,7 @@ from decimal import Decimal
 import pytest
 
 from common.config import Settings
+from features.factory import DistributionVotes
 from forecast.harvest import harvest_path
 from forecast.labels import aligned_harvest_rows
 from storage import models
@@ -63,6 +64,7 @@ def snap(
     nfr: float = 0.5,
     buyers_delta: float = 5.0,
     lp_removed: bool = False,
+    votes: DistributionVotes | None = None,
 ) -> ExitSnapshot:
     return ExitSnapshot(
         ts=T0 + timedelta(hours=hour),
@@ -71,6 +73,7 @@ def snap(
         net_flow_ratio=nfr,
         unique_buyers_delta=buyers_delta,
         lp_removed=lp_removed,
+        distribution_votes=votes,
     )
 
 
@@ -229,6 +232,54 @@ def test_pacing_on_deep_pool_tranche_can_take_all_remaining(pacing_policy):
     decision = pacing_policy.on_snapshot(st, snap(price=1.8, depth=1e12))
     assert decision.reason == "armed_tranche"
     assert decision.fraction == pytest.approx(1.0)
+
+
+# ── Layer 3: distribution acceleration votes (Task 16) ─────────────────────
+
+ACCELERATING = DistributionVotes(effort_vs_result=True, top_holder_net_flow=True)
+ONE_VOTE = DistributionVotes(holder_stall=True)
+
+
+def test_accelerate_votes_pull_tranche_forward_only_when_armed(policy):
+    # 2 of 3 votes active but the position is NOT armed (and this
+    # snapshot's own flow does not arm it): no tranche, no arming —
+    # votes never arm the ladder and never fire an exit alone.
+    st = state()
+    decision = policy.on_snapshot(st, snap(votes=ACCELERATING))
+    assert decision.action == "hold"
+    assert st.armed is False
+    assert st.qty_remaining == 1.0
+
+    # The same votes on an armed position pull the next tranche
+    # forward: the pace multiplier doubles the baseline tranche
+    # (pacing off, the baseline is the ladder's fixed 0.25 of the
+    # original position against a full remainder).
+    baseline = policy.on_snapshot(state(armed=True), snap())
+    accelerated = policy.on_snapshot(state(armed=True), snap(votes=ACCELERATING))
+    assert baseline.reason == accelerated.reason == "armed_tranche"
+    assert baseline.fraction == pytest.approx(0.25)
+    assert accelerated.fraction == pytest.approx(0.5)
+    assert accelerated.fraction > baseline.fraction
+
+    # Armed with only one active vote (below the 2-of-3 rule):
+    # the baseline tranche, unchanged.
+    single = policy.on_snapshot(state(armed=True), snap(votes=ONE_VOTE))
+    assert single.reason == "armed_tranche"
+    assert single.fraction == pytest.approx(baseline.fraction)
+
+
+def test_accelerate_votes_scale_the_depth_capped_tranche(pacing_policy):
+    # Pacing on: the baseline tranche sits at the depth cap (the
+    # plan's worked example: 0.125 * 8_000 / 10_000 = 0.10 of the
+    # position); accelerating votes scale that capped tranche by
+    # the pace multiplier.
+    st = state(peak_price=10_000.0, rungs_hit=4, armed=True)
+    decision = pacing_policy.on_snapshot(
+        st, snap(price=10_000.0, depth=8_000.0, votes=ACCELERATING)
+    )
+    assert decision.reason == "armed_tranche"
+    assert decision.fraction == pytest.approx(0.20)
+    assert st.qty_remaining == pytest.approx(0.8)
 
 
 # ── Layer 6: the EV-trail runner ───────────────────────────────────────────

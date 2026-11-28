@@ -19,6 +19,12 @@ the spec's layers in priority order on each snapshot:
    position down: sized at most ``exit_max_depth_fraction`` of
    current quote depth when pacing is enabled, else the ladder's
    fixed fraction of the original position (the Task 15 fallback).
+   Task 16's distribution accelerate votes ride this layer only:
+   when a snapshot's ``DistributionVotes.accelerates`` is true
+   (≥ 2 of 3 distribution signals active), the armed tranche is
+   scaled by the pace multiplier — the votes pull the next tranche
+   forward. Votes never arm the ladder and never fire an exit
+   alone; on an unarmed position they change nothing.
 
 Arming (spec §4 layer 2) requires flow rollover (net-flow ratio at or
 below ``exit_nfr_arm_threshold``, Task 5's ``net_inflow_ratio``
@@ -72,6 +78,7 @@ from storage import models
 from trading.costs import q_sol, simulate_sell
 
 if TYPE_CHECKING:
+    from features.factory import DistributionVotes
     from validation.harness import ExitRow
 
 # The replay's cost basis (Task 4's iter_replay_entries defaults):
@@ -96,6 +103,14 @@ class PositionState:
     exited: bool = False
 
 
+# Task 16 pace multiplier: accelerating distribution votes scale an
+# ARMED tranche by this factor (the tranche is still clamped to the
+# full remainder). No Settings field exists for it in the plan; the
+# pinned tests fix the value at 2x (0.25 -> 0.5 fixed-fraction,
+# 0.10 -> 0.20 depth-capped).
+_ACCELERATE_PACE_MULTIPLIER = 2.0
+
+
 @dataclass(frozen=True)
 class ExitSnapshot:
     ts: datetime
@@ -104,6 +119,9 @@ class ExitSnapshot:
     net_flow_ratio: float  # Task 5 net-inflow semantics, latest window
     unique_buyers_delta: float  # change since previous snapshot
     lp_removed: bool = False
+    # Task 16 layer-3 accelerate votes; None = no distribution
+    # evidence on this snapshot, which is neutral (never active).
+    distribution_votes: DistributionVotes | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +205,12 @@ class ExitPolicy:
                 )
             else:
                 fraction = min(1.0, settings.exit_ladder_fraction / state.qty_remaining)
+            # Layer 3 acceleration: distribution votes scale the
+            # armed tranche (pacing-sized or fixed-fraction alike).
+            # This branch is reachable only when armed — unarmed
+            # votes never reach sizing and change nothing.
+            if snap.distribution_votes is not None and snap.distribution_votes.accelerates:
+                fraction = min(1.0, fraction * _ACCELERATE_PACE_MULTIPLIER)
             if fraction > 0.0:
                 return self._apply(state, fraction, "sell_tranche", "armed_tranche")
 
