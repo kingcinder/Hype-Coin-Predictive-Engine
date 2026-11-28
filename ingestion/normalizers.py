@@ -212,14 +212,48 @@ def normalize_geckoterminal_trades(
     return swaps
 
 
-def extract_profile_links(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+@dataclass(frozen=True)
+class ProfileLinks:
+    """Social/web links carried by one DexScreener token profile.
+
+    Telegram and X ride along with website/github: they are dropped
+    nowhere now — the entry mission's social-presence prior
+    (``scoring.entry_rank.social_presence_at_first_observation``) reads
+    them back from the raw-evidence profile payloads, which are stored
+    verbatim, so presence needs no schema change.
+    """
+
+    website_url: str | None
+    github_url: str | None
+    telegram_url: str | None
+    x_url: str | None
+
+
+def _url_host(url: str) -> str:
+    host = url.lower().split("://", 1)[-1].split("/", 1)[0]
+    return host.removeprefix("www.")
+
+
+def extract_profile_links(payload: dict[str, Any]) -> ProfileLinks:
     website_url: str | None = None
     github_url: str | None = None
+    telegram_url: str | None = None
+    x_url: str | None = None
     for link in payload.get("links") or []:
         url = str(link.get("url") or "")
+        host = _url_host(url)
         label = str(link.get("label") or link.get("type") or "").lower()
         if not website_url and ("website" in label or "site" in label):
             website_url = url
         if not github_url and ("github" in label or "github.com" in url.lower()):
             github_url = url
-    return website_url, github_url
+        if not telegram_url and ("telegram" in label or host in {"t.me", "telegram.me"}):
+            telegram_url = url
+        if not x_url and (label == "x" or "twitter" in label or host in {"x.com", "twitter.com"}):
+            x_url = url
+    return ProfileLinks(
+        website_url=website_url,
+        github_url=github_url,
+        telegram_url=telegram_url,
+        x_url=x_url,
+    )

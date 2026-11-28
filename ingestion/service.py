@@ -783,7 +783,7 @@ class IngestionService:
                 token_address = item.get("tokenAddress")
                 if not chain or not token_address:
                     continue
-                website_url, github_url = extract_profile_links(item)
+                links = extract_profile_links(item)
                 upsert_asset(
                     session,
                     chain_id=chain.id,
@@ -791,8 +791,8 @@ class IngestionService:
                     symbol=str(item.get("symbol") or "UNKNOWN"),
                     name=item.get("description"),
                     first_seen_at=observed_at,
-                    website_url=website_url,
-                    github_url=github_url,
+                    website_url=links.website_url,
+                    github_url=links.github_url,
                 )
                 count += 1
             record_health(

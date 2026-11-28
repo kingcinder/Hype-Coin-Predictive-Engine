@@ -18,6 +18,16 @@ threshold, the row's ``buy_sell_ratio`` is pulled toward 1.0 and the row
 is flagged. Same-transaction round-trip exclusion would need swap-level
 data the lake does not persist per snapshot; the flag is the honest v1.
 
+Social presence (Task 13, spec §3 item 3) enters as a *prior*, never a
+component: :func:`social_presence_at_first_observation` derives
+Telegram / X / website / github flags from the coin's first observation
+only (point-in-time — later profile updates never rewrite them), and a
+candidate with Telegram or website presence gets its finished rank-sum
+multiplied by ``Settings.entry_social_prior_multiplier``. The
+contingency falsification (``scripts/social_prior_falsification.py``)
+guards the multiplier: at 1.0 (the demoted state) presence no longer
+scales anything and only breaks exact rank-sum ties.
+
 Percentile convention: midrank — ``(count_below + 0.5 * count_equal) /
 cohort_size`` — so ties share their percentile and a single-row cohort
 reads 0.5. A component missing from a row scores percentile 0.0:
@@ -28,7 +38,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from common.config import Settings
+from common.time import ensure_utc
+from ingestion.normalizers import extract_profile_links
+from storage import models
 
 ENTRY_RANK_COMPONENTS: tuple[str, ...] = (
     "net_inflow_ratio",
@@ -45,6 +61,68 @@ class EntryCandidate:
     rank_sum: float
     components: dict[str, float]  # percentile rank per component, 0..1
     wash_flagged: bool
+
+
+@dataclass(frozen=True)
+class SocialPresence:
+    website: bool
+    github: bool
+    telegram: bool
+    x: bool
+
+
+def social_presence_at_first_observation(session: Session, asset_id: int) -> SocialPresence:
+    """Flags from the asset's FIRST observation only (point-in-time).
+
+    When a DexScreener profile evidencing this asset exists at or
+    before ``first_seen_at``, the earliest such profile decides all
+    four flags: the stored ``website_url`` / ``github_url`` columns are
+    *not* point-in-time (``upsert_asset`` fills them in when a later
+    profile adds one), so they must not override what the first
+    observation actually showed. Only when no profile evidence exists
+    at or before first sight do the stored URLs stand in — Telegram / X
+    then read absent, since nothing point-in-time ever recorded them.
+    Later profile updates never rewrite the flags.
+    """
+    absent = SocialPresence(website=False, github=False, telegram=False, x=False)
+    asset = session.get(models.Asset, asset_id)
+    if asset is None:
+        return absent
+    first_seen = ensure_utc(asset.first_seen_at)
+    chain = session.get(models.Chain, asset.chain_id)
+    chain_slug = chain.slug if chain is not None else None
+    evidence = session.scalars(
+        select(models.RawEvidenceItem)
+        .join(models.Source, models.Source.id == models.RawEvidenceItem.source_id)
+        .where(
+            models.Source.name == "dexscreener",
+            models.RawEvidenceItem.observed_at <= first_seen,
+        )
+        .order_by(models.RawEvidenceItem.observed_at.asc(), models.RawEvidenceItem.id.asc())
+    ).all()
+    for row in evidence:
+        profiles = (row.payload or {}).get("profiles") or []
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("tokenAddress") or "") != asset.address:
+                continue
+            item_chain = str(item.get("chainId") or "").lower()
+            if item_chain and chain_slug and item_chain != chain_slug:
+                continue
+            links = extract_profile_links(item)
+            return SocialPresence(
+                website=links.website_url is not None,
+                github=links.github_url is not None,
+                telegram=links.telegram_url is not None,
+                x=links.x_url is not None,
+            )
+    return SocialPresence(
+        website=asset.website_url is not None,
+        github=asset.github_url is not None,
+        telegram=False,
+        x=False,
+    )
 
 
 def wash_lite_adjust(
@@ -86,7 +164,10 @@ def _percentile_rank(value: float, cohort_values: list[float]) -> float:
 
 
 def rank_entry_cohort(
-    rows: list[tuple[int, dict[str, float]]], *, settings: Settings
+    rows: list[tuple[int, dict[str, float]]],
+    *,
+    settings: Settings,
+    presence: dict[int, SocialPresence] | None = None,
 ) -> list[EntryCandidate]:
     """Percentile-rank each component within the cohort, sum, sort desc.
 
@@ -95,8 +176,16 @@ def rank_entry_cohort(
     percentile is computed from its damped value — and a flagged row's
     ``unique_buyers_acceleration`` term is dropped outright (percentile
     0.0, drop recorded as ``unique_buyers_acceleration_wash_dropped``).
-    Ties in rank_sum break by ascending asset_id so the ordering is
-    deterministic.
+
+    Social-presence prior: when ``presence`` is supplied, a candidate
+    with Telegram or website presence at first observation gets its
+    finished rank_sum multiplied by
+    ``settings.entry_social_prior_multiplier`` — after the rank-sum,
+    before sorting; absent presence data means no multiplier. In the
+    demoted state (multiplier == 1.0, the falsification's verdict) the
+    multiplication is a no-op and presence instead breaks exact
+    rank_sum ties, ahead of the asset_id tiebreak. All other ties
+    break by ascending asset_id so the ordering is deterministic.
     """
     adjusted = [
         (asset_id, *wash_lite_adjust(features, settings=settings)) for asset_id, features in rows
@@ -106,6 +195,7 @@ def rank_entry_cohort(
         for name in ENTRY_RANK_COMPONENTS
     }
     candidates: list[EntryCandidate] = []
+    prior_asset_ids: set[int] = set()
     for asset_id, features, wash_flagged in adjusted:
         components = {
             name: (
@@ -122,6 +212,14 @@ def rank_entry_cohort(
             # Recorded beside the percentiles; the marker is not itself a
             # percentile and never enters rank_sum.
             components["unique_buyers_acceleration_wash_dropped"] = 1.0
+        candidate_presence = presence.get(asset_id) if presence else None
+        if candidate_presence is not None and (
+            candidate_presence.telegram or candidate_presence.website
+        ):
+            # The prior scales the finished rank-sum; it is not a
+            # component and never appears in ``components``.
+            prior_asset_ids.add(asset_id)
+            rank_sum *= settings.entry_social_prior_multiplier
         candidates.append(
             EntryCandidate(
                 asset_id=asset_id,
@@ -130,5 +228,12 @@ def rank_entry_cohort(
                 wash_flagged=wash_flagged,
             )
         )
-    candidates.sort(key=lambda candidate: (-candidate.rank_sum, candidate.asset_id))
+    demoted = settings.entry_social_prior_multiplier == 1.0
+    candidates.sort(
+        key=lambda candidate: (
+            -candidate.rank_sum,
+            0 if (demoted and candidate.asset_id in prior_asset_ids) else 1,
+            candidate.asset_id,
+        )
+    )
     return candidates

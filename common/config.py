@@ -535,6 +535,15 @@ class Settings(BaseSettings):
     entry_wash_volume_per_buyer: float = 20.0
     entry_wash_downweight: float = 0.5
 
+    # Social-presence prior (Task 13, spec §3 item 3): a candidate with
+    # Telegram or website presence at first observation gets its
+    # entry rank_sum multiplied by this factor (a prior, never a
+    # standalone signal). Demotion rule: if the contingency
+    # falsification (scripts/social_prior_falsification.py) measures
+    # lift < 2x, this default becomes 1.0 and presence only breaks
+    # exact rank_sum ties in rank_entry_cohort.
+    entry_social_prior_multiplier: float = 1.25
+
     # Model persistence & comparison thresholds
     model_compare_precision_delta: float = 0.05
     model_compare_cal_delta: float = 0.05

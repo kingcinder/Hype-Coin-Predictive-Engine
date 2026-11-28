@@ -11,6 +11,42 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 13 — SOCIAL-PRESENCE PRIOR — 2026-11-28
+
+- **Extraction landed:** `ingestion/normalizers.py::extract_profile_links`
+  now returns the frozen `ProfileLinks` dataclass (website, github,
+  telegram, x) — Telegram / X links in DexScreener profile payloads are
+  no longer dropped; `_ingest_dexscreener_profiles` passes the dataclass
+  through (the stored columns remain website/github only — no schema
+  change; the full payload already lands verbatim via
+  `store_raw_evidence`).
+- **Presence derivation landed:** `scoring/entry_rank.py::
+  social_presence_at_first_observation` — point-in-time flags from the
+  FIRST observation only. When a dexscreener profile evidencing the
+  asset exists at or before `first_seen_at`, the earliest such profile
+  decides all four flags (the stored `website_url` / `github_url`
+  columns are not point-in-time — `upsert_asset` fills them in on later
+  updates — so they never override first-observation evidence); the
+  stored URLs stand in only when no profile evidence exists.
+- **Prior landed:** `rank_entry_cohort(..., presence=...)` — a
+  candidate with Telegram or website presence gets its finished
+  rank_sum multiplied by `Settings.entry_social_prior_multiplier`
+  (1.25), applied after the rank-sum, before sorting; absent presence
+  data = no multiplier. Demoted state (multiplier == 1.0): presence
+  only breaks exact rank_sum ties.
+- **Falsification instrument landed, live run PENDING:**
+  `scripts/social_prior_falsification.py` builds the contingency table
+  over historical launches (Telegram-present at first observation ×
+  `forward_max_gain_pct >= 1.0`), writes
+  `reports/social-prior-falsification-<YYYYMMDD>.json` + `.md`, and
+  exits 0 iff lift >= 2.0 with n(telegram) >= 30. Unit-tested on seeded
+  fixtures only (pass case lift 4.0, equal-rates case lift 1.0 → exit
+  1, thin-Telegram-sample case → exit 1). **The live window-C run has
+  NOT been executed** — no copy of the live DB exists on this VM — so
+  the prior ships at the plan's 1.25, neither confirmed nor demoted;
+  the demotion rule fires only on a recorded live exit-1 verdict.
+  `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASK 5 — ENTRY RANK COMPOSITE V1 + FALSIFICATION — 2026-11-28
 
 - **Feature landed:** `net_inflow_ratio` in `FEATURE_NAMES` — reserve
