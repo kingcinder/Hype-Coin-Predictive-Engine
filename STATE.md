@@ -11,6 +11,62 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 16 — DISTRIBUTION ENSEMBLE — 2026-11-28
+
+- **Step 1 verification — BRANCH A (deltas reconstructible):**
+  `storage/models.py::Holder` stores `balance` per (asset, wallet,
+  ts, source) with an `observed_at` column, and both holder ingest
+  paths (`_ingest_solana_holder_snapshots`,
+  `_ingest_evm_holder_snapshots`) write per-wallet rows hourly
+  (`ts = floor_to_hour`) via `insert_holder_once` — so deltas are
+  the difference of consecutive per-wallet balances, derived at read
+  time; no delta column exists and none is needed. Branch B (delta
+  capture) was NOT built: the capture already exists at ingest, and
+  a second capture table would duplicate it. Full finding, density
+  queries, and the synthetic-population execution proof (DENSE
+  10/10 top-10 coverage, SPARSE no pair, CHURN 0/10 — continuity,
+  not snapshot count, is the binding constraint):
+  `reports/holder-delta-verification-20261128.md`. Live-population
+  density is NOT measured — no copy of the live DB exists on this
+  VM (same constraint as Tasks 0/5/13/15); the queries ride to the
+  deployment step, and per Task 0's rule the ensemble is not graded
+  on live data until they run. Structural bound recorded: scan
+  selection is the freshest `updated_at` assets only
+  (`solana_holder_scan_limit = 1`, `evm_holder_scan_limit = 2`).
+- **Features landed** (`features/factory.py`, SQL path, factory
+  idiom; names appended to `FEATURE_NAMES`/`FEATURE_LABELS`):
+  `top_holder_net_flow` (Δbalance summed over the decision-time
+  top 10 via `_holder_balance_deltas`/`_holder_snapshot_pair`,
+  ts + observed_at gated; missing when fewer than 5 of the top 10
+  have a prior-snapshot row — a minority partial sum would misread
+  as a flow), `holder_stall` (1.0 when holder-count growth
+  ≤ 0.5/hour while `top10_pct` rises across the two latest
+  `holder_metrics` rows), `effort_vs_result_depth_normalized`
+  ((V_recent/V_earlier) × (R_earlier/R_recent) over the last 12
+  prints, R = |Δprice| / mean quote depth per half; 1.0 neutral,
+  capped at 10.0).
+- **Votes landed, policy wiring deferred:**
+  `features/factory.py::distribution_votes` derives the three
+  layer-3 accelerate votes (`DistributionVotes.accelerates` at
+  ≥ 2 of 3; missing feature = neutral vote). The votes return no
+  exit action — they cannot fire anything alone. The
+  `ExitPolicy`/`ExitSnapshot` wiring (optional snapshot fields +
+  pace multiplier on an armed ladder) is NOT in this commit:
+  `trading/exit_policy.py` (Task 9) is not yet in the tree and is
+  owned by a concurrent work stream; the policy-side pinned test
+  (`test_accelerate_votes_pull_tranche_forward_only_when_armed`)
+  lands with Task 9's file, consuming this derivation.
+- **Tests:** `tests/test_distribution_features.py` — 14 passed
+  (top-10 sell → −500.0 exactly; accumulate → +250.0; churn
+  coverage → missing; single snapshot → missing; post-decision +
+  restated-row leak guard; distribution pattern EVR above the 1.5
+  vote threshold vs healthy pattern exactly 1.0; stall
+  active/inactive/missing; 2-of-3 vote rule; missing = neutral).
+  Step 5 set + neighbor sweep: 115 passed / 0 failed. Ruff check +
+  format clean; mypy clean (`features`). `tests/test_exit_policy.py`
+  does not exist yet (Task 9) — that part of the plan's Step 5
+  command runs when the file lands. `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASK 15 — DEPTH-LEAD STUDY — 2026-11-28
 
 - **Study instrument landed:** `scripts/depth_lead_study.py` — per

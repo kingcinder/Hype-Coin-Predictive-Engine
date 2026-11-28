@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from statistics import median
@@ -43,6 +43,67 @@ class FeatureValue:
     source_count: int = 0
     freshness_score: float = 0.0
     source_refs: dict[str, object] | None = None
+
+
+# Task 16 (spec §4 layer 3) — distribution ensemble constants. The
+# effort-vs-result ratio is dimensionless with 1.0 = neutral (recent
+# effort buys the same depth-normalized price response as earlier
+# effort); the vote threshold sits meaningfully above neutral so
+# ordinary noise does not read as distribution. The ratio is capped
+# so a near-zero recent response (price pinned while volume prints)
+# cannot produce an unbounded value.
+DISTRIBUTION_EVR_VOTE_THRESHOLD = 1.5
+_EFFORT_RESULT_CAP = 10.0
+_EFFORT_RESULT_WINDOW = 12
+# Top-holder net flow differences the top 10 wallets by balance at
+# decision time; fewer than half of them covered by the prior
+# snapshot makes the partial sum a misreading, not a flow.
+_TOP_HOLDER_FLOW_MIN_COVERAGE = 5
+# "Holder-count growth ≈ 0" operationalized: at or below this many
+# holders/hour the count reads as stalled (flat or shrinking).
+_HOLDER_STALL_MAX_GROWTH_PER_HOUR = 0.5
+
+
+@dataclass(frozen=True)
+class DistributionVotes:
+    """The three layer-3 accelerate votes (spec §4), as booleans.
+
+    Votes only — this object carries no exit action. The exit policy
+    (Task 9) consumes ``accelerates``: on an ARMED position, ≥ 2 of 3
+    active votes pulls the next ladder tranche forward. Votes never
+    arm the ladder by themselves and never fire an exit alone.
+    """
+
+    effort_vs_result: bool = False
+    top_holder_net_flow: bool = False
+    holder_stall: bool = False
+
+    @property
+    def active_count(self) -> int:
+        return sum((self.effort_vs_result, self.top_holder_net_flow, self.holder_stall))
+
+    @property
+    def accelerates(self) -> bool:
+        return self.active_count >= 2
+
+
+def distribution_votes(features: Mapping[str, FeatureValue]) -> DistributionVotes:
+    """Derive the accelerate votes from a built feature vector.
+
+    A missing feature is a neutral (inactive) vote, never an active
+    one: absent evidence degrades the ensemble to the layers under
+    it instead of fabricating a distribution signal.
+    """
+    evr = features.get("effort_vs_result_depth_normalized")
+    flow = features.get("top_holder_net_flow")
+    stall = features.get("holder_stall")
+    return DistributionVotes(
+        effort_vs_result=bool(
+            evr is not None and not evr.missing and evr.value > DISTRIBUTION_EVR_VOTE_THRESHOLD
+        ),
+        top_holder_net_flow=bool(flow is not None and not flow.missing and flow.value < 0.0),
+        holder_stall=bool(stall is not None and not stall.missing and stall.value >= 1.0),
+    )
 
 
 @require_decision_ts
@@ -521,6 +582,9 @@ class FeatureFactory:
         holder_count, holder_growth, concentration = self._holder_features(
             session, asset.id, decision_ts
         )
+        top_holder_net_flow = self._top_holder_net_flow(session, asset.id, decision_ts)
+        holder_stall = self._holder_stall(session, asset.id, decision_ts)
+        effort_vs_result = self._effort_vs_result(market_rows, liquidity_rows, decision_ts)
         net_inflow = self._net_inflow(liquidity_rows, decision_ts)
         buyer_acceleration = self._buyer_acceleration(market_rows, decision_ts)
         flags = self._contract_flag_count(session, asset.id, decision_ts)
@@ -576,6 +640,24 @@ class FeatureFactory:
                 concentration,
                 1 if concentration is not None else 0,
                 1.0 if concentration is not None else 0.0,
+            ),
+            _feature(
+                "effort_vs_result_depth_normalized",
+                effort_vs_result,
+                1 if effort_vs_result is not None else 0,
+                1.0 if effort_vs_result is not None else 0.0,
+            ),
+            _feature(
+                "top_holder_net_flow",
+                top_holder_net_flow,
+                1 if top_holder_net_flow is not None else 0,
+                1.0 if top_holder_net_flow is not None else 0.0,
+            ),
+            _feature(
+                "holder_stall",
+                holder_stall,
+                1 if holder_stall is not None else 0,
+                1.0 if holder_stall is not None else 0.0,
             ),
             _feature(
                 "mention_velocity",
@@ -919,6 +1001,203 @@ class FeatureFactory:
                     if hours > 0:
                         growth = (holder_count - float(prior_count or 0)) / hours
         return holder_count, growth, top_concentration
+
+    def _holder_snapshot_pair(
+        self, session: Session, asset_id: int, decision_ts: datetime
+    ) -> tuple[dict[str, float], dict[str, float]] | None:
+        """Latest and immediately preceding holder snapshots, point-in-time.
+
+        Returns ``(latest_by_wallet, prior_by_wallet)`` balance maps for
+        the two most recent distinct snapshot ``ts`` at or before the
+        decision, or ``None`` when fewer than two snapshots exist.
+        Both the snapshot time and the observation time are gated at
+        the decision (the ``_holder_features`` discipline), so a
+        restated row observed after the decision cannot enter. Rows
+        are applied in ``(ts, observed_at, id)`` order, so where
+        several sources report the same wallet at the same ``ts`` the
+        freshest observation wins — mirroring ``insert_holder_once``'s
+        max-``observed_at`` update semantics.
+        """
+        rows = session.scalars(
+            select(models.Holder)
+            .where(
+                models.Holder.asset_id == asset_id,
+                models.Holder.ts <= decision_ts,
+                models.Holder.observed_at <= decision_ts,
+            )
+            .order_by(models.Holder.ts, models.Holder.observed_at, models.Holder.id)
+        ).all()
+        by_ts: dict[datetime, dict[str, float]] = {}
+        for row in rows:
+            by_ts.setdefault(ensure_utc(row.ts), {})[row.wallet_address] = _safe_float(
+                row.balance, 0.0
+            )
+        if len(by_ts) < 2:
+            return None
+        ordered = sorted(by_ts)
+        return by_ts[ordered[-1]], by_ts[ordered[-2]]
+
+    def _holder_balance_deltas(
+        self, session: Session, asset_id: int, decision_ts: datetime
+    ) -> dict[str, float] | None:
+        """Per-wallet Δbalance between consecutive snapshots ≤ decision.
+
+        Task 16 Step 1 verified Branch A (reports/
+        holder-delta-verification-20261128.md): balances are stored
+        per (asset, wallet, ts) by both holder ingest paths, so the
+        delta is the difference of consecutive per-wallet balances —
+        derived here, never a stored column. A wallet present in only
+        one of the two snapshots has no difference: entering or
+        leaving the ranked list is not a measured flow.
+        """
+        pair = self._holder_snapshot_pair(session, asset_id, decision_ts)
+        if pair is None:
+            return None
+        latest, prior = pair
+        return {
+            wallet: balance - prior[wallet] for wallet, balance in latest.items() if wallet in prior
+        }
+
+    def _top_holder_net_flow(
+        self, session: Session, asset_id: int, decision_ts: datetime
+    ) -> float | None:
+        """Sum of Δbalance over the top-10 holders at decision time.
+
+        Negative = the largest holders are distributing. Only top-10
+        wallets with a prior-snapshot row can be differenced; when
+        fewer than half of the top 10 are covered, the partial sum
+        would misread as a flow, so the feature is missing instead.
+        """
+        pair = self._holder_snapshot_pair(session, asset_id, decision_ts)
+        if pair is None:
+            return None
+        latest, prior = pair
+        if not latest:
+            return None
+        top10 = sorted(latest, key=lambda wallet: latest[wallet], reverse=True)[:10]
+        covered = [wallet for wallet in top10 if wallet in prior]
+        if len(covered) < _TOP_HOLDER_FLOW_MIN_COVERAGE:
+            return None
+        return float(sum(latest[wallet] - prior[wallet] for wallet in covered))
+
+    def _holder_stall(self, session: Session, asset_id: int, decision_ts: datetime) -> float | None:
+        """1.0 when holder count stalls while concentration rises.
+
+        Reads the two most recent ``holder_metrics`` rows at or before
+        the decision. The growth rate prefers the latest row's stored
+        ``holder_growth_per_hour`` (anchored ≥ 1h back by
+        ``record_holder_metrics``) and otherwise derives it from the
+        two rows' counts. Missing when either row lacks a count or a
+        concentration — an unobserved stall is not a stall.
+        """
+        metrics = session.scalars(
+            select(models.HolderMetric)
+            .where(
+                models.HolderMetric.asset_id == asset_id,
+                models.HolderMetric.ts <= decision_ts,
+            )
+            .order_by(models.HolderMetric.ts.desc())
+            .limit(2)
+        ).all()
+        if len(metrics) < 2:
+            return None
+        latest, prior = metrics[0], metrics[1]
+        if latest.holder_count is None or prior.holder_count is None:
+            return None
+        latest_top10 = _safe_float(latest.top10_pct, None)
+        prior_top10 = _safe_float(prior.top10_pct, None)
+        if latest_top10 is None or prior_top10 is None:
+            return None
+        growth = _safe_float(latest.holder_growth_per_hour, None)
+        if growth is None:
+            hours = (ensure_utc(latest.ts) - ensure_utc(prior.ts)).total_seconds() / 3600.0
+            if hours <= 0:
+                return None
+            growth = (float(latest.holder_count) - float(prior.holder_count)) / hours
+        stalled = growth <= _HOLDER_STALL_MAX_GROWTH_PER_HOUR and latest_top10 > prior_top10
+        return 1.0 if stalled else 0.0
+
+    def _effort_vs_result(
+        self,
+        market_rows: Sequence[Any],
+        liquidity_rows: Sequence[Any],
+        decision_ts: datetime,
+    ) -> float | None:
+        """Depth-normalized effort-vs-result over the recent prints.
+
+        The last ``_EFFORT_RESULT_WINDOW`` usable market prints
+        (point-in-time — the loader already gated ``ts`` and
+        ``observed_at`` at the decision) split into earlier and
+        recent halves. Effort is traded volume; result is the price
+        response per unit of quote depth, ``|Δprice| / mean_depth``
+        over the half, with depth from the liquidity prints inside
+        the half's span (falling back to the latest depth at or
+        before the decision).
+
+        ``evr = (V_recent / V_earlier) * (R_earlier / R_recent)``
+
+        1.0 is neutral; the value rises exactly on the distribution
+        pattern — volume climbing while each unit of depth buys less
+        price movement. Capped at ``_EFFORT_RESULT_CAP`` so a pinned
+        price cannot produce an unbounded reading. Missing with too
+        few prints, a volume-less half, no positive depth, or no
+        price response in either half (nothing was ever bought, so
+        there is no result to compare).
+        """
+        prints = [
+            row
+            for row in sorted(market_rows, key=_market_sort_key)
+            if _safe_float(row.price_usd, None) is not None
+            and _safe_float(row.price_usd, 0.0) > 0
+            and _safe_float(row.volume_usd, None) is not None
+        ][-_EFFORT_RESULT_WINDOW:]
+        if len(prints) < 4:
+            return None
+        mid = len(prints) // 2
+        halves = (prints[:mid], prints[mid:])
+
+        depths = sorted(
+            (
+                row
+                for row in liquidity_rows
+                if _safe_float(row.reserve_usd, None) is not None
+                and _safe_float(row.reserve_usd, 0.0) > 0
+            ),
+            key=_liquidity_sort_key,
+        )
+        latest_depth = _safe_float(depths[-1].reserve_usd, None) if depths else None
+        if latest_depth is None:
+            return None
+
+        def _half_depth(half: Sequence[Any]) -> float:
+            start, end = ensure_utc(half[0].ts), ensure_utc(half[-1].ts)
+            inside = [
+                _safe_float(row.reserve_usd, 0.0)
+                for row in depths
+                if start <= ensure_utc(row.ts) <= end
+            ]
+            return float(np.mean(inside)) if inside else latest_depth
+
+        volumes: list[float] = []
+        responses: list[float] = []
+        for half in halves:
+            volume = float(sum(_safe_float(row.volume_usd, 0.0) for row in half))
+            if volume <= 0:
+                return None
+            price_move = abs(
+                _safe_float(half[-1].price_usd, 0.0) - _safe_float(half[0].price_usd, 0.0)
+            )
+            depth = _half_depth(half)
+            if depth <= 0:
+                return None
+            volumes.append(volume)
+            responses.append(price_move / depth)
+        if responses[0] <= 0 and responses[1] <= 0:
+            return None
+        if responses[1] <= 0:
+            return _EFFORT_RESULT_CAP
+        evr = (volumes[1] / volumes[0]) * (responses[0] / responses[1])
+        return min(evr, _EFFORT_RESULT_CAP)
 
     def _contract_flag_count(
         self, session: Session, asset_id: int, decision_ts: datetime

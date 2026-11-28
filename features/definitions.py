@@ -48,6 +48,9 @@ FEATURE_NAMES: tuple[str, ...] = (
     "solana_lp_unlocked",
     "net_inflow_ratio",
     "unique_buyers_acceleration",
+    "effort_vs_result_depth_normalized",
+    "top_holder_net_flow",
+    "holder_stall",
 )
 
 FEATURE_LABELS: dict[str, str] = {
@@ -98,4 +101,7 @@ FEATURE_LABELS: dict[str, str] = {
     "solana_lp_unlocked": "Solana LP tokens unlocked",
     "net_inflow_ratio": "Net inflow ratio (reserve growth)",
     "unique_buyers_acceleration": "Unique buyers acceleration",
+    "effort_vs_result_depth_normalized": "Effort vs result (depth-normalized)",
+    "top_holder_net_flow": "Top-holder net flow (balance delta)",
+    "holder_stall": "Holder stall (flat count, rising concentration)",
 }
