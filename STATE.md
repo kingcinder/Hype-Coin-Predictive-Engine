@@ -11,6 +11,36 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## MISSION REFACTOR TASK 5 — ENTRY RANK COMPOSITE V1 + FALSIFICATION — 2026-11-28
+
+- **Feature landed:** `net_inflow_ratio` in `FEATURE_NAMES` — reserve
+  growth over `Settings.feature_net_inflow_lookback_hours` (1.0h),
+  computed by `FeatureFactory._net_inflow` from the point-in-time
+  liquidity rows: `reserve_quote` series primary, `reserve_usd` series
+  as fallback, missing when no prior print exists or the prior reserve
+  is non-positive.
+- **Composite landed:** `scoring/entry_rank.py` — `ENTRY_RANK_COMPONENTS`
+  = (`net_inflow_ratio`, `buy_sell_ratio`, `unique_buyers_estimate`,
+  `liquidity_depth`); `rank_entry_cohort` midrank-percentiles each
+  component within the cohort and sums (missing component = 0.0);
+  `wash_lite_adjust` damps `buy_sell_ratio` toward 1.0 by
+  `Settings.entry_wash_downweight` (0.5) and flags the row when
+  `volume_acceleration / max(unique_buyers_estimate, 1.0)` exceeds
+  `Settings.entry_wash_volume_per_buyer` (20.0).
+- **Falsification instrument landed, live run PENDING:**
+  `scripts/falsify_entry_rank.py` replays the last 14 fully-observed
+  days (window C), ranks each day cohort composite vs volume-only, and
+  exits 0 iff mean precision@top-20/day for MFE >= 2x within 6h is
+  >= 1.5x the volume ranking's; the report (JSON + MD, with a
+  Benjamini–Hochberg screening table across the four components) is
+  written either way. Unit-tested on synthetic fixtures only: pass case
+  lift 2.0 (composite 0.6 vs volume 0.3), kill-bar-fail case lift 1.0,
+  and an end-to-end seeded-DB run proving the report is written on
+  failure. **The live falsification run has NOT been executed** — per
+  Task 0's rule, Task 5 may not be declared done on synthetic fixtures
+  alone: the live run waits on the snapshot-coverage gate (fixed-cadence
+  collection still accruing on the live host). `[verified 2026-11-28]`
+
 ## MISSION REFACTOR TASK 0 — SNAPSHOT-COVERAGE PRECONDITION — 2026-11-28
 
 - **Measurement landed:** `ingestion/coverage.py::snapshot_coverage` judges

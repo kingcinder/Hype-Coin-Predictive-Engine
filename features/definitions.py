@@ -46,6 +46,7 @@ FEATURE_NAMES: tuple[str, ...] = (
     "solana_non_transferable_enabled",
     "solana_default_account_frozen",
     "solana_lp_unlocked",
+    "net_inflow_ratio",
 )
 
 FEATURE_LABELS: dict[str, str] = {
@@ -94,4 +95,5 @@ FEATURE_LABELS: dict[str, str] = {
     "solana_non_transferable_enabled": "Token-2022 non-transferable enabled",
     "solana_default_account_frozen": "Token-2022 default account frozen",
     "solana_lp_unlocked": "Solana LP tokens unlocked",
+    "net_inflow_ratio": "Net inflow ratio (reserve growth)",
 }

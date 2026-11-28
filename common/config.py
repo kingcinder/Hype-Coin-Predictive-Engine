@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     # unknown instead of a frozen probability carried forward forever.
     feature_market_max_age_seconds: float = 7200.0
     feature_forecast_max_age_seconds: float = 93600.0
+    # Task 5 net-inflow feature: reserve growth is measured against the
+    # latest liquidity print at or before decision_ts minus this lookback.
+    feature_net_inflow_lookback_hours: float = 1.0
 
     target_chains_csv: str = Field(
         default="solana,base,ethereum",
@@ -520,6 +523,13 @@ class Settings(BaseSettings):
     forecast_drift_max_cal_error: float = 0.25
     forecast_drift_precision_fraction: float = 0.6
     forecast_drift_severe_precision: float = 0.2
+
+    # Entry ranking (Task 5): wash-lite adjustment in
+    # scoring/entry_rank.py. When volume_acceleration per unique buyer
+    # exceeds entry_wash_volume_per_buyer, the row's buy_sell_ratio is
+    # pulled toward 1.0 by entry_wash_downweight and the row is flagged.
+    entry_wash_volume_per_buyer: float = 20.0
+    entry_wash_downweight: float = 0.5
 
     # Model persistence & comparison thresholds
     model_compare_precision_delta: float = 0.05

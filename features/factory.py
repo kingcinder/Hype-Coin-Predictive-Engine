@@ -521,6 +521,7 @@ class FeatureFactory:
         holder_count, holder_growth, concentration = self._holder_features(
             session, asset.id, decision_ts
         )
+        net_inflow = self._net_inflow(liquidity_rows, decision_ts)
         flags = self._contract_flag_count(session, asset.id, decision_ts)
         deployer_history = self._deployer_history(session, asset.id, decision_ts)
         mention_velocity, narrative_acceleration = self._attention_features(
@@ -545,6 +546,12 @@ class FeatureFactory:
         lifecycle_phase = self._lifecycle_phase(session, asset.id, decision_ts)
 
         values = list(market_block.values()) + [
+            _feature(
+                "net_inflow_ratio",
+                net_inflow,
+                1 if net_inflow is not None else 0,
+                1.0 if net_inflow is not None else 0.0,
+            ),
             _feature(
                 "holder_count",
                 holder_count,
@@ -727,6 +734,41 @@ class FeatureFactory:
                         decision_ts=decision_ts.isoformat(),
                     )
         return output
+
+    def _net_inflow(self, liquidity_rows: Sequence[Any], decision_ts: datetime) -> float | None:
+        """Net-inflow ratio: reserve growth over the configured lookback.
+
+        ``net_inflow_ratio = (reserve_now - reserve_prev) / reserve_prev``
+        where ``reserve_now`` is the latest print at or before
+        ``decision_ts`` and ``reserve_prev`` the latest print at or before
+        ``decision_ts - feature_net_inflow_lookback_hours``. The rows arrive
+        point-in-time gated (``ts`` and ``observed_at`` <= decision) from
+        ``_load_pit_market_inputs``. ``reserve_quote`` is the primary
+        series — on AMM pools its growth is the bonding-curve/pool-reserve
+        trajectory itself; where a pool's prints carry no quote reserves
+        the feature falls back to the ``reserve_usd`` series. Returns
+        ``None`` (missing) when neither series offers a current and a
+        prior print, or the prior reserve is non-positive.
+        """
+        lookback = timedelta(hours=get_settings().feature_net_inflow_lookback_hours)
+        rows = sorted(liquidity_rows, key=_liquidity_sort_key)
+        for attr in ("reserve_quote", "reserve_usd"):
+            series = [
+                (ensure_utc(row.ts), value)
+                for row in rows
+                if (value := _safe_float(getattr(row, attr, None), None)) is not None
+            ]
+            if not series:
+                continue
+            now_value = series[-1][1]
+            prior = [value for ts, value in series if ts <= decision_ts - lookback]
+            if not prior:
+                continue
+            prior_value = prior[-1]
+            if prior_value <= 0:
+                continue
+            return (now_value - prior_value) / prior_value
+        return None
 
     def _holder_features(
         self, session: Session, asset_id: int, decision_ts: datetime
