@@ -47,6 +47,7 @@ FEATURE_NAMES: tuple[str, ...] = (
     "solana_default_account_frozen",
     "solana_lp_unlocked",
     "net_inflow_ratio",
+    "unique_buyers_acceleration",
 )
 
 FEATURE_LABELS: dict[str, str] = {
@@ -96,4 +97,5 @@ FEATURE_LABELS: dict[str, str] = {
     "solana_default_account_frozen": "Token-2022 default account frozen",
     "solana_lp_unlocked": "Solana LP tokens unlocked",
     "net_inflow_ratio": "Net inflow ratio (reserve growth)",
+    "unique_buyers_acceleration": "Unique buyers acceleration",
 }

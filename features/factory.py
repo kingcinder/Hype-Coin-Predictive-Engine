@@ -522,6 +522,7 @@ class FeatureFactory:
             session, asset.id, decision_ts
         )
         net_inflow = self._net_inflow(liquidity_rows, decision_ts)
+        buyer_acceleration = self._buyer_acceleration(market_rows, decision_ts)
         flags = self._contract_flag_count(session, asset.id, decision_ts)
         deployer_history = self._deployer_history(session, asset.id, decision_ts)
         mention_velocity, narrative_acceleration = self._attention_features(
@@ -551,6 +552,12 @@ class FeatureFactory:
                 net_inflow,
                 1 if net_inflow is not None else 0,
                 1.0 if net_inflow is not None else 0.0,
+            ),
+            _feature(
+                "unique_buyers_acceleration",
+                buyer_acceleration,
+                1 if buyer_acceleration is not None else 0,
+                1.0 if buyer_acceleration is not None else 0.0,
             ),
             _feature(
                 "holder_count",
@@ -769,6 +776,42 @@ class FeatureFactory:
                 continue
             return (now_value - prior_value) / prior_value
         return None
+
+    def _buyer_acceleration(
+        self, market_rows: Sequence[Any], decision_ts: datetime
+    ) -> float | None:
+        """Unique-buyer acceleration: second difference of the buyer estimate.
+
+        With buyer estimates ``b(t-2), b(t-1), b(t)`` at the three most
+        recent snapshot times at or before ``decision_ts`` (the rows
+        arrive point-in-time gated from ``_load_pit_market_inputs`` — the
+        same walk ``unique_buyers_estimate`` is derived from),
+
+        ``acceleration = ((b(t) - b(t-1)) - (b(t-1) - b(t-2))) / spacing``
+
+        where ``spacing`` is the mean grid spacing in hours, so the value
+        reads in buyers/hour: positive when buyer growth is speeding up,
+        zero under steady linear growth. Returns ``None`` (missing) with
+        fewer than three buyer prints — a level and a single difference
+        cannot show curvature, and a fabricated 0 would read as "growth
+        stalled", the exact fake negative the evidence rules exist to
+        prevent. Multiple sources can share a snapshot ``ts``; the print
+        that wins is the last under ``_market_sort_key``, mirroring how
+        ``compute_market_block`` picks ``latest_market``.
+        """
+        points: dict[datetime, float] = {}
+        for row in sorted(market_rows, key=_market_sort_key):
+            buyers = _safe_float(row.buys, None)
+            if buyers is not None:
+                points[ensure_utc(row.ts)] = buyers
+        series = sorted(points.items())
+        if len(series) < 3:
+            return None
+        (t0, b0), (t1, b1), (t2, b2) = series[-3:]
+        spacing_hours = (t2 - t0).total_seconds() / 3600.0 / 2.0
+        if spacing_hours <= 0:
+            return None
+        return ((b2 - b1) - (b1 - b0)) / spacing_hours
 
     def _holder_features(
         self, session: Session, asset_id: int, decision_ts: datetime

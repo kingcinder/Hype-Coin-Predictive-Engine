@@ -69,6 +69,7 @@ def _full_features() -> dict[str, float]:
         "solana_default_account_frozen": 0.0,
         "solana_lp_unlocked": 0.0,
         "net_inflow_ratio": 0.25,
+        "unique_buyers_acceleration": 25.0,
     }
     assert set(base) == set(FEATURE_NAMES)
     return base

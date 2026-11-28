@@ -6,7 +6,11 @@ The component set is the validated Ticket 1 trio
 (``unique_buyers_estimate``, ``buy_sell_ratio``, ``liquidity_depth`` —
 the same trio ``scripts/forward_validate_ranksum.py`` forward-validated)
 plus ``net_inflow_ratio``, the reserve-growth feature whose inputs are
-mechanically hard to fake.
+mechanically hard to fake, plus ``unique_buyers_acceleration`` (Task
+14), the second difference of the buyer estimate. The acceleration
+term is special: a wash-flagged row drops it entirely (percentile 0.0,
+with the drop recorded in ``components``) — wash infrastructure must
+not be able to buy an acceleration rank.
 
 Before ranking, every row passes through :func:`wash_lite_adjust`: when
 ``volume_acceleration`` per unique buyer exceeds the configured
@@ -31,6 +35,7 @@ ENTRY_RANK_COMPONENTS: tuple[str, ...] = (
     "buy_sell_ratio",
     "unique_buyers_estimate",
     "liquidity_depth",
+    "unique_buyers_acceleration",
 )
 
 
@@ -87,8 +92,11 @@ def rank_entry_cohort(
 
     Missing component = percentile 0.0 (absence is not neutral). Rows
     are wash-adjusted first, so a flagged row's ``buy_sell_ratio``
-    percentile is computed from its damped value. Ties in rank_sum
-    break by ascending asset_id so the ordering is deterministic.
+    percentile is computed from its damped value — and a flagged row's
+    ``unique_buyers_acceleration`` term is dropped outright (percentile
+    0.0, drop recorded as ``unique_buyers_acceleration_wash_dropped``).
+    Ties in rank_sum break by ascending asset_id so the ordering is
+    deterministic.
     """
     adjusted = [
         (asset_id, *wash_lite_adjust(features, settings=settings)) for asset_id, features in rows
@@ -105,10 +113,19 @@ def rank_entry_cohort(
             )
             for name in ENTRY_RANK_COMPONENTS
         }
+        if wash_flagged:
+            # The acceleration term is dropped for wash-flagged rows, not
+            # merely damped: percentile 0.0 whatever the raw value says.
+            components["unique_buyers_acceleration"] = 0.0
+        rank_sum = sum(components[name] for name in ENTRY_RANK_COMPONENTS)
+        if wash_flagged:
+            # Recorded beside the percentiles; the marker is not itself a
+            # percentile and never enters rank_sum.
+            components["unique_buyers_acceleration_wash_dropped"] = 1.0
         candidates.append(
             EntryCandidate(
                 asset_id=asset_id,
-                rank_sum=sum(components.values()),
+                rank_sum=rank_sum,
                 components=components,
                 wash_flagged=wash_flagged,
             )

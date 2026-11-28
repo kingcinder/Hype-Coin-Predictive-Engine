@@ -92,10 +92,10 @@ def test_rank_entry_cohort_percentiles_and_order():
     assert [candidate.asset_id for candidate in candidates] == [3, 2, 1]
     by_id = {candidate.asset_id: candidate for candidate in candidates}
     # Midrank percentiles for values 10/20/30 in a cohort of 3: 1/6, 1/2, 5/6
-    # per component; rank_sum is the sum over the four components.
-    assert by_id[3].rank_sum == pytest.approx(4 * 5 / 6)
-    assert by_id[2].rank_sum == pytest.approx(4 * 0.5)
-    assert by_id[1].rank_sum == pytest.approx(4 * 1 / 6)
+    # per component; rank_sum is the sum over the five components.
+    assert by_id[3].rank_sum == pytest.approx(5 * 5 / 6)
+    assert by_id[2].rank_sum == pytest.approx(5 * 0.5)
+    assert by_id[1].rank_sum == pytest.approx(5 * 1 / 6)
 
 
 def test_rank_entry_cohort_wash_flag_damps_buy_sell_ratio():
