@@ -477,7 +477,10 @@ def test_rpc_pool_health_ignores_future_snapshots(session) -> None:
 def test_bootstrap_labels_ignore_late_observed_forward_snapshots(session) -> None:
     """A crash snapshot whose ts lies inside the forward window but whose
     observed_at is AFTER the generation time must not flip the label."""
-    asset = _seed_arc(session, symbol="LATE", prices=[1.0] * 24, feature_hours=[11])
+    # 48 hourly prices: the forward window of the hour-11 feature point is
+    # densely observed, so the M3 evidence-density gate earns the collapse=0
+    # this test asserts (with only 24 prices the zero is now censored).
+    asset = _seed_arc(session, symbol="LATE", prices=[1.0] * 48, feature_hours=[11])
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     # Crash at hour 13, but only observed an hour AFTER the generation time.
@@ -515,7 +518,9 @@ def test_bootstrap_labels_ignore_late_observed_entry_snapshots(session) -> None:
     ``observed_at`` guard it becomes the latest entry ≤ hour 11 and forces a
     phantom collapse; with the guard it is excluded and the hour-10 $1 entry
     stays."""
-    asset = _seed_arc(session, symbol="LENT", prices=[1.0] * 24, feature_hours=[11])
+    # 48 hourly prices, as in the LATE test above: dense forward coverage
+    # earns the collapse=0 under the M3 evidence-density gate.
+    asset = _seed_arc(session, symbol="LENT", prices=[1.0] * 48, feature_hours=[11])
     pair = session.scalar(select(models.Pair).where(models.Pair.base_asset_id == asset.id))
     source = session.scalar(select(models.Source).where(models.Source.name == "dexscreener"))
     # A $5 entry observed only after the generation time would make the label

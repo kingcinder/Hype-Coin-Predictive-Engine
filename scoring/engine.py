@@ -696,15 +696,15 @@ class ScoringEngine:
     ) -> None:
         """Record a risk outcome for adaptive calibration.
 
-        Only records outcomes for non-GREEN bands so the calibrator has
-        meaningful signal to learn from (GREEN tokens are expected to be safe).
+        Records outcomes for every band, GREEN included: live GREEN
+        false-negatives are exactly the failure class calibration and
+        band validation need to see, and excluding GREEN left them
+        structurally blind to it.
         ``ml_risk_band`` is the ML-specific band from the forecast model and
         ``heuristic_band`` is the heuristic-layer band from the crawler
         ignition signal — when provided, those scorers receive independent
         outcome feedback stored separately in ``RiskOutcome.details``.
         """
-        if score.risk_band == RiskBand.GREEN.value:
-            return
         try:
             from risk_engine.outcomes import record_risk_outcome
 

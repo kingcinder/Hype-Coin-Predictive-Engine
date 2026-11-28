@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -16,6 +18,34 @@ log = get_logger(__name__)
 
 LABEL_IGNITION = "ignition"
 LABEL_COLLAPSE = "collapse"
+
+
+def forward_evidence_sufficient(
+    timestamps: Iterable[datetime],
+    *,
+    start: datetime,
+    window: timedelta,
+) -> bool:
+    """Whether forward snapshots earn a collapse=0 label for a window.
+
+    A non-collapse is a claim about the whole forward window, so it is
+    only as good as the observation coverage behind it: at least one
+    snapshot per six hours of window (scaling with window length) and at
+    least one snapshot in the window's final quartile. Snapshots outside
+    ``(start, start + window]`` do not count. A collapse=1 needs no such
+    density — the observed crash is itself the evidence — so callers gate
+    only the zero case with this predicate.
+    """
+    if window <= timedelta(0):
+        return False
+    start_utc = ensure_utc(start)
+    end = start_utc + window
+    stamps = [ensure_utc(ts) for ts in timestamps if start_utc < ensure_utc(ts) <= end]
+    minimum = max(1, math.ceil(window.total_seconds() / (6 * 3600)))
+    if len(stamps) < minimum:
+        return False
+    final_quartile_start = end - window / 4
+    return any(ts >= final_quartile_start for ts in stamps)
 
 
 class LabelEngine:
@@ -51,11 +81,12 @@ class LabelEngine:
                     price = decision_row.price_usd
                     if price is None or price <= 0:
                         continue
-                    future = [
-                        float(row.price_usd)
+                    future_rows = [
+                        row
                         for row in rows[index + 1 :]
                         if row.price_usd is not None and ensure_utc(row.ts) <= decision + window
                     ]
+                    future = [float(row.price_usd) for row in future_rows if row.price_usd]
                     if not future:
                         continue
                     entry = float(price)
@@ -71,14 +102,24 @@ class LabelEngine:
                         source=f"forecast:{self.settings.forecast_model_version}",
                     ):
                         counts["ignition"] += 1
+                    collapse_value = (
+                        1.0 if trough_pct <= self.settings.forecast_collapse_threshold else 0.0
+                    )
+                    # A collapse=0 must be earned by forward-evidence density;
+                    # with thin coverage the point is censored, not labelled
+                    # a non-collapser. Positives are never gated.
+                    if collapse_value == 0.0 and not forward_evidence_sufficient(
+                        [row.ts for row in future_rows],
+                        start=decision,
+                        window=window,
+                    ):
+                        continue
                     if self._upsert_label(
                         session,
                         asset_id=asset_id,
                         ts=decision,
                         label_type=LABEL_COLLAPSE,
-                        value=1.0
-                        if trough_pct <= self.settings.forecast_collapse_threshold
-                        else 0.0,
+                        value=collapse_value,
                         decision_ts=decision_ts,
                         source=f"forecast:{self.settings.forecast_model_version}",
                     ):
@@ -297,8 +338,16 @@ def seed_labels_at_feature_timestamps(
             ):
                 counts["ignition"] += 1
 
-            # Write collapse label (upsert for idempotency)
+            # Write collapse label (upsert for idempotency). A zero is
+            # censored when forward evidence is too thin to earn it;
+            # positives are never gated.
             collapse_value = "1" if trough_pct <= collapse_threshold else "0"
+            if collapse_value == "0" and not forward_evidence_sufficient(
+                [snap.ts for snap in future_snaps],
+                start=feature_ts,
+                window=window,
+            ):
+                continue
             if upsert_label(
                 session,
                 asset_id=asset_id,

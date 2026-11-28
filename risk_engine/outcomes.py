@@ -401,15 +401,36 @@ def record_risk_outcome(
         )
     )
     if existing:
+        # One row per score, but a re-record of a still-unevaluated row is a
+        # correction, not a duplicate: ``_upsert_score`` overwrites the
+        # score's band on a rescore, so the pending outcome snapshot must
+        # follow it, and an independent ML/heuristic prediction supplied by
+        # the later call must not be dropped on the floor. An evaluated row
+        # is history and is never rewritten.
+        if existing.evaluated_at is not None:
+            return
+        existing.risk_band = risk_band
+        details = dict(existing.details or {})
+        if ml_risk_band is not None:
+            details["ml_risk_band"] = ml_risk_band
+            details["ml_prediction"] = True
+        if heuristic_band is not None:
+            details["heuristic_band"] = heuristic_band
+            details["heuristic_prediction"] = True
+        existing.details = details
+        session.flush()
         return
     # Freshness gate (v3): do not record an outcome for a token whose last
     # valid market snapshot is stale.  A token 5-6 days stale at scoring
     # crosses the 7-day DEAD threshold inside its window and would otherwise
     # be labeled collapsed for fading to staleness, not for a price crash.
     # Stale tokens produce no outcome row at all (they are not predictions).
+    # A token with no snapshot at all has no stale snapshot to gate on: its
+    # row is recorded, and evaluate_outcomes censors it unless forward
+    # evidence inside its window ever establishes an outcome.
     max_age = float(get_settings().risk_outcome_max_snapshot_age_hours)
     age = _latest_snapshot_age_hours(session, asset_id, decision_ts)
-    if age is None or age > max_age:
+    if age is not None and age > max_age:
         log.debug(
             "risk_outcome_skipped_stale",
             asset_id=asset_id,

@@ -103,6 +103,10 @@ def generate_dense_labels(
     ignition_threshold = ignition_threshold or settings.forecast_ignition_threshold
     collapse_threshold = collapse_threshold or settings.forecast_collapse_threshold
 
+    # Local import: forecast.labels is the canonical home of the density
+    # predicate, and a top-level import would cycle through forecast.engine.
+    from forecast.labels import forward_evidence_sufficient  # noqa: PLC0415
+
     counts = {"ignition": 0, "collapse": 0, "total_decision_points": 0}
 
     # Get all assets with pairs
@@ -167,6 +171,7 @@ def generate_dense_labels(
             # Get future prices within the forward window
             future_end = current + timedelta(hours=forward_hours)
             future_prices = []
+            future_stamps = []
             for snap in all_snapshots:
                 snap_ts = ensure_utc(snap.ts)
                 if (
@@ -175,6 +180,7 @@ def generate_dense_labels(
                     and snap.price_usd > 0
                 ):
                     future_prices.append(float(snap.price_usd))
+                    future_stamps.append(snap_ts)
 
             if not future_prices:
                 current += timedelta(hours=1)
@@ -202,19 +208,28 @@ def generate_dense_labels(
             if ignition_value == "1":
                 counts["ignition"] += 1
 
-            # Generate collapse label
+            # Generate collapse label. A zero is censored when forward
+            # evidence is too thin to earn it; positives are never gated.
             collapse_value = "1" if trough_pct <= collapse_threshold else "0"
-            _upsert_label(
-                session,
-                asset_id=asset_id,
-                ts=current,
-                label_type=LABEL_COLLAPSE,
-                value=collapse_value,
-                decision_ts=decision_ts,
-                source=f"dense-labels:{settings.forecast_model_version}",
-            )
-            if collapse_value == "1":
-                counts["collapse"] += 1
+            collapse_censored = False
+            if collapse_value == "0":
+                collapse_censored = not forward_evidence_sufficient(
+                    future_stamps,
+                    start=current,
+                    window=timedelta(hours=forward_hours),
+                )
+            if not collapse_censored:
+                _upsert_label(
+                    session,
+                    asset_id=asset_id,
+                    ts=current,
+                    label_type=LABEL_COLLAPSE,
+                    value=collapse_value,
+                    decision_ts=decision_ts,
+                    source=f"dense-labels:{settings.forecast_model_version}",
+                )
+                if collapse_value == "1":
+                    counts["collapse"] += 1
 
             current += timedelta(hours=1)
             hour_count += 1
