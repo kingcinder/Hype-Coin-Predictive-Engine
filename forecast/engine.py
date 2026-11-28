@@ -696,8 +696,8 @@ class ForecastEngine:
             if fit.mean_time_to_collapse is not None:
                 metrics[f"hazard.{slug}.mean_hours_to_collapse"] = fit.mean_time_to_collapse
         for slug, fit in sorted(peak_hazards_by_phase.items()):
-            if fit.mean_time_to_collapse is not None:
-                metrics[f"hazard.{slug}.mean_hours_to_peak"] = fit.mean_time_to_collapse
+            if fit.mean_time_to_peak is not None:
+                metrics[f"hazard.{slug}.mean_hours_to_peak"] = fit.mean_time_to_peak
         drift = self._assess_drift(
             session,
             samples=test,
@@ -1376,7 +1376,7 @@ class ForecastEngine:
             phase_peak = model.peak_hazards_by_phase.get(phase_slug)
             peak_hazard = (
                 phase_peak
-                if phase_peak is not None and phase_peak.mean_time_to_collapse is not None
+                if phase_peak is not None and phase_peak.mean_time_to_peak is not None
                 else model.peak_hazard
             )
             expected_collapse = DiscreteHazardModel.expected_hours(hazard, p_collapse)

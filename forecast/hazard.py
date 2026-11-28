@@ -10,6 +10,18 @@ class HazardFit:
     at_risk_count: int
     curve: tuple[float, ...] = field(default_factory=tuple)
 
+    @property
+    def mean_time_to_peak(self) -> float | None:
+        """Peak reading of the fit's mean time-to-event.
+
+        The fit is event-agnostic: peak-hazard fits store time-to-peak means
+        in ``mean_time_to_collapse`` (the field name predates the peak fits).
+        This alias lets peak call sites name what they are actually reading
+        without renaming the persisted field or breaking the frozen
+        dataclass's positional construction / pickled fits.
+        """
+        return self.mean_time_to_collapse
+
 
 class DiscreteHazardModel:
     """Hand-built empirical survival model for time-to-collapse.
