@@ -14,29 +14,53 @@ Test coverage trajectory (backend core, weekly):
 
 Local-first research intelligence for speculative Solana, Base, and Ethereum tokens. It separates hype from structural danger and stores point-in-time evidence so scans can be replayed without future leakage.
 
-## Current verified state (2026-11-17)
+## Current verified state (2026-11-28)
 
-`main` is the single integration line. It contains the reviewed
-`fix/review-v3` work, the newer migration/coverage updates from `origin/main`,
-and the provider-health and HTTP-redaction fixes. The verified state on the
-live host is:
+`main` is the single integration line. It now contains everything the three
+copies of this engine had separately — GitHub's line through `1afc6c7`, the
+codypc live host's v3/retention wave, and the local Ticket 1 step 4–6 work —
+reconciled without overwriting any side (see
+[`docs/updates-2026-11-28.md`](docs/updates-2026-11-28.md)). Verified
+2026-11-28 in a clean venv built from `requirements-dev.txt`:
 
-- **Full suite:** 1,200 collected, **1,187 passed, 13 skipped, 0 failed**
+- **Full suite:** 1,445 collected, **1,428 passed, 17 skipped, 0 failed**
   (`python -m pytest tests/ -q`).
-- **Static gate:** ruff lint/format, mypy (190 source files), broken-import,
-  declared-dependency, and lock-sync checks all pass.
-- **Live GUI:** the engine started against `serpent.db` and the Command Center,
-  Health & Diagnostics, Feed Health, and Engine Control views rendered with
-  real data; `tests/test_ui_navigation.py` drives every sidebar view through
+- **Static gate:** ruff lint and format (410 files) and mypy (200 source
+  files) all pass. The remaining gate components (broken-import,
+  declared-dependency, lock-sync, Docker, secret scan) run in CI.
+- **Live GUI (2026-11-17, not re-run for this push):** the engine started
+  against `serpent.db` and the Command Center, Health & Diagnostics, Feed
+  Health, and Engine Control views rendered with real data;
+  `tests/test_ui_navigation.py` drives every sidebar view through
   Streamlit's `AppTest` and asserts no view raises.
-- **Known live-data condition:** the `/health` snapshot was `degraded`, not
-  failed. The existing lake has a historical lake-vs-SQL parity mismatch
-  (4,910 rows across 2,009 assets at a 2026-11-10 decision hour) plus stale
-  and yellow data-quality components. This is a data/backfill condition, not a
-  code or test failure; see **Feed Health** and **Health & Diagnostics**.
+- **Known live-data condition (2026-11-17):** the `/health` snapshot was
+  `degraded`, not failed. The existing lake has a historical lake-vs-SQL
+  parity mismatch (4,910 rows across 2,009 assets at a 2026-11-10 decision
+  hour) plus stale and yellow data-quality components. This is a
+  data/backfill condition, not a code or test failure; see **Feed Health**
+  and **Health & Diagnostics**.
+- **Live host:** codypc still runs its pre-merge tree; pulling this `main`
+  there (stop service → pull → migrate to 0043 → restart) is a separate
+  deliberate step and has not been done yet.
 
 Provider missing-key, rejected-key, and cooldown behavior is documented in
 [`docs/runbook.md`](docs/runbook.md#provider-credential-and-cooldown-health).
+
+## Since 2026-11-17 — the advanced line (2026-11-28)
+
+`main` now also contains, in full: the Nov 21 CI repairs (migration 0039
+Postgres boolean literal, mypy clean, Alembic version-width and 0041
+portable-index fixes); **Ticket 1 steps 1–6** (GREEN-collapse audit,
+staleness guard, `drawdown_from_24h_peak` + tiered rule, forecast inference
+with the ML band floor, evidence-density label censoring, and GREEN outcome
+recording); **EVM first-buys** (per-chain budget/round-robin, Uniswap Swap-log
+RPC fallback, catch-up pass); outcome **label censoring** (survival requires
+forward price evidence); migrations **0038–0043**; the **v3_bounded relabel**
+as the calibration reference set; **features retention** (`ops/features_retention.py`
++ systemd timer); and the forward-validation scripts (rank-sum, pair-age).
+Ticket 1 itself remains open — `scores_validated` is still `false`; these are
+the repairs aimed at the false-GREEN mechanisms, not a proven live edge.
+Full detail, provenance, and exclusions: [`docs/updates-2026-11-28.md`](docs/updates-2026-11-28.md).
 
 This is research software, not a wallet, custody system, or guaranteed-profit
 bot — it never holds keys or funds, and it makes no profit claims. Trading code

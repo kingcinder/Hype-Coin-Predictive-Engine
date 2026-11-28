@@ -11,6 +11,46 @@ or `STATE.md` existed before 2026-09-09.
   `[report]` = sourced from `docs/validation-field-report.md` (file read; numbers quoted match);
   `[briefing]` = not yet independently checked.
 
+## THREE-SOURCE RECONCILIATION — 2026-11-28
+
+- **Reconciled into `main`:** GitHub tip `1afc6c7` (Nov 21 CI repairs +
+  Ticket 1 steps 1–3) + the codypc live host's uncommitted **v3 relabel /
+  features-retention wave** (recovered from
+  `/media/cody/Data/DOCUMENTS_PROJECT_FILES/Hype-Coin-Predictive-Engine-main`,
+  tip `569c75e` + working tree; sha256-verified transfer; `serpent.db.*`
+  artifacts excluded) + the local tree's uncommitted **Ticket 1 step 4**.
+  The local tree's four committed CI-fix commits were patch-identical to
+  remote and were dropped, not duplicated. Full account:
+  `docs/updates-2026-11-28.md` `[verified 2026-11-28]`.
+- **Ticket 1 steps 4–6 landed:** step 4 (M2) forecast inference cycle +
+  ML band floor; step 5 (M3) evidence-density label censoring
+  (`forward_evidence_sufficient`: ≥⌈window/6h⌉ snapshots incl. one in the
+  final quartile, else `collapse=0` is censored; `collapse=1` never gated);
+  step 6 (M5) GREEN scores now record `risk_outcomes`. Step 5/6 tests
+  existed before their implementations; both now pass (12 tests), with two
+  reconciliations in `risk_engine/outcomes.py` (no-snapshot rows are
+  recorded rather than freshness-skipped; re-recording a still-unevaluated
+  outcome corrects its band instead of being dropped).
+- **v3 wave:** `relabel_outcomes_v3.py` / `v3_bounded` is the calibration
+  reference set; forward-validation scripts (rank-sum, pair-age);
+  features retention (`ops/features_retention.py`, migration **0043**,
+  systemd service+timer, `tests/test_features_retention.py`).
+- **Migrations now run to 0043.** 0038–0042 (trading timestamps, feature
+  evidence-time, ledger native price, `/data/confidence` covering index,
+  `scores.ensemble_weights`) were already on `main` but undocumented in
+  prose until this entry and `docs/updates-2026-11-28.md`.
+- **Ticket 1 remains OPEN:** `scores_validated` is still `false`; steps 1–6
+  remove false-GREEN mechanisms, they do not by themselves prove a live
+  edge. Rank-sum forward validation on fresh data is the next gate.
+- **Live host NOT yet updated:** codypc still runs its pre-merge tree;
+  updating it (stop service → pull → migrate 0043 → restart) is a separate
+  deliberate step, not part of this push.
+- **Verification `[verified 2026-11-28]`:** full suite on the merged tree
+  **1,428 passed / 17 skipped / 0 failed** (1,445 collected); ruff lint +
+  format clean (410 files — the codypc wave's 38 lint errors were fixed
+  mechanically, no behavior change, affected suites re-run green); mypy
+  clean (200 source files).
+
 ## BRANCH RECONCILIATION + FINAL VERIFICATION — 2026-11-17
 
 - **Reconciled into `main`:** the reviewed `fix/review-v3` branch (`3665e0f`,
