@@ -257,3 +257,109 @@ def entry_validation_status(reports_dir: Path | None = None) -> dict[str, Any]:
             f"all required entry metrics clear their baselines ({report_path.name})"
         ),
     }
+
+
+# Exit-mission gate (Task 8, spec §6): the exit-side mirror of
+# _REQUIRED_CELLS. Every required cell sits on the single exit_policy
+# output and every one must *beat* the fixed-ladder baseline outright —
+# the captured-fraction cell must strict-beat the ladder, and BOTH the
+# median and the p25 captured-fraction cells must strict-beat theirs.
+# A mean-only (or median-only) win does not open the gate: a policy
+# that helps typical trades and hurts bad ones fails where the money
+# is lost.
+_EXIT_REQUIRED_CELLS: tuple[tuple[str, str, str], ...] = (
+    ("exit_policy", "captured_fraction", "exit captured fraction vs ladder"),
+    ("exit_policy", "median_captured_fraction", "exit median captured fraction vs ladder"),
+    ("exit_policy", "p25_captured_fraction", "exit p25 captured fraction vs ladder"),
+)
+
+_EXIT_STRICT_BEAT_OUTPUTS: frozenset[str] = frozenset({"exit_policy"})
+
+
+def exit_validation_status(reports_dir: Path | None = None) -> dict[str, Any]:
+    """Return ``exit_validated`` plus a reason taken from the newest report.
+
+    Structural copy of :func:`entry_validation_status` over the exit
+    cells: the flag is ``True`` only when every required captured-
+    fraction cell has enough samples and beats its fixed-ladder
+    baseline outright — mean, median, AND p25. Until Task 9 wires real
+    exit rows into the harness, reports carry no passing exit cells
+    and the gate honestly reads ``False``.
+    """
+    directory = REPORTS_DIR if reports_dir is None else Path(reports_dir)
+    reports = sorted(directory.glob("validation-*.json"))
+    if not reports:
+        return {
+            "exit_validated": False,
+            "exit_validation_report": None,
+            "exit_validation_reason": "no validation report has been generated",
+        }
+
+    # The report's own timestamp, not the filename (see scores gate).
+    loaded: list[tuple[str, Path, dict[str, Any]]] = []
+    unreadable: list[str] = []
+    for path in reports:
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            unreadable.append(path.name)
+            continue
+        if isinstance(report, dict):
+            loaded.append((str(report.get("generated_at_utc") or ""), path, report))
+    if not loaded:
+        name = reports[-1].name
+        return {
+            "exit_validated": False,
+            "exit_validation_report": name,
+            "exit_validation_reason": f"latest validation report is unreadable ({name})",
+        }
+    _, report_path, report = max(loaded, key=lambda item: item[0])
+
+    raw_cells = report.get("cells")
+    cells = (
+        [cell for cell in raw_cells if isinstance(cell, dict)]
+        if isinstance(raw_cells, list)
+        else []
+    )
+    problems: list[str] = []
+    for output, metric, label in _EXIT_REQUIRED_CELLS:
+        cell = _find_cell(cells, output, metric)
+        if cell is None:
+            problems.append(f"{label}: missing")
+            continue
+        verdict = str(cell.get("verdict") or "unknown")
+        if verdict in {"worse_than_baseline", "insufficient_data", "unknown"}:
+            problems.append(
+                f"{label} {_fmt(cell.get('value'))} "
+                f"vs {_fmt(cell.get('baseline_value'))} ({verdict})"
+            )
+        elif output in _EXIT_STRICT_BEAT_OUTPUTS and verdict not in {
+            "beats_baseline",
+            "better_than_baseline",
+        }:
+            problems.append(
+                f"{label} {_fmt(cell.get('value'))} "
+                f"vs {_fmt(cell.get('baseline_value'))} ({verdict})"
+            )
+
+    if problems:
+        resolved = _find_cell(cells, "exit_policy", "captured_fraction")
+        n = resolved.get("n") if resolved else "unknown"
+        reason = (
+            f"exit policy is not validated ({report_path.name}): "
+            + "; ".join(problems)
+            + f"; n={n} eval exit rows"
+        )
+        return {
+            "exit_validated": False,
+            "exit_validation_report": report_path.name,
+            "exit_validation_reason": reason,
+        }
+
+    return {
+        "exit_validated": True,
+        "exit_validation_report": report_path.name,
+        "exit_validation_reason": (
+            f"all required exit metrics beat their ladder baselines ({report_path.name})"
+        ),
+    }

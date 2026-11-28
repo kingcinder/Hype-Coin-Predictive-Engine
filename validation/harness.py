@@ -128,6 +128,29 @@ class EntryRow:
     phase_at_score: str | None  # live-stratum membership via LIVE_PHASES
 
 
+@dataclass
+class ExitRow:
+    """One held episode with its realized exit outcomes, in gain terms.
+
+    All gains are proceeds-relative (spec §4): ``pev_gain_pct`` is
+    Task 7's 10%-reference executable peak gain
+    (``executable_peak_gain_s10``) — what selling at the executable
+    peak would have kept — and ``clairvoyant_gain_pct`` is the raw
+    price-peak gain, the unexecutable upper bound. ``policy_gain_pct``
+    is the exit policy under test, net of costs; ``ladder_gain_pct``
+    and ``horizon_gain_pct`` are the fixed-ladder and fixed-horizon
+    benchmarks, also net.
+    """
+
+    asset_id: int
+    decision_ts: datetime
+    pev_gain_pct: float  # executable peak gain (10% reference)
+    clairvoyant_gain_pct: float  # raw price-peak gain (unexecutable bound)
+    policy_gain_pct: float  # net of costs, the policy under test
+    ladder_gain_pct: float  # fixed-ladder benchmark, net
+    horizon_gain_pct: float  # sell-all at entry + forward window, net
+
+
 @overload
 def _as_utc(ts: None) -> None: ...
 
@@ -530,6 +553,181 @@ def evaluate_entry(rows: list[EntryRow], *, regime: str, min_samples: int = 30) 
     )
     cells.append(
         _median_hours_to_peak_cell(rows, live_rows, regime=regime, min_samples=min_samples)
+    )
+    return cells
+
+
+def captured_fraction(realized_gain_pct: float, pev_gain_pct: float) -> float:
+    """realized / pev; pev <= 0 -> 0.0 when realized <= 0 else 1.0 (no
+    executable upside existed; keeping anything is full capture)."""
+    if pev_gain_pct <= 0:
+        return 0.0 if realized_gain_pct <= 0 else 1.0
+    return realized_gain_pct / pev_gain_pct
+
+
+def regret_decomposition(row: ExitRow) -> dict[str, float]:
+    """Additive split of the total regret (clairvoyant - policy, net).
+
+    ``executability_gap`` is the part no policy could have kept (the
+    clairvoyant price peak overstates what was extractable);
+    ``exit_timing_regret`` is PEV minus the policy's net gain;
+    ``cost_drag`` is the residual. ``policy_gain_pct`` is net and
+    ExitRow carries no gross policy series, so the residual is 0.0 by
+    construction today: timing regret absorbs the full PEV-to-net gap
+    until a gross series exists to separate costs from timing. The
+    three components always sum to the total regret.
+    """
+    executability_gap = row.clairvoyant_gain_pct - row.pev_gain_pct
+    exit_timing_regret = row.pev_gain_pct - row.policy_gain_pct
+    total_regret = row.clairvoyant_gain_pct - row.policy_gain_pct
+    return {
+        "executability_gap": executability_gap,
+        "exit_timing_regret": exit_timing_regret,
+        "cost_drag": total_regret - executability_gap - exit_timing_regret,
+    }
+
+
+def evaluate_exit(rows: list[ExitRow], *, regime: str, min_samples: int = 30) -> list[MetricCell]:
+    """Exit-mission cells (spec §4/§6) over held-out episodes.
+
+    Every captured-fraction cell reads the policy against PEV with the
+    fixed ladder's same-statistic captured fraction as the baseline —
+    mean, median, and p25 (the gate reads median and p25: a policy
+    that helps typical trades and hurts bad ones fails where the money
+    is lost). ``mean_total_regret`` is lower-is-better against the
+    ladder's mean total regret; ``horizon_captured_fraction`` is the
+    fixed-horizon benchmark on the same construction, informational.
+    """
+    output = "exit_policy"
+    metrics = (
+        "captured_fraction",
+        "median_captured_fraction",
+        "p25_captured_fraction",
+        "mean_total_regret",
+        "horizon_captured_fraction",
+    )
+    n = len(rows)
+    if n < min_samples or n == 0:
+        return [
+            _insufficient_cell(output, metric, regime, n, note="insufficient samples")
+            for metric in metrics
+        ]
+
+    policy_cf = np.array(
+        [captured_fraction(r.policy_gain_pct, r.pev_gain_pct) for r in rows], dtype=float
+    )
+    ladder_cf = np.array(
+        [captured_fraction(r.ladder_gain_pct, r.pev_gain_pct) for r in rows], dtype=float
+    )
+    horizon_cf = np.array(
+        [captured_fraction(r.horizon_gain_pct, r.pev_gain_pct) for r in rows], dtype=float
+    )
+    policy_regret = np.array(
+        [r.clairvoyant_gain_pct - r.policy_gain_pct for r in rows], dtype=float
+    )
+    ladder_regret = np.array(
+        [r.clairvoyant_gain_pct - r.ladder_gain_pct for r in rows], dtype=float
+    )
+
+    def cf_cell(
+        metric: str,
+        stat: Any,
+        value_arr: np.ndarray,
+        baseline_arr: np.ndarray,
+        note: str,
+    ) -> MetricCell:
+        value = float(stat(value_arr))
+        baseline = float(stat(baseline_arr))
+        ci = _bootstrap_ci(value_arr, baseline_arr, lambda v, _b: float(stat(v)))
+        base_ci = _bootstrap_ci(value_arr, baseline_arr, lambda _v, b: float(stat(b)))
+        return MetricCell(
+            output=output,
+            metric=metric,
+            regime=regime,
+            n=n,
+            value=value,
+            ci_low=ci[0],
+            ci_high=ci[1],
+            baseline_value=baseline,
+            baseline_ci_low=base_ci[0],
+            baseline_ci_high=base_ci[1],
+            verdict=verdict(
+                value,
+                WilsonCI(*ci),
+                baseline,
+                WilsonCI(*base_ci),
+                higher_is_better=True,
+                n=n,
+                min_samples=min_samples,
+            ),
+            note=note,
+        )
+
+    cells = [
+        cf_cell(
+            "captured_fraction",
+            np.mean,
+            policy_cf,
+            ladder_cf,
+            "mean captured fraction of the policy vs PEV; baseline is the "
+            "fixed ladder's mean captured fraction",
+        ),
+        cf_cell(
+            "median_captured_fraction",
+            np.median,
+            policy_cf,
+            ladder_cf,
+            "median captured fraction of the policy vs PEV; baseline is the "
+            "fixed ladder's median (gate cell, spec §6)",
+        ),
+        cf_cell(
+            "p25_captured_fraction",
+            lambda a: float(np.percentile(a, 25)),
+            policy_cf,
+            ladder_cf,
+            "25th-percentile captured fraction of the policy vs PEV; "
+            "baseline is the fixed ladder's p25 (gate cell, spec §6)",
+        ),
+    ]
+
+    regret_value = float(np.mean(policy_regret))
+    regret_baseline = float(np.mean(ladder_regret))
+    regret_ci = _bootstrap_ci(policy_regret, ladder_regret, lambda v, _b: float(np.mean(v)))
+    regret_base_ci = _bootstrap_ci(policy_regret, ladder_regret, lambda _v, b: float(np.mean(b)))
+    cells.append(
+        MetricCell(
+            output=output,
+            metric="mean_total_regret",
+            regime=regime,
+            n=n,
+            value=regret_value,
+            ci_low=regret_ci[0],
+            ci_high=regret_ci[1],
+            baseline_value=regret_baseline,
+            baseline_ci_low=regret_base_ci[0],
+            baseline_ci_high=regret_base_ci[1],
+            verdict=verdict(
+                regret_value,
+                WilsonCI(*regret_ci),
+                regret_baseline,
+                WilsonCI(*regret_base_ci),
+                higher_is_better=False,
+                n=n,
+                min_samples=min_samples,
+            ),
+            note="mean clairvoyant-minus-policy gain (net); baseline is the "
+            "ladder's mean total regret — see regret_decomposition for the "
+            "executability / timing / cost split",
+        )
+    )
+    cells.append(
+        cf_cell(
+            "horizon_captured_fraction",
+            np.mean,
+            horizon_cf,
+            ladder_cf,
+            "mean captured fraction of the fixed-horizon sell vs PEV (benchmark, informational)",
+        )
     )
     return cells
 
@@ -1101,6 +1299,19 @@ def load_entry_rows(session: Session) -> list[EntryRow]:
             )
         )
     return rows
+
+
+def load_exit_rows(session: Session) -> list[ExitRow]:
+    """Exit-mission rows — stub until Task 9.
+
+    Real rows need the Task 9 exit policy replayed over held episodes
+    (policy / ladder / horizon gains against Task 7's executable
+    peaks). Until that policy exists there are no honest rows to load,
+    so this returns ``[]``: the exit evaluator reports
+    ``insufficient_data`` and ``exit_validated`` reads False.
+    """
+    del session  # No reads until the Task 9 loader lands.
+    return []
 
 
 def load_forecast_outcomes(session: Session) -> dict[tuple[int, datetime], tuple[bool, float]]:
